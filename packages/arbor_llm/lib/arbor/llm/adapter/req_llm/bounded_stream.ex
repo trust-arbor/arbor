@@ -24,6 +24,7 @@ defmodule Arbor.LLM.Adapter.ReqLLM.BoundedStream do
          {:ok, context} <- ReqLLM.Context.normalize(messages, opts),
          finch_name = Keyword.get(opts, :finch_name, ReqLLM.Finch),
          {:ok, request} <- provider.attach_stream(model, context, opts, finch_name),
+         context = post_request_context(context),
          request <- maybe_apply_anonymous_auth(request, anonymous?),
          {:ok, limits} <- build_limits(opts, limits_opts) do
       sensitivity =
@@ -70,6 +71,20 @@ defmodule Arbor.LLM.Adapter.ReqLLM.BoundedStream do
 
   defp maybe_apply_anonymous_auth(request, _anonymous?), do: request
 
+  # The provider has consumed the original tool definitions. Only the owned
+  # executable callback slot is omitted from the post-request JSON projection.
+  defp post_request_context(%ReqLLM.Context{tools: tools} = context) when is_list(tools) do
+    %{context | tools: Enum.map(tools, &post_request_tool/1)}
+  end
+
+  defp post_request_context(context), do: context
+
+  defp post_request_tool(%ReqLLM.Tool{callback: callback} = tool)
+       when is_function(callback, 1),
+       do: %{tool | callback: nil}
+
+  defp post_request_tool(tool), do: tool
+
   @spec process(t(), keyword()) :: {:ok, ReqLLM.Response.t()} | {:error, term()}
   def process(%__MODULE__{} = response, callbacks \\ []) do
     # The trackers accumulate across every chunk of the stream, so they get the
@@ -107,7 +122,7 @@ defmodule Arbor.LLM.Adapter.ReqLLM.BoundedStream do
 
       with {:ok, acc} <- result,
            {:ok, fragment_chunks} <- finalize_fragments(acc.fragments, response.limits),
-           chunks = Enum.reverse(acc.chunks) ++ fragment_chunks,
+           chunks = builder_chunks(Enum.reverse(acc.chunks), acc.fragments) ++ fragment_chunks,
            builder = ReqLLM.Provider.ResponseBuilder.for_model(response.model),
            {:ok, built} <-
              builder.build_response(chunks, acc.metadata,
@@ -644,15 +659,10 @@ defmodule Arbor.LLM.Adapter.ReqLLM.BoundedStream do
     {recover_partial_tool_arguments(chunks, event), provider_state}
   end
 
-  # ReqLLM's OpenAI-compatible decoder drops a tool-call delta's `arguments`
-  # when the provider packs `name` and an in-progress fragment into the same
-  # delta. Its clause runs `Jason.decode/1` on the partial, fails, and falls
-  # back to `tool_call(name, %{})` — the fragment is discarded. OpenAI proper
-  # sends `arguments: ""` there, so nothing is lost; a provider that sends
-  # `{\"` loses the object's opening bytes and assembly later fails as
-  # `{:invalid_tool_arguments, {:invalid_json, :malformed}}`. Re-emit the
-  # fragment so finalize_fragments/2 can rebuild the arguments. The recovered
-  # fragment still passes through collect_fragment/3, so it stays bounded.
+  # ReqLLM represents a named, incomplete argument fragment as empty arguments
+  # plus a raw_arguments seed. Collect the fragment here so the assembled JSON
+  # passes our bounds before response construction. builder_chunks/2 removes
+  # only the redundant SDK seed whose bytes this recovery actually collected.
   defp recover_partial_tool_arguments(chunks, %{data: data}) when is_map(data) do
     case dropped_argument_fragments(data, chunks) do
       [] -> chunks
@@ -924,6 +934,34 @@ defmodule Arbor.LLM.Adapter.ReqLLM.BoundedStream do
       {:ok, chunks} -> {:ok, Enum.reverse(chunks)}
       {:error, _reason} = error -> error
     end
+  end
+
+  # Match the locked SDK's failed-JSON shape and the exact recovered prefix.
+  # Other raw seeds retain their existing SDK assembly and fallback behavior.
+  defp builder_chunks(chunks, fragments) do
+    first_parts = Map.new(fragments, fn {index, parts} -> {index, List.last(parts)} end)
+
+    Enum.map(chunks, fn
+      %ReqLLM.StreamChunk{
+        type: :tool_call,
+        arguments: arguments,
+        metadata:
+          %{
+            index: index,
+            raw_arguments: raw,
+            invalid_arguments: true,
+            unparseable_arguments: true
+          } = metadata
+      } = chunk
+      when is_map(arguments) and map_size(arguments) == 0 and
+             is_integer(index) and index >= 0 and is_binary(raw) and byte_size(raw) > 0 ->
+        if Map.get(first_parts, index) === raw,
+          do: %{chunk | metadata: Map.delete(metadata, :raw_arguments)},
+          else: chunk
+
+      chunk ->
+        chunk
+    end)
   end
 
   defp merge_metadata(current, metadata) when is_map(metadata) do

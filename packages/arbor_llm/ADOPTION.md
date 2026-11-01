@@ -1,7 +1,8 @@
 # LLM adoption boundary
 
-Arbor Main at `8a4d20ffe3c43da16fd0760b3fd60878b9be10cc` is the mechanism and
-test source of truth. Frozen sibling code is only seam and disposition reference.
+The initial mechanical source baseline is Arbor Main at `8a4d20ffe3c43da16fd0760b3fd60878b9be10cc`.
+Later Main behavior is synchronized in separately recorded stages below.
+Frozen sibling code is only seam and disposition reference.
 The source/test disposition ledger records the physical moves and any bounded
 composition changes separately from the preserved source facts.
 
@@ -167,3 +168,18 @@ diagnostic, all 44 focused tests, and the full 1,032-test suite (one local-provi
 case excluded). The map binds that exact source revision and clean preservation
 and cleanup results. Earlier failed attempts remain failed. Normal hook
 formatting is recorded separately; these results supply no cold release credit.
+
+## Later Main streaming synchronization
+
+Main commit `87457ba2571dd623fbced6dd8968409f247aa80d` is synchronized into the two
+relocated streaming adapter and transport-test owners. The adapter is
+byte-identical to Main; the test file retains its existing package
+TransportContract alias and finite setup. All 17 prior package test blocks
+remain byte-identical, and all eight added Main blocks and their attached
+tags match Main exactly, bringing this file to 25 named source cases. The
+map records those incoming cases separately from the original inventories
+and preserves the prior destination pins and all historical source facts.
+This source-only synchronization carries no new runtime or review credit:
+the earlier package owning result and Main focused result remain bound to
+their own revisions; the combined adoption tip requires fresh qualification
+and Grok review. Earlier cold HOLD records remain unchanged.

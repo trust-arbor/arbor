@@ -156,8 +156,12 @@
         {
           "path": "packages/arbor_llm/lib/arbor/llm/adapter/req_llm/bounded_stream.ex",
           "owner_application": "arbor_llm",
-          "sha256": "da5cdd5e3d7da2a82c3da47fe54eacdf932191351ec2c62762f1aa14c2872635",
-          "bytes": 34462
+          "sha256": "202ca406405fd7c9ff863f02b112e0bfb690508d45cf45597d776f99d0d54b99",
+          "bytes": 35664,
+          "prior_to_main_87457_sync_target": {
+            "sha256": "da5cdd5e3d7da2a82c3da47fe54eacdf932191351ec2c62762f1aa14c2872635",
+            "bytes": 34462
+          }
         }
       ],
       "disposition": "owning_LLM_package_literal_move",
@@ -2277,12 +2281,16 @@
         {
           "path": "packages/arbor_llm/test/arbor/llm/adapter/req_llm_bounded_transport_test.exs",
           "owner_application": "arbor_llm",
-          "sha256": "388a4e9721c34957166afb3de0b0840cc38a0505afb825555ea4293b6ed2b540",
-          "bytes": 25761,
+          "sha256": "f00617de1dcfe52e8ba5328a1419bf6a5536113d991814481c0605ea008ebfe9",
+          "bytes": 40804,
           "prior_stage01_formatting": {
             "before_sha256": "388a4e9721c34957166afb3de0b0840cc38a0505afb825555ea4293b6ed2b540",
             "after_sha256": "388a4e9721c34957166afb3de0b0840cc38a0505afb825555ea4293b6ed2b540",
             "metadata_stripped_ast_equal": true
+          },
+          "prior_to_main_87457_sync_target": {
+            "sha256": "388a4e9721c34957166afb3de0b0840cc38a0505afb825555ea4293b6ed2b540",
+            "bytes": 25761
           }
         }
       ],
@@ -17117,6 +17125,184 @@
       "label": "an absent signal observer leaves typed steering effective without emitting an audit",
       "current_chunk_sha256": "7b7bfbcff8b654f3e20fc756702ea309d17dc94c2585a57950fc4640f4edee30",
       "prior_to_root_quality_format_chunk_sha256": "bc91f2977372033bb0a8c7b4af27a1221af6178f81abf60f8f7c6c277cd96cb3"
+    },
+    {
+      "path": "packages/arbor_llm/test/arbor/llm/adapter/req_llm_bounded_transport_test.exs",
+      "owner_application": "arbor_llm",
+      "label": "security regression: eager streaming counts the initial tool argument prefix once",
+      "current_chunk_sha256": "f8931f3a2c734e2809a67b04e8e36b52c6ea88bd9746d03fa77c87a71e9dd779",
+      "source_commit": "87457ba2571dd623fbced6dd8968409f247aa80d",
+      "source_path": "apps/arbor_llm/test/arbor/llm/adapter/req_llm_bounded_transport_test.exs",
+      "source_git_blob": "7f1aacc39e17aabc95ef536b60d77c6a8eaed8a8",
+      "source_case_ordinal": 18,
+      "source_lines": [
+        560,
+        607
+      ],
+      "source_chunk_sha256": "f8931f3a2c734e2809a67b04e8e36b52c6ea88bd9746d03fa77c87a71e9dd779",
+      "current_lines": [
+        642,
+        689
+      ],
+      "source_and_current_tag_lines": [
+        "  @tag :stream_compatibility_regression"
+      ],
+      "preservation": "Exact test declaration/body block and attached tag lines; static lexical slices, not AST or runtime proof."
+    },
+    {
+      "path": "packages/arbor_llm/test/arbor/llm/adapter/req_llm_bounded_transport_test.exs",
+      "owner_application": "arbor_llm",
+      "label": "security regression: eager streaming accepts text with SDK callback-bearing tools",
+      "current_chunk_sha256": "034e43e9a1c007560389236fbe52ad10f732af24f5b0a547381e219468ef987f",
+      "source_commit": "87457ba2571dd623fbced6dd8968409f247aa80d",
+      "source_path": "apps/arbor_llm/test/arbor/llm/adapter/req_llm_bounded_transport_test.exs",
+      "source_git_blob": "7f1aacc39e17aabc95ef536b60d77c6a8eaed8a8",
+      "source_case_ordinal": 19,
+      "source_lines": [
+        610,
+        659
+      ],
+      "source_chunk_sha256": "034e43e9a1c007560389236fbe52ad10f732af24f5b0a547381e219468ef987f",
+      "current_lines": [
+        692,
+        741
+      ],
+      "source_and_current_tag_lines": [
+        "  @tag :stream_compatibility_regression"
+      ],
+      "preservation": "Exact test declaration/body block and attached tag lines; static lexical slices, not AST or runtime proof."
+    },
+    {
+      "path": "packages/arbor_llm/test/arbor/llm/adapter/req_llm_bounded_transport_test.exs",
+      "owner_application": "arbor_llm",
+      "label": "security regression: eager tool assembly still rejects malformed and incomplete JSON",
+      "current_chunk_sha256": "8c9f5d4f99d048d4da4171555b83feae6b3daf3343ce3a54a0d44f89a1632ce7",
+      "source_commit": "87457ba2571dd623fbced6dd8968409f247aa80d",
+      "source_path": "apps/arbor_llm/test/arbor/llm/adapter/req_llm_bounded_transport_test.exs",
+      "source_git_blob": "7f1aacc39e17aabc95ef536b60d77c6a8eaed8a8",
+      "source_case_ordinal": 20,
+      "source_lines": [
+        661,
+        680
+      ],
+      "source_chunk_sha256": "8c9f5d4f99d048d4da4171555b83feae6b3daf3343ce3a54a0d44f89a1632ce7",
+      "current_lines": [
+        743,
+        762
+      ],
+      "source_and_current_tag_lines": [],
+      "preservation": "Exact test declaration/body block and attached tag lines; static lexical slices, not AST or runtime proof."
+    },
+    {
+      "path": "packages/arbor_llm/test/arbor/llm/adapter/req_llm_bounded_transport_test.exs",
+      "owner_application": "arbor_llm",
+      "label": "security regression: eager tool assembly retains the argument depth ceiling",
+      "current_chunk_sha256": "5486a284a9e7fe4eff9eab471063ecdff1e4496c23e85ac2c957b9941b82dc43",
+      "source_commit": "87457ba2571dd623fbced6dd8968409f247aa80d",
+      "source_path": "apps/arbor_llm/test/arbor/llm/adapter/req_llm_bounded_transport_test.exs",
+      "source_git_blob": "7f1aacc39e17aabc95ef536b60d77c6a8eaed8a8",
+      "source_case_ordinal": 21,
+      "source_lines": [
+        682,
+        704
+      ],
+      "source_chunk_sha256": "5486a284a9e7fe4eff9eab471063ecdff1e4496c23e85ac2c957b9941b82dc43",
+      "current_lines": [
+        764,
+        786
+      ],
+      "source_and_current_tag_lines": [],
+      "preservation": "Exact test declaration/body block and attached tag lines; static lexical slices, not AST or runtime proof."
+    },
+    {
+      "path": "packages/arbor_llm/test/arbor/llm/adapter/req_llm_bounded_transport_test.exs",
+      "owner_application": "arbor_llm",
+      "label": "security regression: SDK tool handling does not admit executable provider metadata",
+      "current_chunk_sha256": "212fb4466b2298d2e8545025a606b8ef76357f13d778f1d69ca2f690589fd8ec",
+      "source_commit": "87457ba2571dd623fbced6dd8968409f247aa80d",
+      "source_path": "apps/arbor_llm/test/arbor/llm/adapter/req_llm_bounded_transport_test.exs",
+      "source_git_blob": "7f1aacc39e17aabc95ef536b60d77c6a8eaed8a8",
+      "source_case_ordinal": 22,
+      "source_lines": [
+        706,
+        720
+      ],
+      "source_chunk_sha256": "212fb4466b2298d2e8545025a606b8ef76357f13d778f1d69ca2f690589fd8ec",
+      "current_lines": [
+        788,
+        802
+      ],
+      "source_and_current_tag_lines": [],
+      "preservation": "Exact test declaration/body block and attached tag lines; static lexical slices, not AST or runtime proof."
+    },
+    {
+      "path": "packages/arbor_llm/test/arbor/llm/adapter/req_llm_bounded_transport_test.exs",
+      "owner_application": "arbor_llm",
+      "label": "security regression: a scalar initial argument is not replaced by a later object",
+      "current_chunk_sha256": "511995b9de9922bcda3f92fe3546c3c1bf90df45f8562b6a4730a4f82bff577b",
+      "source_commit": "87457ba2571dd623fbced6dd8968409f247aa80d",
+      "source_path": "apps/arbor_llm/test/arbor/llm/adapter/req_llm_bounded_transport_test.exs",
+      "source_git_blob": "7f1aacc39e17aabc95ef536b60d77c6a8eaed8a8",
+      "source_case_ordinal": 23,
+      "source_lines": [
+        723,
+        769
+      ],
+      "source_chunk_sha256": "511995b9de9922bcda3f92fe3546c3c1bf90df45f8562b6a4730a4f82bff577b",
+      "current_lines": [
+        805,
+        851
+      ],
+      "source_and_current_tag_lines": [
+        "  @tag :stream_prefix_ownership_regression"
+      ],
+      "preservation": "Exact test declaration/body block and attached tag lines; static lexical slices, not AST or runtime proof."
+    },
+    {
+      "path": "packages/arbor_llm/test/arbor/llm/adapter/req_llm_bounded_transport_test.exs",
+      "owner_application": "arbor_llm",
+      "label": "security regression: recovered prefix ownership remains specific to each tool index",
+      "current_chunk_sha256": "cb1def843c27ea19f332fd6252a2480b7626dd65cb498fcd22cafa70dade04cd",
+      "source_commit": "87457ba2571dd623fbced6dd8968409f247aa80d",
+      "source_path": "apps/arbor_llm/test/arbor/llm/adapter/req_llm_bounded_transport_test.exs",
+      "source_git_blob": "7f1aacc39e17aabc95ef536b60d77c6a8eaed8a8",
+      "source_case_ordinal": 24,
+      "source_lines": [
+        772,
+        812
+      ],
+      "source_chunk_sha256": "cb1def843c27ea19f332fd6252a2480b7626dd65cb498fcd22cafa70dade04cd",
+      "current_lines": [
+        854,
+        894
+      ],
+      "source_and_current_tag_lines": [
+        "  @tag :stream_prefix_ownership_regression"
+      ],
+      "preservation": "Exact test declaration/body block and attached tag lines; static lexical slices, not AST or runtime proof."
+    },
+    {
+      "path": "packages/arbor_llm/test/arbor/llm/adapter/req_llm_bounded_transport_test.exs",
+      "owner_application": "arbor_llm",
+      "label": "security regression: an equal continuation does not own the initial scalar seed",
+      "current_chunk_sha256": "08fcde3b8e56814072fdb2ea83b66cf700da3e10219a93cd3b735815e973bb65",
+      "source_commit": "87457ba2571dd623fbced6dd8968409f247aa80d",
+      "source_path": "apps/arbor_llm/test/arbor/llm/adapter/req_llm_bounded_transport_test.exs",
+      "source_git_blob": "7f1aacc39e17aabc95ef536b60d77c6a8eaed8a8",
+      "source_case_ordinal": 25,
+      "source_lines": [
+        815,
+        853
+      ],
+      "source_chunk_sha256": "08fcde3b8e56814072fdb2ea83b66cf700da3e10219a93cd3b735815e973bb65",
+      "current_lines": [
+        897,
+        935
+      ],
+      "source_and_current_tag_lines": [
+        "  @tag :stream_prefix_ownership_regression"
+      ],
+      "preservation": "Exact test declaration/body block and attached tag lines; static lexical slices, not AST or runtime proof."
     }
   ],
   "new_files_and_cases_outside_historical_map": "separate additions; not credited toward original1009, incoming8 or lower87",
@@ -17875,5 +18061,131 @@
     "historical_failures": "All earlier failed attempts remain failed; actual historical random nonce remains unknown.",
     "cold_credit": false,
     "normal_hook_format_check": "Separate actual normal commit hook evidence; no new standalone formatting or AST proof asserted by this metadata."
-  }
+  },
+  "main_source_synchronization_stages": [
+    {
+      "stage": "Main_87457_streaming_compatibility_and_prefix_ownership_sync",
+      "status": "SOURCE_BOUND_RUNTIME_PENDING",
+      "initial_historical_base_commit": "8a4d20ffe3c43da16fd0760b3fd60878b9be10cc",
+      "prior_adoption_commit": "821c644a434823581402f88ca6d385de877ce1ec",
+      "upstream_commit": "87457ba2571dd623fbced6dd8968409f247aa80d",
+      "upstream_tree": "db7b7e1c4c65e00b522754bbbf766c30043e2eea",
+      "prior_portable_map_sha256": "4d18d8328b78edad9d90f179b190395a6b267740e4e65181629c4907a0424d28",
+      "scope": "Apply current Main behavior to the two relocated LLM owners; no embedded app copy or renamed public module.",
+      "files": [
+        {
+          "path": "packages/arbor_llm/lib/arbor/llm/adapter/req_llm/bounded_stream.ex",
+          "owner_application": "arbor_llm",
+          "prior_target": {
+            "sha256": "da5cdd5e3d7da2a82c3da47fe54eacdf932191351ec2c62762f1aa14c2872635",
+            "bytes": 34462
+          },
+          "upstream_source_path": "apps/arbor_llm/lib/arbor/llm/adapter/req_llm/bounded_stream.ex",
+          "upstream_git_blob": "053aa0f5e80d5b11cfa7c381945383a20d95510f",
+          "upstream_source_sha256": "202ca406405fd7c9ff863f02b112e0bfb690508d45cf45597d776f99d0d54b99",
+          "upstream_source_bytes": 35664,
+          "current_target_sha256": "202ca406405fd7c9ff863f02b112e0bfb690508d45cf45597d776f99d0d54b99",
+          "current_target_bytes": 35664,
+          "byte_identical_to_upstream": true
+        },
+        {
+          "path": "packages/arbor_llm/test/arbor/llm/adapter/req_llm_bounded_transport_test.exs",
+          "owner_application": "arbor_llm",
+          "prior_target": {
+            "sha256": "388a4e9721c34957166afb3de0b0840cc38a0505afb825555ea4293b6ed2b540",
+            "bytes": 25761
+          },
+          "upstream_source_path": "apps/arbor_llm/test/arbor/llm/adapter/req_llm_bounded_transport_test.exs",
+          "upstream_git_blob": "7f1aacc39e17aabc95ef536b60d77c6a8eaed8a8",
+          "upstream_source_sha256": "24f29ac75c057ceb08f009c27990a58254419ed356c850e95f4d666b3a2e620e",
+          "upstream_source_bytes": 38463,
+          "current_target_sha256": "f00617de1dcfe52e8ba5328a1419bf6a5536113d991814481c0605ea008ebfe9",
+          "current_target_bytes": 40804,
+          "byte_identical_to_upstream": false
+        }
+      ],
+      "case_preservation": {
+        "prior_package_named_cases": 17,
+        "upstream_and_current_named_cases": 25,
+        "added_from_Main": 8,
+        "labels_and_order_equal_to_upstream": true,
+        "all_prior17_current_package_test_blocks_byte_identical": true,
+        "all_new8_blocks_and_attached_tags_byte_identical_to_upstream": true,
+        "comparison_method": "From each test declaration through its first same-indent end line; attached immediately preceding @tag lines compared separately.",
+        "prior17_current_chunk_sha256": [
+          {
+            "label": "security regression: Enum.take closes the owned producer and TCP connection synchronously",
+            "chunk_sha256": "2e63a425d8823d45f3e192af2323d0139cc010d86dbdcbc67f60914074e111ed"
+          },
+          {
+            "label": "security regression: aggregate stream bytes close the producer before the full body",
+            "chunk_sha256": "85aee2d683543aa5f4a3bb920756e44ae4a1ff1d361fba5bd4e3d03eac2e55f5"
+          },
+          {
+            "label": "security regression: tiny SSE event floods are work bounded without mailbox residue",
+            "chunk_sha256": "f1edf40cbee446cb714c1f0d47e66916013f58cb8beaa24ec8accb58abea0c25"
+          },
+          {
+            "label": "security regression: tiny transport chunks consume the absolute work budget",
+            "chunk_sha256": "7f93bbaf0b3c9f6d2e6ebd0cf04a41f264c03f6add9df30401370303737bf9da"
+          },
+          {
+            "label": "security regression: malformed media types and encoded streams fail before body buffering",
+            "chunk_sha256": "cd61465562257aa4fc64e8f9337a9c09a337ab46c323ed273409f4f9a0ee7b1a"
+          },
+          {
+            "label": "OpenAI tool-call argument fragments are not rejected as malformed envelope JSON",
+            "chunk_sha256": "3cfbb1db98fc26a0b77439b741cc54b256d7602650590631f83e4fd94765fe58"
+          },
+          {
+            "label": "reassembles OpenAI SSE JSON split across one-byte HTTP chunks including [DONE] and cost trailer",
+            "chunk_sha256": "6602933569ffdbb035bc59e9098c835650dd645b444e661300dc0bbcdb2fa609"
+          },
+          {
+            "label": "security regression: split invalid UTF-8 and partial JSON fail closed",
+            "chunk_sha256": "e4f56d0713e64983079a6dce892bfb2c539a7757a59fdd792fc103c7400e0448"
+          },
+          {
+            "label": "security regression: a huge single chunk and HTTP error body do not escape stream bounds",
+            "chunk_sha256": "8d379147cd669fb5a3b4be53ddee58edaabaa680b109896e331194c8af83015d"
+          },
+          {
+            "label": "security regression: facade abort preserves demand and closes the true socket owner",
+            "chunk_sha256": "6fbfa240bd92c63a16b8f452feb9ba2ad331a7e4c683dc6cc73169e53aa309b5"
+          },
+          {
+            "label": "security regression: absolute facade timeout closes a stalled true socket owner",
+            "chunk_sha256": "ef34ae89d8140d0bda20111ebce1729c66febba66bbaf7c9f7650758ae7ef1c4"
+          },
+          {
+            "label": "security regression: continuous activity cannot reset the absolute stream deadline",
+            "chunk_sha256": "3c14a3a37b264ee1d9153f3682535fb66a0e34481bedb2f53e0304079fb53438"
+          },
+          {
+            "label": "security regression: cloud embedding dispatch consumes the private cap before ReqLLM validation",
+            "chunk_sha256": "4131b0ae6ad0f42237c4856f90a49279957e59ecf08001d5e802fdcdf9a5375c"
+          },
+          {
+            "label": "security regression: local embedding dispatch consumes the private cap before ReqLLM validation",
+            "chunk_sha256": "532c27cd869fecac71ab93030c1af68f18905f7e3fdf13c8e30b6cefdbb808be"
+          },
+          {
+            "label": "security regression: embedding indices must preserve authoritative input order",
+            "chunk_sha256": "95ec81006f5f23d012f9937b7adfd51daa56d6b716b3c14d5834df02922f9557"
+          },
+          {
+            "label": "regression: a tool-call delta packing name with a partial argument fragment still assembles",
+            "chunk_sha256": "646cf0f97b924d8d7b51c20e075fa8bab17c29aada5299f636227f7804c5fb9b"
+          },
+          {
+            "label": "regression: a long stream of realistic chunks is not rejected by the per-event term caps",
+            "chunk_sha256": "e3fdb0aed7fa2f2a682c441571054b1c028362b105c3194b68c23c8e609505ae"
+          }
+        ]
+      },
+      "test_file_difference_from_upstream": "Existing package TransportContract alias and finite per-case setup remain; whole test-file byte equality is not claimed.",
+      "historical_facts": "Original8a4d source/blob/hash/size facts, original1009 cases, incoming8 and lower87, all earlier stage records and receipts remain unchanged.",
+      "qualification_limit": "Source synchronization and exact literal block comparisons only. Prior Main focused55 and prior package owning1032 results remain revision-specific. No new AST/format/compile/test/cold/rollback/M2/Grok or publication credit."
+    }
+  ]
 }
