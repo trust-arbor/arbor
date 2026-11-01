@@ -13377,9 +13377,9 @@
       "source_session": "claude:8fcb5af6-4cb4-4a2e-86d4-057cfa3626c2",
       "source_incident": "found 2026-08-17 during E0B2C `--write`).",
       "scope": [],
-      "last_confirmed": "2026-10-16",
-      "confirmed_by": "audit-2026-10-16",
-      "content_sha256": "7490fc0ec31983393d3c8fd60867ac7c5d9026b86627a1d3f477003d986c714f",
+      "last_confirmed": "2026-11-01",
+      "confirmed_by": "codex",
+      "content_sha256": "f64d1d7e0cb55e4084fe8371011d21b9c504e7f8dbd5634fbc276333948dce60",
       "always_loaded": false
     },
     {

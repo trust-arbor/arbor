@@ -33,6 +33,12 @@ modules keep the compile file in Line/LitT. Replace those prefixes
 with same-length canonical tokens before release inventory so two
 isolated leases compare equal (found 2026-08-17 during E0B2C `--write`).
 
+Default stripping also removes compile info (`CInf`), so
+`module_info(:compile)` can be empty. Verify source paths in the normal build;
+bind expected default-stripped BEAM hashes before release assembly, then verify
+release ownership, paths and hashes without requiring stripped metadata or
+disabling stripping (confirmed 2026-11-01).
+
 <!-- applied-learning: a-hex-lock-does-not-attest-compile-time-native-downloads -->
 <a id="applied-learning-a-hex-lock-does-not-attest-compile-time-native-downloads"></a>
 **A Hex lock does not attest compile-time native downloads.** A locked Hex package

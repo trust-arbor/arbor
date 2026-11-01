@@ -116,13 +116,23 @@ cases, followed by separately preserved 14-LLM/79-Trust and scoped-Home-guard
 24-LLM snapshots. The current copier source admits only three authenticated,
 source-published OTP app specifications for Ranch, Cowlib and Cowboy; its 31
 public dependencies select 1035 source/data inputs by the recorded source map
-and three-spec addition. All 34 stdlib cases passed, retaining the prior 24
+and three-spec addition. At that metadata stage, all 34 stdlib cases passed, retaining the prior 24
 literal methods and adding 10 metadata controls. The scoped Home guard stays
 unchanged, and the byte-identical Trust helper retains its prior 79-case receipt
 without a rerun. The retained cold02 copier failure remains a HOLD. These tooling
 records do not qualify a cold VM. The map is a static source/disposition ledger,
 excluded from the Hex payload. Run-specific
 qualification receipts establish owning behavior and distribution results.
+
+A later qualifier-only correction accounts for the normal default release-strip
+projection: stripped BEAMs omit CInf/source, while precomputed strip hashes
+bind the actual source-hidden release artifacts. Stripping defaults and
+production code remain unchanged. Its 43-case unit receipt comprises 34 synthetic
+methods plus 9 isolated real-VM integration methods, separate from the
+preserved Source34 and three
+published-app-specification proofs. The previous cold attempt retains its
+18 passed stages and final HOLD; this correction supplies no fresh cold
+or M2 completion credit.
 
 A later readability pass adds scoped aliases and replaces one single-clause
 fixture `with` with an equivalent `case`. Source records preserve the previous

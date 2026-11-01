@@ -2,23 +2,26 @@
 
 The actual reviewed helper is imported, but only its source_files function is
 called on TemporaryDirectory fixtures. Parser cases stop main before input
-access and then exercise the actual constructed parser. No Main/operator/
-toolchain/VM calls.
+access and then exercise the actual constructed parser. No Main/operator/toolchain/VM calls occur in these 34 synthetic methods.
+The separately configured stripped-release integration class compiles only tiny
+owned modules with an explicit pinned toolchain; it never loads project apps.
 """
 from contextlib import redirect_stderr
 import hashlib
 import importlib.util
 import io
+import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[4]
-SCRIPT = ROOT / 'packages/arbor_llm/scripts/qualify_standalone.py'
+SCRIPT = Path(os.environ.get('LLM_COLD_TEST_SUBJECT', str(ROOT / 'packages/arbor_llm/scripts/qualify_standalone.py'))).resolve(strict=True)
 HELPER = ROOT / 'packages/arbor_trust/scripts/cold_support.py'
 
 
@@ -518,6 +521,184 @@ class PublishedOTPMetadataTests(unittest.TestCase):
         path.symlink_to(retained)
         with self.assertRaises((OSError, RuntimeError)):
             Q.check_private_inputs(work, records, H)
+
+
+@unittest.skipUnless(os.environ.get("LLM_COLD_INTEGRATION_CONFIG"),
+                     "explicit isolated raw-toolchain configuration required")
+class ColdStrippedReleaseIntegrationTests(unittest.TestCase):
+    """Real standard-stripped BEAMs; no project build, native code or provider."""
+
+    def setUp(self):
+        self.config = json.loads(Path(os.environ["LLM_COLD_INTEGRATION_CONFIG"]).read_text())
+        self.elixir_root = Path(self.config["elixir_root"])
+        self.erl = Path(self.config["erl"])
+        work_root = Path(self.config["work_root"])
+        self.assertTrue(self.elixir_root.is_absolute() and self.erl.is_absolute() and work_root.is_absolute())
+        self.environment = dict(self.config["environment"])
+        self.assertEqual(self.environment["HOME"], os.environ["HOME"])
+        self.assertNotEqual(self.environment["ERL_EPMD_PORT"], "4369")
+        self.assertEqual(self.environment["ERL_FLAGS"].count("-setcookie"), 1)
+        self.assertFalse(any(key in self.environment for key in
+                             ("ELIXIR_ERL_OPTIONS", "ERL_AFLAGS", "ERL_ZFLAGS", "ERL_LIBS", "MIX_PATH")))
+        self.temp = tempfile.TemporaryDirectory(prefix="strip-beam-", dir=work_root)
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+        self.counter = 0
+        versions = {app: spec[0] for app, spec in Q.PACKAGES.items()}
+        (self.root / "versions.json").write_text(json.dumps(versions))
+        self.tool_sha = hashlib.sha256((self.elixir_root / "lib/mix/ebin/Elixir.Mix.Release.beam").read_bytes()).hexdigest()
+        self.environment.update(STRIP_TEST_ROOT=str(self.root),
+                                MIX_BUILD_PATH=str(self.root / "normal-build"),
+                                LLM_COLD_STRIP_TOOL_SHA256=self.tool_sha,
+                                LLM_COLD_RELEASE_ROOT=str(self.root / "release"))
+        for app in Q.PACKAGES:
+            self.environment["ARBOR_" + app.removeprefix("arbor_").upper() + "_PATH"] = str(self.root / "unpacked" / app)
+        built = self.vm(r"""
+Mix.start()
+root = System.fetch_env!("STRIP_TEST_ROOT")
+versions = File.read!(Path.join(root, "versions.json")) |> :json.decode()
+origins = Map.new(versions, fn {name, version} ->
+  app = String.to_atom(name)
+  module = Module.concat([ColdStripFixture, Macro.camelize(name)])
+  source = Path.join([root, "unpacked", name, "lib", "fixture.ex"])
+  File.mkdir_p!(Path.dirname(source))
+  File.write!(source, "defmodule #{inspect(module)} do\n  def value, do: :ok\nend\n", [:exclusive])
+  [{^module, beam}] = Code.compile_file(source)
+  true = Keyword.has_key?(module.module_info(:compile), :source)
+  {:ok, stripped} = Mix.Release.strip_beam(beam)
+  normal = Path.join([root, "normal-build", "lib", name, "ebin"])
+  release = Path.join([root, "release", "lib", name <> "-" <> version, "ebin"])
+  properties = [vsn: String.to_charlist(version), modules: [module], applications: [:kernel, :stdlib, :elixir]]
+  Enum.each([normal, release], fn ebin ->
+    File.mkdir_p!(ebin)
+    File.write!(Path.join(ebin, name <> ".app"), :io_lib.format(~c"~tp.~n", [{:application, app, properties}]), [:exclusive])
+  end)
+  filename = Atom.to_string(module) <> ".beam"
+  normal_beam = Path.join(normal, filename)
+  File.write!(normal_beam, beam, [:exclusive])
+  File.write!(Path.join(release, filename), stripped, [:exclusive])
+  {name, %{Atom.to_string(module) => %{beam: normal_beam, source: source,
+    beam_sha256: Base.encode16(:crypto.hash(:sha256, beam), case: :lower),
+    default_strip_sha256: Base.encode16(:crypto.hash(:sha256, stripped), case: :lower)}}}
+end)
+File.write!(Path.join(root, "normal-origins.json"), :json.encode(origins), [:exclusive])
+""")
+        self.assertEqual(built.returncode, 0, built.stderr)
+        self.origins = json.loads((self.root / "normal-origins.json").read_text())
+
+    def vm(self, body):
+        self.counter += 1
+        script = self.root / ("probe-" + str(self.counter) + ".exs")
+        script.write_text(body + "\nSystem.halt(0)\n")
+        paths = [self.elixir_root / "lib" / name / "ebin" for name in ("elixir", "mix", "logger", "eex", "iex")]
+        command = [str(self.erl), "-pa", *map(str, paths), "-noshell", "-s", "elixir", "start_cli", "-extra", str(script)]
+        # Inherit the outer runner's owned process group; never create an
+        # unregistered session that its timeout/interrupt cleanup cannot reap.
+        return subprocess.run(command, cwd=self.root, env=self.environment,
+                              stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+
+    def catalog(self):
+        # This exact legacy boundary exists in the original 8d qualifier too.
+        # The positive predecessor run therefore reaches its actual :source
+        # KeyError on a real stripped BEAM, rather than failing on a new API.
+        tail = Q.PROBE_COMMON.split("module_origins = Map.new", 1)[1].split(
+            "# Exercise the freshly embedded native reader", 1)[0]
+        return "module_origins = Map.new" + tail
+
+    def catalog_run(self, mode="stripped", suffix=""):
+        prefix = r"""
+root = System.fetch_env!("STRIP_TEST_ROOT")
+expected_apps = ~w(arbor_kernel arbor_llm arbor_oauth arbor_signals arbor_support)a
+versions = File.read!(Path.join(root, "versions.json")) |> :json.decode()
+app_specs = Enum.map(expected_apps, fn app ->
+  name = Atom.to_string(app)
+  base = if System.fetch_env!("STRIP_TEST_MODE") == "stripped",
+    do: Path.join([root, "release", "lib", name <> "-" <> versions[name], "ebin"]),
+    else: Path.join([root, "normal-build", "lib", name, "ebin"])
+  true = :code.add_patha(String.to_charlist(base))
+  {:ok, [{:application, ^app, properties}]} = :file.consult(String.to_charlist(Path.join(base, name <> ".app")))
+  :ok = Application.load(app)
+  Enum.each(Keyword.fetch!(properties, :modules), fn module ->
+    {:module, ^module} = Code.ensure_loaded(module)
+    if System.fetch_env!("STRIP_TEST_MODE") == "stripped", do: [] = module.module_info(:compile)
+  end)
+  {app, properties}
+end)
+"""
+        self.environment["STRIP_TEST_MODE"] = mode
+        return self.vm(prefix + self.catalog() + suffix)
+
+    def normal_admission(self):
+        # Execute the actual normal source/root/default-strip admission block.
+        return Q.NORMAL_PROBE[len(Q.PROBE_COMMON):].split("\nallowed =", 1)[0]
+
+    def attestation(self):
+        return Q.release_beam_attestation(self.root / "release", self.origins, self.tool_sha)
+
+    def hidden_run(self, value, digest=None):
+        path = self.root / "attestation.json"
+        path.write_text(json.dumps(value, sort_keys=True))
+        self.environment.update(LLM_COLD_RELEASE_ATTESTATION=str(path),
+                                LLM_COLD_RELEASE_ATTESTATION_SHA256=digest or hashlib.sha256(path.read_bytes()).hexdigest())
+        return self.catalog_run(suffix=Q.RELEASE_ATTESTATION_PROBE)
+
+    def test_real_default_stripped_beams_pass_actual_catalog_and_attestation(self):
+        # This first call is intentionally executable against the old subject.
+        result = self.catalog_run()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result = self.hidden_run(self.attestation())
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_normal_actual_sources_attest_public_default_strip(self):
+        result = self.catalog_run("normal", self.normal_admission())
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_normal_source_admission_rejects_stripped_compile_info(self):
+        result = self.catalog_run(suffix=self.normal_admission())
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("MatchError", result.stderr)
+
+    def test_release_attestation_rejects_wrong_beam_hash(self):
+        module = next(iter(self.origins["arbor_llm"]))
+        ebin = self.root / "release/lib" / ("arbor_llm-" + Q.PACKAGES["arbor_llm"][0]) / "ebin"
+        path = ebin / (module + ".beam")
+        path.write_bytes(path.read_bytes() + b"changed")
+        with self.assertRaisesRegex(RuntimeError, "default strip"):
+            self.attestation()
+
+    def test_release_attestation_rejects_wrong_beam_roster(self):
+        ebin = self.root / "release/lib" / ("arbor_llm-" + Q.PACKAGES["arbor_llm"][0]) / "ebin"
+        (ebin / "Elixir.Unowned.beam").write_bytes(b"unowned")
+        with self.assertRaisesRegex(RuntimeError, "BEAM roster"):
+            self.attestation()
+
+    def test_hidden_attestation_rejects_wrong_application_owner(self):
+        value = self.attestation()
+        value["applications"]["arbor_kernel"], value["applications"]["arbor_llm"] = \
+            value["applications"]["arbor_llm"], value["applications"]["arbor_kernel"]
+        result = self.hidden_run(value)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("MatchError", result.stderr)
+
+    def test_hidden_attestation_rejects_wrong_digest(self):
+        result = self.hidden_run(self.attestation(), "0" * 64)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("MatchError", result.stderr)
+
+    def test_hidden_attestation_rejects_wrong_application_roster(self):
+        value = self.attestation()
+        del value["applications"]["arbor_signals"]
+        result = self.hidden_run(value)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("MatchError", result.stderr)
+
+    def test_hidden_attestation_rejects_wrong_module_hash(self):
+        value = self.attestation()
+        module = next(iter(value["applications"]["arbor_llm"]))
+        value["applications"]["arbor_llm"][module]["default_strip_sha256"] = "0" * 64
+        result = self.hidden_run(value)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("MatchError", result.stderr)
 
 
 if __name__ == '__main__':

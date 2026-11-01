@@ -124,8 +124,14 @@ module_origins = Map.new(expected_apps, fn app ->
     {:module, ^module} = Code.ensure_loaded(module)
     ^app = :application.get_application(module) |> then(fn {:ok, value} -> value end)
     beam = :code.which(module) |> List.to_string() |> Path.expand()
-    source = module.module_info(:compile) |> Keyword.fetch!(:source) |> List.to_string() |> Path.expand()
-    {Atom.to_string(module), %{beam: beam, source: source}}
+    # Standard Mix releases remove CInf. Normal source admission below still
+    # requires this field; release admission binds the actual stripped BEAM.
+    source = case Keyword.fetch(module.module_info(:compile), :source) do
+      {:ok, value} -> value |> List.to_string() |> Path.expand()
+      :error -> nil
+    end
+    beam_sha256 = :crypto.hash(:sha256, File.read!(beam)) |> Base.encode16(case: :lower)
+    {Atom.to_string(module), %{beam: beam, source: source, beam_sha256: beam_sha256}}
   end)
   {Atom.to_string(app), sources}
 end)
@@ -143,15 +149,26 @@ NORMAL_PROBE = PROBE_COMMON + r'''
 roots = Map.new(~w(kernel support oauth signals llm), fn suffix ->
   {"arbor_" <> suffix, Path.expand(System.fetch_env!("ARBOR_" <> String.upcase(suffix) <> "_PATH")) <> "/"}
 end)
-Enum.each(module_origins, fn {owner, modules} ->
-  Enum.each(modules, fn {module, origin} ->
+# Bind the public default strip operation in this existing Mix VM. Do not
+# retain compile metadata or change release stripping to accommodate the probe.
+{:module, Mix.Release} = Code.ensure_loaded(Mix.Release)
+strip_tool = :code.which(Mix.Release) |> List.to_string()
+strip_tool_sha256 = :crypto.hash(:sha256, File.read!(strip_tool)) |> Base.encode16(case: :lower)
+true = strip_tool_sha256 == System.fetch_env!("LLM_COLD_STRIP_TOOL_SHA256")
+module_origins = Map.new(module_origins, fn {owner, modules} ->
+  modules = Map.new(modules, fn {module, origin} ->
+    true = is_binary(origin.source)
     true = String.starts_with?(origin.beam, Path.expand(System.fetch_env!("MIX_BUILD_PATH")) <> "/")
     if module == "Elixir.Arbor.Common.SafePath.NativeReaderArtifact" do
       true = String.starts_with?(origin.source, Path.expand(System.fetch_env!("MIX_BUILD_PATH")) <> "/generated/arbor_support/")
     else
       true = String.starts_with?(origin.source, Map.fetch!(roots, owner))
     end
+    {:ok, stripped} = Mix.Release.strip_beam(File.read!(origin.beam))
+    expected = :crypto.hash(:sha256, stripped) |> Base.encode16(case: :lower)
+    {module, Map.put(origin, :default_strip_sha256, expected)}
   end)
+  {owner, modules}
 end)
 allowed = System.fetch_env!("LLM_COLD_ALLOWED_CODE_ROOTS") |> String.split("|")
 true = Enum.all?(:code.get_path(), fn path ->
@@ -167,10 +184,33 @@ metadata = Map.new(~w(arbor_kernel arbor_support arbor_oauth arbor_signals arbor
   }}
 end)
 result = LLMStandaloneConsumer.run!()
-IO.puts("LLM_QUALIFICATION_RESULT=" <> IO.iodata_to_binary(:json.encode(Map.merge(result, %{module_origins: module_origins, archive_metadata: metadata, native_binary_sha256: native_sha}))))
+IO.puts("LLM_QUALIFICATION_RESULT=" <> IO.iodata_to_binary(:json.encode(Map.merge(result, %{module_origins: module_origins, release_strip_tool_sha256: strip_tool_sha256, archive_metadata: metadata, native_binary_sha256: native_sha}))))
 '''
 
-RELEASE_PROBE = PROBE_COMMON + r'''
+RELEASE_ATTESTATION_PROBE = r'''
+attestation_bytes = File.read!(System.fetch_env!("LLM_COLD_RELEASE_ATTESTATION"))
+attestation_sha256 = :crypto.hash(:sha256, attestation_bytes) |> Base.encode16(case: :lower)
+true = attestation_sha256 == System.fetch_env!("LLM_COLD_RELEASE_ATTESTATION_SHA256")
+attestation = :json.decode(attestation_bytes)
+true = Map.keys(attestation) |> Enum.sort() == ["applications", "schema", "strip_tool_sha256"]
+true = attestation["schema"] == "arbor.llm.release-beam-attestation.v1"
+true = attestation["strip_tool_sha256"] == System.fetch_env!("LLM_COLD_STRIP_TOOL_SHA256")
+true = Map.keys(attestation["applications"]) |> Enum.sort() == Enum.map(expected_apps, &Atom.to_string/1)
+release_root = Path.expand(System.fetch_env!("LLM_COLD_RELEASE_ROOT"))
+Enum.each(module_origins, fn {owner, modules} ->
+  records = Map.fetch!(attestation["applications"], owner)
+  true = Enum.sort(Map.keys(modules)) == Enum.sort(Map.keys(records))
+  Enum.each(modules, fn {module, origin} ->
+    record = Map.fetch!(records, module)
+    true = Enum.sort(Map.keys(record)) == ["default_strip_sha256", "pre_strip_sha256", "release_path"]
+    true = is_binary(record["pre_strip_sha256"]) and byte_size(record["pre_strip_sha256"]) == 64
+    true = origin.beam == Path.join(release_root, record["release_path"])
+    true = origin.beam_sha256 == record["default_strip_sha256"]
+  end)
+end)
+'''
+
+RELEASE_PROBE = PROBE_COMMON + RELEASE_ATTESTATION_PROBE + r'''
 root = Path.expand(System.fetch_env!("LLM_COLD_RELEASE_ROOT")) <> "/"
 true = String.starts_with?(Path.expand(List.to_string(:code.root_dir())) <> "/", root)
 true = Enum.all?(:code.get_path(), &(String.starts_with?(Path.expand(List.to_string(&1)) <> "/", root)))
@@ -335,6 +375,13 @@ def tool_pin(path, root=None):
             "sha256": sha(target.read_bytes())}
 
 
+def release_strip_tool(args):
+    path = args.elixir_root / "lib/mix/ebin/Elixir.Mix.Release.beam"
+    require(path.is_file() and not path.is_symlink() and path.resolve(strict=True) == path,
+            "Pinned public Mix.Release tool is missing/linked")
+    return {"path": str(path), "sha256": sha(path.read_bytes())}
+
+
 def native_path(args):
     return os.pathsep.join(dict.fromkeys(map(str, (args.cc.parent, args.make.parent, args.erlang_root / "bin",
                                                   args.elixir_root / "bin", Path("/usr/bin"), Path("/bin"), Path("/usr/sbin"), Path("/sbin")))))
@@ -406,6 +453,50 @@ def validate_metadata(metadata):
         require(actual == requirements, "Public archive dependency requirements differ")
 
 
+def release_beam_attestation(release, module_origins, strip_tool_sha256):
+    """Compare real release files to public default-strip output from normal VM."""
+    require(isinstance(module_origins, dict) and set(module_origins) == set(PACKAGES),
+            "Release attestation application roster differs")
+    require(re.fullmatch(r"[0-9a-f]{64}", strip_tool_sha256) is not None,
+            "Release strip tool digest is invalid")
+    expected_directories = {name + "-" + spec[0] for name, spec in PACKAGES.items()}
+    actual_directories = {path.name for path in (release / "lib").iterdir() if path.name.startswith("arbor_")}
+    require(actual_directories == expected_directories, "Release first-party directory roster differs")
+    applications, all_modules = {}, set()
+    for app, (version, _files, _requirements) in PACKAGES.items():
+        root = release / "lib" / (app + "-" + version) / "ebin"
+        require(root.is_dir() and not root.is_symlink() and root.resolve(strict=True) == root,
+                "Release ebin root missing/linked")
+        require(sorted(path.name for path in root.glob("*.app")) == [app + ".app"],
+                "Release application file roster differs")
+        app_file = root / (app + ".app")
+        require(app_file.is_file() and not app_file.is_symlink() and app_file.stat().st_nlink == 1,
+                "Release application file is unsafe")
+        modules = module_origins[app]
+        require(isinstance(modules, dict) and modules and all(isinstance(name, str) and
+                name not in ("", ".", "..") and Path(name).name == name and "\\" not in name for name in modules),
+                "Release module roster is invalid")
+        require(not (set(modules) & all_modules), "Release module has duplicate application owners")
+        all_modules.update(modules)
+        require({path.name for path in root.glob("*.beam")} == {name + ".beam" for name in modules},
+                "Release BEAM roster differs")
+        records = {}
+        for module, origin in modules.items():
+            path = root / (module + ".beam")
+            require(path.is_file() and not path.is_symlink() and path.stat().st_nlink == 1,
+                    "Release BEAM is unsafe")
+            before, expected = origin.get("beam_sha256"), origin.get("default_strip_sha256")
+            require(isinstance(before, str) and re.fullmatch(r"[0-9a-f]{64}", before) is not None and
+                    isinstance(expected, str) and re.fullmatch(r"[0-9a-f]{64}", expected) is not None,
+                    "Normal pre-strip/default-strip digest is invalid")
+            require(sha(path.read_bytes()) == expected, "Release BEAM differs from public default strip output")
+            records[module] = {"pre_strip_sha256": before, "default_strip_sha256": expected,
+                               "release_path": path.relative_to(release).as_posix()}
+        applications[app] = records
+    return {"schema": "arbor.llm.release-beam-attestation.v1", "strip_tool_sha256": strip_tool_sha256,
+            "applications": applications}
+
+
 def result_from(path):
     prefix = "LLM_QUALIFICATION_RESULT="
     values = [json.loads(line[len(prefix):]) for line in path.read_text().splitlines() if line.startswith(prefix)]
@@ -467,7 +558,8 @@ def main():
     require((args.erlang_root / "releases" / otp.split(".", 1)[0] / "OTP_VERSION").read_text().strip() == otp, "Pinned OTP differs from source version")
     options = {key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items() if key not in ("prepare", "run", "manifest_sha256")}
     inputs = {"options": options, "script_sha256": sha(script.read_bytes()), "guard_sha256": GUARD_SHA256,
-              "tool_pins": pins, "tool_versions_sha256": sha(tool_versions), "native_sdk": sdk_inputs(args), **source,
+              "tool_pins": pins, "tool_versions_sha256": sha(tool_versions), "native_sdk": sdk_inputs(args),
+              "release_strip_tool": release_strip_tool(args), **source,
               "strict_override_plan": {name: sorted(set(spec[2]) & set(PACKAGES)) for name, spec in PACKAGES.items()}}
     original = git_guards(args, helper)
     private_records = {
@@ -530,13 +622,22 @@ def main():
         no_startup_files((args.repository, Path.cwd(), work), home=Path.home())
         require(sha(script.read_bytes()) == inputs["script_sha256"] and sha(args.guard_helper.read_bytes()) == GUARD_SHA256 and
                 sha((work / "tooling/cold_support.py").read_bytes()) == GUARD_SHA256, "Qualification tooling changed")
-        require(source_inputs(args, helper) == (source, lock) and sdk_inputs(args) == inputs["native_sdk"], "Published/dependency/native source changed")
+        require(source_inputs(args, helper) == (source, lock) and sdk_inputs(args) == inputs["native_sdk"] and
+                release_strip_tool(args) == inputs["release_strip_tool"], "Published/dependency/native/strip tool input changed")
         require({name: tool_pin(path, tool_roots.get(name)) for name, path in tools.items()} == pins, "Pinned executable changed")
         require((args.repository / ".tool-versions").read_bytes() == tool_versions, "Source tool pins changed")
         check_private_inputs(work, private_records, helper)
         for relative in projects:
             check_lock(private_input_root(work, relative), lock)
         check_archives(work, state.get("archives", {}), source["published"])
+        if "release_beam_attestation" in state:
+            record = state["release_beam_attestation"]
+            path = work / "release-beam-attestation.json"
+            require(path.is_file() and not path.is_symlink() and sha(path.read_bytes()) == record["sha256"],
+                    "Release BEAM attestation changed")
+            require(json.loads(path.read_text()) == release_beam_attestation(
+                work / "release", state["consumer"]["module_origins"], inputs["release_strip_tool"]["sha256"]),
+                "Release BEAM attestation/files differ")
 
     def save_state():
         save(work / "results.json", state)
@@ -557,7 +658,7 @@ def main():
                "XDG_CONFIG_HOME": str(runtime / "xdg-config"), "XDG_CACHE_HOME": str(runtime / "xdg-cache"),
                "TMPDIR": str(runtime / "tmp"), "ERL_INETRC": str(runtime / "inetrc"), "ERL_EPMD_PORT": str(port), "ERL_EPMD_ADDRESS": "127.0.0.1",
                "ERL_FLAGS": f"+S 4:4 -setcookie {cookie} -kernel inet_dist_use_interface {{127,0,0,1}}",
-               "LLM_COLD_COOKIE_SHA256": sha(cookie.encode()), "LLM_COLD_ELIXIR_VERSION": elixir, "LLM_COLD_OTP_MAJOR": otp.split(".", 1)[0],
+               "LLM_COLD_COOKIE_SHA256": sha(cookie.encode()), "LLM_COLD_STRIP_TOOL_SHA256": inputs["release_strip_tool"]["sha256"], "LLM_COLD_ELIXIR_VERSION": elixir, "LLM_COLD_OTP_MAJOR": otp.split(".", 1)[0],
                "LLM_COLD_STATE_ROOT": str(runtime / "state"), "LLM_COLD_C_SHA256": source["published"]["arbor_support"]["c_src/arbor_safe_path_reader.c"],
                "LLM_COLD_APP_ROOT": str(work / "build/prod/lib"), "LLM_COLD_METADATA_ROOT": str(work / "metadata"), "LLM_COLD_ALLOWED_CODE_ROOTS": "|".join(map(str, (work, args.erlang_root, args.elixir_root))),
                "http_proxy": "http://127.0.0.1:1", "https_proxy": "http://127.0.0.1:1", "HTTP_PROXY": "http://127.0.0.1:1", "HTTPS_PROXY": "http://127.0.0.1:1",
@@ -703,10 +804,18 @@ def main():
         normal_log = command("consumer-run", consumer, env_for("consumer-run"), ["run", "--no-start", "--no-compile", "-e", NORMAL_PROBE])
         normal = result_from(normal_log)
         validate_metadata(normal.get("archive_metadata"))
+        require(normal.get("release_strip_tool_sha256") == inputs["release_strip_tool"]["sha256"],
+                "Normal VM used a different public strip tool")
         state["consumer"] = normal
         release = work / "release"
         command("release-build", consumer, env_for("release-build"), ["release", "llm_standalone_consumer", "--path", str(release)])
         require(len(list(release.glob("erts-*/bin/erl"))) == 1, "Actual ERTS missing/ambiguous in release")
+        attestation = release_beam_attestation(release, normal["module_origins"], inputs["release_strip_tool"]["sha256"])
+        attestation_path = work / "release-beam-attestation.json"
+        save(attestation_path, attestation)
+        state["release_beam_attestation"] = {"path": str(attestation_path), "sha256": sha(attestation_path.read_bytes()),
+                                             "modules": sum(len(value) for value in attestation["applications"].values())}
+        save_state()
         for path in release.glob("releases/*/vm.args"):
             active = "\n".join(line.split("#", 1)[0] for line in path.read_text().splitlines())
             require(not re.search(r"-(?:setcookie|name|sname)\b", active), "Unexpected release identity flags")
@@ -716,7 +825,9 @@ def main():
             (work / name).rename(hidden / name)
         env = env_for("release-run")
         env.update(ERL_FLAGS="+S 4:4 -kernel inet_dist_use_interface {127,0,0,1}", RELEASE_COOKIE=cookie,
-                   RELEASE_DISTRIBUTION="none", RELEASE_TMP=env["TMPDIR"], LLM_COLD_RELEASE_ROOT=str(release), LLM_COLD_APP_ROOT=str(release / "lib"), PATH="/usr/bin:/bin:/usr/sbin:/sbin")
+                   RELEASE_DISTRIBUTION="none", RELEASE_TMP=env["TMPDIR"], LLM_COLD_RELEASE_ROOT=str(release), LLM_COLD_APP_ROOT=str(release / "lib"),
+                   LLM_COLD_RELEASE_ATTESTATION=str(attestation_path), LLM_COLD_RELEASE_ATTESTATION_SHA256=state["release_beam_attestation"]["sha256"],
+                   PATH="/usr/bin:/bin:/usr/sbin:/sbin")
         for key in tuple(env):
             if key.startswith(("MIX_", "HEX_")) or key in ("ARBOR_MIX_CONTAINED", "ARBOR_ERLANG_ROOT", "ARBOR_ELIXIR_ROOT"):
                 env.pop(key)
