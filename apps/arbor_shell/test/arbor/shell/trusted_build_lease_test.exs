@@ -1,4 +1,5 @@
 Code.require_file("trusted_build_test_helpers.exs", __DIR__)
+Code.require_file("owned_native_test_observer.exs", __DIR__)
 
 defmodule Arbor.Shell.TrustedBuildLeaseTest do
   use ExUnit.Case, async: false
@@ -13,6 +14,13 @@ defmodule Arbor.Shell.TrustedBuildLeaseTest do
   alias Arbor.Shell.TrustedBuild.FallbackOwner
   alias Arbor.Shell.TrustedBuild.Lease
   alias Arbor.Shell.TrustedBuildTestHelpers, as: Helpers
+  alias Arbor.Shell.OwnedNativeTestObserver, as: NativeObserver
+
+  setup do
+    NativeObserver.start!(__MODULE__, self())
+    on_exit(fn -> NativeObserver.stop!(__MODULE__) end)
+    :ok
+  end
 
   @darwin? match?({:unix, :darwin}, :os.type())
 
@@ -55,6 +63,7 @@ defmodule Arbor.Shell.TrustedBuildLeaseTest do
         assert {:error, :foreign_caller} =
                  Lease.checkout_launch(session.lease_pid, session.launch_ticket)
 
+        NativeObserver.expect_ready!(__MODULE__, 0)
         refute trusted_build_running?()
 
         parent = self()
@@ -200,6 +209,7 @@ defmodule Arbor.Shell.TrustedBuildLeaseTest do
     assert {:error, :trusted_build_launch_unauthorized} =
              Executor.run_trusted_build(self(), make_ref())
 
+    NativeObserver.expect_ready!(__MODULE__, 0)
     refute Enum.any?(os_processes(), &String.contains?(&1.command, "trusted-build"))
   end
 
@@ -518,18 +528,7 @@ defmodule Arbor.Shell.TrustedBuildLeaseTest do
     Enum.any?(os_processes(), &String.contains?(&1.command, "arbor_shell_launcher trusted-build"))
   end
 
-  defp os_processes do
-    {output, 0} = System.cmd("ps", ["-ax", "-o", "pid=,command="])
-
-    output
-    |> String.split("\n", trim: true)
-    |> Enum.map(fn line ->
-      case String.split(String.trim(line), " ", parts: 2) do
-        [pid, command] -> %{pid: pid, command: command}
-        _other -> %{pid: "", command: line}
-      end
-    end)
-  end
+  defp os_processes, do: NativeObserver.processes(__MODULE__)
 
   defp wait_until(fun, timeout \\ 5_000) do
     deadline = System.monotonic_time(:millisecond) + timeout

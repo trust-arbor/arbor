@@ -1014,6 +1014,28 @@ static int wait_for_fd(int fd, short events, int64_t deadline) {
   }
 }
 
+/* 1: child ready, 2: controller input/EOF, 0: deadline, -1: readiness error.
+   Before READY, any controller input aborts; START is only valid after READY. */
+static int wait_prestart_ready(int ready_fd, int64_t deadline) {
+  struct pollfd fds[2] = {
+      {.fd = ready_fd, .events = POLLIN | POLLHUP | POLLERR, .revents = 0},
+      {.fd = STDIN_FILENO, .events = POLLIN | POLLHUP | POLLERR, .revents = 0}};
+  for (;;) {
+    int timeout = remaining_ms(deadline);
+    if (timeout <= 0) return 0;
+    int result = poll(fds, 2, timeout);
+    if (result == 0) continue;
+    if (result < 0) {
+      if (errno == EINTR) continue;
+      return -1;
+    }
+    if (fds[1].revents & (POLLERR | POLLNVAL)) return -1;
+    if (fds[1].revents & (POLLIN | POLLHUP)) return 2;
+    if (fds[0].revents & POLLIN) return 1;
+    if (fds[0].revents & (POLLHUP | POLLERR | POLLNVAL)) return -1;
+  }
+}
+
 static int wait_child(pid_t child, int *status, int64_t deadline) {
   for (;;) {
     pid_t waited = waitpid(child, status, WNOHANG);
@@ -1024,6 +1046,15 @@ static int wait_child(pid_t child, int *status, int64_t deadline) {
     struct timespec delay = {.tv_sec = 0, .tv_nsec = 10000000};
     (void)nanosleep(&delay, NULL);
   }
+}
+
+/* No START byte was delivered: this exact child cannot exec or fork.
+   Do not SIGSTOP it; parent death must still let start-pipe EOF reap it. */
+static int contain_prestart_child(pid_t child, int *status) {
+  int64_t deadline = monotonic_ms() + GROUP_KILL_GRACE_MS;
+  if (child <= 0) return -1;
+  if (kill(child, SIGKILL) != 0 && errno != ESRCH) return -1;
+  return wait_child(child, status, deadline);
 }
 
 typedef struct {
@@ -1682,10 +1713,16 @@ static int run_exec(int argc, char **argv, int execution_mode) {
   }
 
   uint8_t child_ready = 0;
-  if (wait_for_fd(ready_pipe[0], POLLIN, deadline) != 1 ||
-      read_all(ready_pipe[0], &child_ready, 1) != 1 || child_ready != 1) {
+  int readiness = wait_prestart_ready(ready_pipe[0], deadline);
+  if (readiness != 1 || read_all(ready_pipe[0], &child_ready, 1) != 1 || child_ready != 1) {
     int status = 0;
-    if (contain_group(child, child, &status, &tracker) == 0) {
+    if (contain_prestart_child(child, &status) == 0) {
+      if (readiness == 0 || readiness == 2) {
+        uint8_t reason = readiness == 0 ? REASON_TIMEOUT : REASON_CANCELLED;
+        send_terminal_ex(reason, 137,
+                         reason == REASON_TIMEOUT ? CANCEL_SUB_NONE : CANCEL_SUB_START_PACKET, 0);
+        return 0;
+      }
       send_error("contained process did not become ready");
     } else {
       send_error("contained process readiness cleanup failed");
@@ -1701,13 +1738,13 @@ static int run_exec(int argc, char **argv, int execution_mode) {
   }
   if (write_packet(TAG_READY, encoded_pgid, sizeof(encoded_pgid)) != 0) {
     int status = 0;
-    if (contain_group(child, child, &status, &tracker) != 0) return 127;
+    if (contain_prestart_child(child, &status) != 0) return 127;
     return 126;
   }
 
   if (wait_for_fd(STDIN_FILENO, POLLIN | POLLHUP, deadline) != 1) {
     int status = 0;
-    if (contain_group(child, child, &status, &tracker) == 0) {
+    if (contain_prestart_child(child, &status) == 0) {
       send_terminal(REASON_TIMEOUT, 137);
     } else {
       send_error("contained process timeout cleanup failed");
@@ -1722,7 +1759,7 @@ static int run_exec(int argc, char **argv, int execution_mode) {
   free(payload);
   if (packet_result != 1 || command != CMD_START || payload_length != 0) {
     int status = 0;
-    if (contain_group(child, child, &status, &tracker) == 0) {
+    if (contain_prestart_child(child, &status) == 0) {
       send_terminal_ex(REASON_CANCELLED, 137, CANCEL_SUB_START_PACKET, 0);
     } else {
       send_error("contained process cancellation cleanup failed");
@@ -1733,7 +1770,7 @@ static int run_exec(int argc, char **argv, int execution_mode) {
   uint8_t start = 1;
   if (write_all(start_pipe[1], &start, 1) != 0) {
     int status = 0;
-    if (contain_group(child, child, &status, &tracker) == 0) {
+    if (contain_prestart_child(child, &status) == 0) {
       send_error("failed to start contained process");
     } else {
       send_error("contained process start cleanup failed");

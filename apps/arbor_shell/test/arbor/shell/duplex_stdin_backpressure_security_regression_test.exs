@@ -1,3 +1,5 @@
+Code.require_file("owned_native_test_observer.exs", __DIR__)
+
 defmodule Arbor.Shell.DuplexStdinBackpressureSecurityRegressionTest do
   @moduledoc """
   Security regressions for native duplex-stdin backpressure.
@@ -17,6 +19,7 @@ defmodule Arbor.Shell.DuplexStdinBackpressureSecurityRegressionTest do
   use ExUnit.Case, async: false
 
   alias Arbor.Shell
+  alias Arbor.Shell.OwnedNativeTestObserver, as: OwnedNative
   alias Arbor.Shell.PortSession
 
   # Real OS pipe/backpressure cases — not part of mix test.fast.
@@ -36,9 +39,15 @@ defmodule Arbor.Shell.DuplexStdinBackpressureSecurityRegressionTest do
   @one_shot_bound_ms 20_000
 
   setup do
+    OwnedNative.start!(__MODULE__, self())
+
     on_exit(fn ->
-      kill_marked_leftovers()
-      refute_marked_processes()
+      try do
+        kill_marked_leftovers()
+        refute_marked_processes()
+      after
+        OwnedNative.stop!(__MODULE__)
+      end
     end)
 
     :ok
@@ -153,6 +162,7 @@ defmodule Arbor.Shell.DuplexStdinBackpressureSecurityRegressionTest do
       )
 
     id = PortSession.get_id(pid)
+    OwnedNative.adopt_session!(__MODULE__, pid)
     on_exit(fn -> if Process.alive?(pid), do: PortSession.kill(pid) end)
 
     assert :ok = PortSession.send_input(pid, payload)
@@ -180,6 +190,7 @@ defmodule Arbor.Shell.DuplexStdinBackpressureSecurityRegressionTest do
         max_output_bytes: 64
       )
 
+    OwnedNative.adopt_session!(__MODULE__, pid)
     on_exit(fn -> if Process.alive?(pid), do: PortSession.kill(pid) end)
 
     oversized = :binary.copy("X", @max_interactive_payload + 1)
@@ -276,6 +287,7 @@ defmodule Arbor.Shell.DuplexStdinBackpressureSecurityRegressionTest do
       )
 
     id = PortSession.get_id(pid)
+    OwnedNative.adopt_session!(__MODULE__, pid)
     on_exit(fn -> if Process.alive?(pid), do: PortSession.kill(pid) end)
 
     # Unlinked monitored sender so a session exit cannot mask the framing reply.
@@ -336,6 +348,7 @@ defmodule Arbor.Shell.DuplexStdinBackpressureSecurityRegressionTest do
         5_000 -> flunk("owned session did not start")
       end
 
+    OwnedNative.adopt_session!(__MODULE__, session)
     on_exit(fn -> if Process.alive?(session), do: PortSession.kill(session) end)
 
     sender = start_monitored_sender(fn -> PortSession.send_input(session, payload) end)
@@ -415,6 +428,8 @@ defmodule Arbor.Shell.DuplexStdinBackpressureSecurityRegressionTest do
                timeout: 60_000,
                max_output_bytes: 1
              )
+
+    OwnedNative.adopt_session!(__MODULE__, {:execution, exec_id, self()})
 
     assert eventually?(fn -> marked_target_alive?(marker) end, 5_000),
            "expected marked target under async one-shot stdin backpressure before cancel"
@@ -564,6 +579,7 @@ defmodule Arbor.Shell.DuplexStdinBackpressureSecurityRegressionTest do
   end
 
   defp kill_marked_leftovers do
+    OwnedNative.expect_ready!(__MODULE__, 1)
     # Multiple kill passes plus eventual absence — one kill + 50ms is not enough
     # under suite load when the base revision left a blocked launcher/target.
     Enum.each(1..8, fn _pass ->
@@ -571,9 +587,7 @@ defmodule Arbor.Shell.DuplexStdinBackpressureSecurityRegressionTest do
       |> Enum.filter(&String.contains?(&1.command, @marker_prefix))
       |> Enum.each(fn process ->
         _ =
-          System.cmd("/bin/kill", ["-KILL", Integer.to_string(process.pid)],
-            stderr_to_stdout: true
-          )
+          OwnedNative.kill!(__MODULE__, process.pid)
       end)
 
       Process.sleep(50)
@@ -592,9 +606,7 @@ defmodule Arbor.Shell.DuplexStdinBackpressureSecurityRegressionTest do
       |> Enum.filter(&String.contains?(&1.command, @marker_prefix))
       |> Enum.each(fn process ->
         _ =
-          System.cmd("/bin/kill", ["-KILL", Integer.to_string(process.pid)],
-            stderr_to_stdout: true
-          )
+          OwnedNative.kill!(__MODULE__, process.pid)
       end)
 
       Process.sleep(100)
@@ -602,6 +614,8 @@ defmodule Arbor.Shell.DuplexStdinBackpressureSecurityRegressionTest do
   end
 
   defp refute_marked_processes do
+    OwnedNative.expect_ready!(__MODULE__, 1)
+
     leftovers =
       os_processes()
       |> Enum.filter(&String.contains?(&1.command, @marker_prefix))
@@ -629,26 +643,5 @@ defmodule Arbor.Shell.DuplexStdinBackpressureSecurityRegressionTest do
     end
   end
 
-  defp os_processes do
-    {output, 0} = System.cmd("ps", ["-axo", "pid=,ppid=,pgid=,command="])
-
-    output
-    |> String.split("\n", trim: true)
-    |> Enum.flat_map(fn line ->
-      case Regex.run(~r/^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.+)$/, line) do
-        [_, pid, ppid, pgid, command] ->
-          [
-            %{
-              pid: String.to_integer(pid),
-              ppid: String.to_integer(ppid),
-              pgid: String.to_integer(pgid),
-              command: command
-            }
-          ]
-
-        _other ->
-          []
-      end
-    end)
-  end
+  defp os_processes, do: OwnedNative.processes(__MODULE__)
 end
