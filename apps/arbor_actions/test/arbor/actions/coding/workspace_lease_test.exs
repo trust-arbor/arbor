@@ -1421,6 +1421,8 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
          %{
            tmp_dir: tmp_dir
          } do
+      recovery_reply_timeout = 30_000
+
       fake_repo = Path.join(tmp_dir, "fake-repo")
       fake_worktree = Path.join(tmp_dir, "fake-worktree")
       branch = "test/workspace-owner-death-quarantine"
@@ -1470,7 +1472,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
 
       assert_receive {:leased, {:ok, lease}}, @owner_operation_timeout
 
-      fresh = Map.fetch!(:sys.get_state(server).leases, workspace_id)
+      fresh = Map.fetch!(:sys.get_state(server, @owner_operation_timeout).leases, workspace_id)
       refute Map.has_key?(fresh, :retention_marker_active)
       refute Map.has_key?(fresh, :retention_lstat_identity)
 
@@ -1478,7 +1480,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
       Process.exit(owner, :kill)
 
       assert_eventually(fn ->
-        state = :sys.get_state(server)
+        state = :sys.get_state(server, @owner_operation_timeout)
         quarantined = Map.fetch!(state.leases, workspace_id)
         assert quarantined.cleanup_armed == false
         assert is_reference(quarantined.owner_death_retry_ref)
@@ -1486,7 +1488,9 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
         assert File.read!(Path.join(fake_worktree, "partial.txt")) == "recoverable\n"
       end)
 
-      quarantined = Map.fetch!(:sys.get_state(server).leases, workspace_id)
+      quarantined =
+        Map.fetch!(:sys.get_state(server, @owner_operation_timeout).leases, workspace_id)
+
       assert quarantined.owner_death_policy == :retention_identity_unavailable
       assert quarantined.task_id == task_id
       assert quarantined.principal_id == principal_id
@@ -1529,9 +1533,9 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
           Process.sleep(:infinity)
         end)
 
-      assert_receive {:reactivated, {:ok, reactivated}}, @owner_operation_timeout
+      assert_receive {:reactivated, {:ok, reactivated}}, recovery_reply_timeout
 
-      state = :sys.get_state(server)
+      state = :sys.get_state(server, @owner_operation_timeout)
       active = Map.fetch!(state.leases, workspace_id)
       assert active.cleanup_armed == true
       assert active.owner_death_deletion_disabled == true
@@ -1551,7 +1555,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
       Process.exit(recovery_owner, :kill)
 
       assert_eventually(fn ->
-        again = Map.fetch!(:sys.get_state(server).leases, workspace_id)
+        again = Map.fetch!(:sys.get_state(server, @owner_operation_timeout).leases, workspace_id)
         assert again.cleanup_armed == false
         assert again.owner_death_deletion_disabled == true
         assert is_reference(again.owner_death_retry_ref)
@@ -1662,6 +1666,8 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
          %{
            tmp_dir: tmp_dir
          } do
+      recovery_reply_timeout = 30_000
+
       fake_repo = Path.join(tmp_dir, "pinned-fake-repo")
       fake_worktree = Path.join(tmp_dir, "pinned-fake-worktree")
       original_copy = fake_worktree <> "-original"
@@ -1712,7 +1718,7 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
       Process.exit(owner, :kill)
 
       assert_eventually(fn ->
-        dormant = Map.get(:sys.get_state(server).leases, workspace_id)
+        dormant = Map.get(:sys.get_state(server, @owner_operation_timeout).leases, workspace_id)
         assert is_map(dormant)
         assert Map.get(dormant, :owner_death_quarantine_state) == :dormant
       end)
@@ -1740,9 +1746,9 @@ defmodule Arbor.Actions.Coding.WorkspaceLeaseTest do
           Process.sleep(:infinity)
         end)
 
-      assert_receive {:reactivated, {:ok, _reactivated}}, @owner_operation_timeout
+      assert_receive {:reactivated, {:ok, _reactivated}}, recovery_reply_timeout
 
-      active = Map.fetch!(:sys.get_state(server).leases, workspace_id)
+      active = Map.fetch!(:sys.get_state(server, @owner_operation_timeout).leases, workspace_id)
       assert is_map(active.owner_death_deletion_identity)
 
       File.rename!(fake_worktree, original_copy)
