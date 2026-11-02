@@ -106,11 +106,12 @@ defmodule Arbor.Orchestrator.Handlers.ShellHandlerTest do
       registry_pid = Process.whereis(Arbor.Shell.ExecutionRegistry)
 
       if registry_pid do
-        GenServer.stop(registry_pid)
+        :ok = Supervisor.terminate_child(Arbor.Shell.Supervisor, Arbor.Shell.ExecutionRegistry)
 
         on_exit(fn ->
           unless Process.whereis(Arbor.Shell.ExecutionRegistry) do
-            {:ok, _pid} = Arbor.Shell.ExecutionRegistry.start_link([])
+            {:ok, _pid} =
+              Supervisor.restart_child(Arbor.Shell.Supervisor, Arbor.Shell.ExecutionRegistry)
           end
         end)
       end
