@@ -842,7 +842,7 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
     # Exercise the production dispatch, TurnEgress, Trust and Security path.
     # Only the final provider adapter is replaced, so the successful control
     # proves the same route and valid disclosure can actually reach provider I/O.
-    Application.delete_env(:arbor_llm, :llm_dispatcher)
+    Application.put_env(:arbor_llm, :llm_dispatcher, Arbor.AI.Runtime.Dispatch)
     Application.put_env(:arbor_capabilities, :egress_gate_enforcing, true)
 
     route = external_route()
