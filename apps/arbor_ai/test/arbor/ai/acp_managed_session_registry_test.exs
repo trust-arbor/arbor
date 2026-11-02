@@ -20,6 +20,9 @@ defmodule Arbor.AI.AcpManagedSessionRegistryTest do
           do: send(test_pid, {:fake_start_stalled, self(), delay})
 
         Process.sleep(delay)
+
+        if test_pid = Keyword.get(opts, :test_pid),
+          do: send(test_pid, {:fake_start_completed, self(), delay})
       end
 
       GenServer.start_link(__MODULE__, opts)
@@ -1244,14 +1247,31 @@ defmodule Arbor.AI.AcpManagedSessionRegistryTest do
     end
 
     test "security regression: managed child startup consumes the operation deadline", ctx do
-      started_at = System.monotonic_time(:millisecond)
+      start_task =
+        Task.async(fn ->
+          start_managed([start_delay_ms: 60, timeout: 20], ctx)
+        end)
 
-      assert {:error, :timeout} =
-               start_managed([start_delay_ms: 60, timeout: 20], ctx)
+      on_exit(fn ->
+        if Process.alive?(start_task.pid), do: Process.exit(start_task.pid, :kill)
+      end)
 
-      assert System.monotonic_time(:millisecond) - started_at < 50
-      Process.sleep(80)
+      assert_receive {:fake_start_stalled, startup_worker, 60}, 1_000
+      startup_ref = Process.monitor(startup_worker)
+
+      on_exit(fn ->
+        if Process.alive?(startup_worker), do: Process.exit(startup_worker, :kill)
+      end)
+
+      assert {:error, :timeout} = Task.await(start_task, 1_000)
+      assert_receive {:DOWN, ^startup_ref, :process, ^startup_worker, reason}, 1_000
+      # A late observer may monitor an already-interrupted starter.
+      assert reason in [:killed, :noproc]
+      refute_receive {:fake_start_completed, ^startup_worker, 60}, 100
+      refute_receive {:fake_init, _, _, _}, 0
+      refute_receive {:fake_create_opts, _, _}, 0
       assert_supervisor_empty(ctx.supervisor)
+      assert :sys.get_state(ctx.registry).sessions == %{}
     end
 
     test "security regression: managed start shares one deadline through create and registry",

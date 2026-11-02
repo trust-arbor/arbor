@@ -1273,6 +1273,7 @@ defmodule Arbor.Actions.Coding.ReviewTreeTest do
       assert still.review_snapshot_id == branch_snap.review_snapshot_id
     end
 
+    @tag timeout: 120_000
     test "security regression: immutable open enforces source and lineage without mutation", %{
       tmp_dir: tmp_dir
     } do

@@ -2202,7 +2202,7 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
       spec: spec,
       executable: executable
     } do
-      :ok = FakeRuntime.reset([success_list([])])
+      :ok = FakeRuntime.reset([{:hang, success_list([])}])
       start_ref = make_ref()
 
       {:ok, execution_id} =
@@ -2221,6 +2221,16 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
                  admission_opts(spec, execution_id, operation_deadline: deadline)
                )
 
+      # Register exact-worker cleanup before begin so any assertion failure
+      # cannot leave a durable owner consuming the next test's fake script.
+      worker_ref = Process.monitor(worker)
+
+      on_exit(fn ->
+        cleanup_ref = Process.monitor(worker)
+        send(worker, {:cancel_shell_execution, execution_id})
+        assert_receive {:DOWN, ^cleanup_ref, :process, ^worker, _}, 10_000
+      end)
+
       assert :ok = ExecutionRegistry.adopt(execution_id, worker)
 
       # Advance clock while waiting — begin must keep the original deadline.
@@ -2236,6 +2246,8 @@ defmodule Arbor.Shell.AppleContainerUnitWorkerTest do
 
       send(worker, {:cancel_shell_execution, execution_id})
       _ = await_terminal(execution_id, 10_000)
+      assert_receive {:DOWN, ^worker_ref, :process, ^worker, :normal}, 10_000
+      assert FakeRuntime.calls() == [call]
     end
 
     test "pre-begin expiry from operation deadline runs zero runtime commands", %{
