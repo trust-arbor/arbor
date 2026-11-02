@@ -149,7 +149,7 @@ static int g_agent_write = 0;
   "(allow file-write* (subpath (param \"CACHE\")))\n" \
   "(allow file-write* (subpath (param \"RELEASE\")))\n" \
   "(deny file-write* (subpath (param \"SOURCE\")))\n" \
-  "(allow file-write* (subpath (param \"SOURCE\")) (regex #\"/apps/arbor_trust/tmp_\"))\n" \
+  "(allow file-write* (require-all (subpath (param \"SOURCE\")) (regex #\"/apps/arbor_trust/tmp_\")))\n" \
   "(allow network-bind (local ip \"localhost:*\"))\n" \
   "(allow network-inbound (local ip \"localhost:*\"))\n" \
   "(deny network*)"

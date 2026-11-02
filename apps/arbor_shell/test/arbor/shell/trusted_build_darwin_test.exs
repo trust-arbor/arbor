@@ -174,10 +174,7 @@ defmodule Arbor.Shell.TrustedBuildDarwinTest do
       task =
         Task.async(fn ->
           wait_until(fn ->
-            Enum.any?(os_processes(), fn process ->
-              String.contains?(process.command, "arbor_shell_launcher trusted-build") and
-                String.contains?(process.command, "compile --warnings-as-errors")
-            end)
+            Helpers.trusted_build_argv_observed?(lease)
           end)
         end)
 
@@ -281,19 +278,6 @@ defmodule Arbor.Shell.TrustedBuildDarwinTest do
         }
       }
     }
-  end
-
-  defp os_processes do
-    {output, 0} = System.cmd("ps", ["-ax", "-o", "pid=,command="])
-
-    output
-    |> String.split("\n", trim: true)
-    |> Enum.map(fn line ->
-      case String.split(String.trim(line), " ", parts: 2) do
-        [pid, command] -> %{pid: pid, command: command}
-        _other -> %{pid: "", command: line}
-      end
-    end)
   end
 
   defp wait_until(fun, timeout \\ 10_000) do
