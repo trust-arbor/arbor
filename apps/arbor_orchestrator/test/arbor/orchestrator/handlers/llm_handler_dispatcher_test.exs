@@ -39,11 +39,15 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerDispatcherTest do
   end
 
   setup do
+    previous_dispatcher = Application.fetch_env(:arbor_llm, :llm_dispatcher)
     {:ok, _} = RecordingDispatcher.start_link()
     Application.put_env(:arbor_llm, :llm_dispatcher, RecordingDispatcher)
 
     on_exit(fn ->
-      Application.delete_env(:arbor_llm, :llm_dispatcher)
+      case previous_dispatcher do
+        {:ok, dispatcher} -> Application.put_env(:arbor_llm, :llm_dispatcher, dispatcher)
+        :error -> Application.delete_env(:arbor_llm, :llm_dispatcher)
+      end
     end)
 
     :ok

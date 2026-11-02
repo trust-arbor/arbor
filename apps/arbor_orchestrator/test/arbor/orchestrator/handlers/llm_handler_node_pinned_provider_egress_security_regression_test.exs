@@ -45,6 +45,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerNodePinnedProviderEgressSecurity
   end
 
   setup do
+    previous_dispatcher = Application.fetch_env(:arbor_llm, :llm_dispatcher)
     {:ok, _} = RecordingDispatcher.start()
     RecordingDispatcher.reset()
     Application.put_env(:arbor_llm, :llm_dispatcher, RecordingDispatcher)
@@ -54,7 +55,11 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerNodePinnedProviderEgressSecurity
     Application.put_env(:arbor_capabilities, :egress_gate_enforcing, true)
 
     on_exit(fn ->
-      Application.delete_env(:arbor_llm, :llm_dispatcher)
+      case previous_dispatcher do
+        {:ok, dispatcher} -> Application.put_env(:arbor_llm, :llm_dispatcher, dispatcher)
+        :error -> Application.delete_env(:arbor_llm, :llm_dispatcher)
+      end
+
       RecordingDispatcher.stop()
 
       case prev_enforce do

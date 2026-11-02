@@ -82,6 +82,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerProviderUsageContextTest do
   end
 
   setup do
+    previous_dispatcher = Application.fetch_env(:arbor_llm, :llm_dispatcher)
     Arbor.LLM.TestSupport.SensitivityFixture.setup([CapturingAdapter])
 
     {:ok, _} = RecordingDispatcher.start_link()
@@ -90,7 +91,11 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerProviderUsageContextTest do
     Application.put_env(:arbor_llm, :llm_dispatcher, RecordingDispatcher)
 
     on_exit(fn ->
-      Application.delete_env(:arbor_llm, :llm_dispatcher)
+      case previous_dispatcher do
+        {:ok, dispatcher} -> Application.put_env(:arbor_llm, :llm_dispatcher, dispatcher)
+        :error -> Application.delete_env(:arbor_llm, :llm_dispatcher)
+      end
+
       CapturingAdapter.clear_parent()
 
       if Process.whereis(RecordingDispatcher) do

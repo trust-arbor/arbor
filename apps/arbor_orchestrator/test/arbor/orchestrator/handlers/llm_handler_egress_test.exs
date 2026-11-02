@@ -100,6 +100,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerEgressTest do
   end
 
   setup do
+    previous_dispatcher = Application.fetch_env(:arbor_llm, :llm_dispatcher)
     {:ok, _} = RecordingDispatcher.start()
     Application.put_env(:arbor_llm, :llm_dispatcher, RecordingDispatcher)
 
@@ -108,7 +109,11 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerEgressTest do
     Application.put_env(:arbor_trust, :policy_module, NoEgressStandingPolicy)
 
     on_exit(fn ->
-      Application.delete_env(:arbor_llm, :llm_dispatcher)
+      case previous_dispatcher do
+        {:ok, dispatcher} -> Application.put_env(:arbor_llm, :llm_dispatcher, dispatcher)
+        :error -> Application.delete_env(:arbor_llm, :llm_dispatcher)
+      end
+
       Application.delete_env(:arbor_orchestrator, :_test_exact_route)
       Application.delete_env(:arbor_orchestrator, :_test_egress_pid)
       _ = RecordingDispatcher.stop()

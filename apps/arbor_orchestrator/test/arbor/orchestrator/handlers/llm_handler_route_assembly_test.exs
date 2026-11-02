@@ -133,13 +133,18 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerRouteAssemblyTest do
   end
 
   setup do
+    previous_dispatcher = Application.fetch_env(:arbor_llm, :llm_dispatcher)
     {:ok, _} = RecordingDispatcher.start()
     Application.put_env(:arbor_llm, :llm_dispatcher, RecordingDispatcher)
 
     prior_profile = Application.get_env(:arbor_ai, :provider_route_profile)
 
     on_exit(fn ->
-      Application.delete_env(:arbor_llm, :llm_dispatcher)
+      case previous_dispatcher do
+        {:ok, dispatcher} -> Application.put_env(:arbor_llm, :llm_dispatcher, dispatcher)
+        :error -> Application.delete_env(:arbor_llm, :llm_dispatcher)
+      end
+
       Application.delete_env(:arbor_orchestrator, :_test_legacy_spoof_executed_route)
       Application.delete_env(:arbor_orchestrator, :_test_confirmed_route)
       Application.delete_env(:arbor_orchestrator, :_test_route_override)

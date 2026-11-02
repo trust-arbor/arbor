@@ -66,11 +66,15 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerReasoningRetryTest do
   end
 
   setup do
+    previous_dispatcher = Application.fetch_env(:arbor_llm, :llm_dispatcher)
     start_supervised!(ProgrammableDispatcher)
     Application.put_env(:arbor_llm, :llm_dispatcher, ProgrammableDispatcher)
 
     on_exit(fn ->
-      Application.delete_env(:arbor_llm, :llm_dispatcher)
+      case previous_dispatcher do
+        {:ok, dispatcher} -> Application.put_env(:arbor_llm, :llm_dispatcher, dispatcher)
+        :error -> Application.delete_env(:arbor_llm, :llm_dispatcher)
+      end
     end)
 
     :ok
