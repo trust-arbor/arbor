@@ -17,7 +17,7 @@ defmodule Arbor.AI.AcpSession.HandlerShellSecurityRegressionTest do
 
   setup do
     :ok = Security.TestBootstrap.start!()
-    authorizer = Application.fetch_env!(:arbor_shell, :agent_authorizer)
+    authorizer = Arbor.Actions.Shell
     assert Code.ensure_loaded?(authorizer)
 
     case Supervisor.start_child(Arbor.Shell.Supervisor, Arbor.Shell.ExecutablePolicy) do
