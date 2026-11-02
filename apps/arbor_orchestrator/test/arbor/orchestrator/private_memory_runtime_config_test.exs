@@ -105,7 +105,7 @@ defmodule Arbor.Orchestrator.PrivateMemoryRuntimeConfigTest do
     runtime = read_runtime(root, :test)
     # The existing global dotenv loader is unchanged and really loaded this.
     assert System.get_env("ARBOR_PRIVATE_MEMORY_ENABLED") == "true"
-    assert Keyword.fetch(runtime[:arbor_orchestrator], @route_key) == :error
+    assert Keyword.fetch(Keyword.get(runtime, :arbor_orchestrator, []), @route_key) == :error
 
     existing = [enabled: true, model: "explicit-test-fixture"]
     configured = Reader.merge([arbor_orchestrator: [{@route_key, existing}]], runtime)
@@ -115,7 +115,7 @@ defmodule Arbor.Orchestrator.PrivateMemoryRuntimeConfigTest do
   test "test environment also ignores malformed inherited private values", %{root: root} do
     for key <- @private_keys, do: System.put_env(key, "malformed-private-fixture-value")
     runtime = read_runtime(root, :test)
-    assert Keyword.fetch(runtime[:arbor_orchestrator], @route_key) == :error
+    assert Keyword.fetch(Keyword.get(runtime, :arbor_orchestrator, []), @route_key) == :error
   end
 
   test "security regression: malformed opt-in values fail without echoing their contents", %{
