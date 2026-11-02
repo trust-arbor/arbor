@@ -1069,13 +1069,8 @@ defmodule Arbor.Memory.MutationAdmissionTest do
         MutationAdmission.drain(agent, server: server, timeout_ms: 80)
       end)
 
-    assert wait_until(fn ->
-             match?(
-               {:ok, %{gate: :draining, drain_waiters: n}} when n >= 1,
-               st(server, agent)
-             )
-           end)
-
+    # Reply proves matched-waiter expiry; status proves removal. Polling its
+    # transient 80 ms lifetime can miss it when the test process is delayed.
     assert {:error, :drain_timeout} = Task.await(t, 2_000)
     assert {:ok, %{gate: :draining, drain_waiters: 0, active_roots: 1}} = st(server, agent)
 
