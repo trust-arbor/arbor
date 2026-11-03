@@ -235,8 +235,17 @@ defmodule Arbor.Dashboard.Live.ConversationLiveTest do
     def cancel_desk_turn(_), do: {:error, :cleanup_pending}
   end
 
+  defmodule MultimediaAPI do
+    def request_microphone_permission, do: :authorized
+  end
+
   setup do
-    settings = [conversation_api: Host, voice_api: Voice, local_voice_controls: true]
+    settings = [
+      conversation_api: Host,
+      voice_api: Voice,
+      multimedia_api: MultimediaAPI,
+      local_voice_controls: true
+    ]
 
     previous =
       Map.new(

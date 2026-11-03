@@ -150,8 +150,12 @@ defmodule Arbor.Dashboard.Live.ConversationHomeTest do
     end
   end
 
+  defmodule MultimediaAPI do
+    def request_microphone_permission, do: :authorized
+  end
+
   setup do
-    keys = [:conversation_api, :local_voice_controls, :voice_api, :home_fixture]
+    keys = [:conversation_api, :local_voice_controls, :voice_api, :multimedia_api, :home_fixture]
     previous = Map.new(keys, &{&1, Application.fetch_env(:arbor_dashboard, &1)})
     rows = [row(@first, "agent_ui", "Cedar"), row(@second, "agent_other", "Willow")]
 
@@ -176,6 +180,7 @@ defmodule Arbor.Dashboard.Live.ConversationHomeTest do
     Application.put_env(:arbor_dashboard, :conversation_api, Host)
     Application.put_env(:arbor_dashboard, :local_voice_controls, false)
     Application.put_env(:arbor_dashboard, :voice_api, Voice)
+    Application.put_env(:arbor_dashboard, :multimedia_api, MultimediaAPI)
 
     on_exit(fn ->
       for {key, value} <- previous do
