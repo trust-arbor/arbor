@@ -60,9 +60,8 @@ defmodule Arbor.Gateway.MCP.ResourceBridge do
   @doc """
   Authorize an agent to read an MCP resource.
 
-  Production uses `Arbor.Trust.authorize/4`, matching native actions. MCP
-  resources carry no destructive/read-only hints, so a missing hint is treated
-  as destructive and never skips Trust or approval.
+  Production uses `Arbor.Trust.authorize/4`, matching native actions.
+  MCP resource reads receive the same Trust decision as MCP tool calls.
 
   Injected `:security_module` values keep the capability-only seam used by
   fail-closed tests. Fails closed when security or Trust is unavailable.
@@ -130,9 +129,7 @@ defmodule Arbor.Gateway.MCP.ResourceBridge do
 
   defp authorize_with_trust(agent_id, uri, action, opts) do
     if trust_available?() do
-      trust_opts = Keyword.drop(List.wrap(opts), [:annotations])
-
-      case trust_module().authorize(agent_id, uri, action, trust_opts) do
+      case trust_module().authorize(agent_id, uri, action, List.wrap(opts)) do
         {:ok, :authorized} ->
           :ok
 

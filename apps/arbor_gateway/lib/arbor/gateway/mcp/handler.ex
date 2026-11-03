@@ -1411,7 +1411,7 @@ defmodule Arbor.Gateway.MCP.Handler do
         "## Success (MCP: #{server_name}/#{tool_name})\n\n#{format_result(value)}"
 
       {:ok, :pending_approval, proposal_id} ->
-        "## Pending Approval\n\nProposal #{proposal_id} created. Awaiting consensus."
+        format_pending_approval(proposal_id)
 
       {:error, {:not_connected, name}} ->
         "## Error\n\nMCP server '#{name}' is not connected. " <>
@@ -1466,7 +1466,7 @@ defmodule Arbor.Gateway.MCP.Handler do
             "## Error\n\n#{inspect(reason)}"
 
           {:ok, {:ok, :pending_approval, proposal_id}} ->
-            "## Pending Approval\n\nProposal #{proposal_id} created. Awaiting consensus."
+            format_pending_approval(proposal_id)
 
           {:error, reason} ->
             "## Error\n\n#{inspect(reason)}"
@@ -2023,6 +2023,10 @@ defmodule Arbor.Gateway.MCP.Handler do
 
   defp format_role(role) when is_atom(role), do: to_string(role)
   defp format_role(role), do: inspect(role)
+
+  defp format_pending_approval(proposal_id) do
+    "## Pending Approval\n\nProposal #{proposal_id} is waiting for approval."
+  end
 
   defp format_result(result) when is_map(result) do
     result

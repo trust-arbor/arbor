@@ -5,8 +5,9 @@ defmodule Arbor.Gateway.MCP.TrustApprovalSecurityRegressionTest do
   (ToolBridge.authorize/3). They never reached `Arbor.Trust.authorize/4` or
   ApprovalGuard, so the default `:cautious` baseline `:ask` never applied.
 
-  A destructive mock tool with `destructiveHint: true` must not run unless
-  Trust has been consulted. This test fails on the capability-only path
+  A destructive mock tool must not run unless Trust has been consulted.
+  MCP hint annotations stay on the tool map for visibility and do not
+  change the Trust decision. This test fails on the capability-only path
   (tool executes; spy policy is never called) and passes once the gateway
   routes MCP calls through Trust.
   """
@@ -227,30 +228,21 @@ defmodule Arbor.Gateway.MCP.TrustApprovalSecurityRegressionTest do
     assert_receive {:resource_read, "file://secret.txt"}, 1_000
   end
 
-  test "readOnlyHint is advisory and never skips Trust approval",
+  test "MCP hints do not change the Trust decision",
        %{agent_id: agent_id, enable_consensus: enable_consensus} do
     enable_consensus.()
-    uri = "arbor://mcp/#{@server}/looks_readonly"
-    {:ok, _cap} = Arbor.Security.grant_fixture(principal: agent_id, resource: uri)
 
-    assert {:ok, :pending_approval, _id} =
-             Arbor.Gateway.call_mcp_tool(@server, "looks_readonly", %{}, agent_id: agent_id)
+    for tool <- [@tool, "looks_readonly", "unannotated"] do
+      uri = "arbor://mcp/#{@server}/#{tool}"
+      {:ok, _cap} = Arbor.Security.grant_fixture(principal: agent_id, resource: uri)
 
-    assert_receive {:trust_policy_consulted, ^agent_id, ^uri}, 1_000
-    refute_received {:tool_executed, _, _}
-  end
+      assert {:ok, :pending_approval, id} =
+               Arbor.Gateway.call_mcp_tool(@server, tool, %{}, agent_id: agent_id)
 
-  test "missing MCP hints are treated as destructive and stay gated",
-       %{agent_id: agent_id, enable_consensus: enable_consensus} do
-    enable_consensus.()
-    uri = "arbor://mcp/#{@server}/unannotated"
-    {:ok, _cap} = Arbor.Security.grant_fixture(principal: agent_id, resource: uri)
-
-    assert {:ok, :pending_approval, _id} =
-             Arbor.Gateway.call_mcp_tool(@server, "unannotated", %{}, agent_id: agent_id)
-
-    assert_receive {:trust_policy_consulted, ^agent_id, ^uri}, 1_000
-    refute_received {:tool_executed, _, _}
+      assert is_binary(id) and id != ""
+      assert_receive {:trust_policy_consulted, ^agent_id, ^uri}, 1_000
+      refute_received {:tool_executed, ^tool, _}
+    end
   end
 
   test "capability denial still refuses the tool without invoking it", %{agent_id: agent_id} do

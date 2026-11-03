@@ -66,9 +66,8 @@ defmodule Arbor.Gateway.MCP.ToolBridge do
 
   Production uses `Arbor.Trust.authorize/4`, the same boundary native actions
   and the ACP ToolServer use, so the `:cautious` baseline `:ask` and
-  ApprovalGuard apply. A missing MCP `destructiveHint` is treated as
-  destructive. Server-supplied hints are advisory: `readOnlyHint` must never
-  skip Trust or approval.
+  ApprovalGuard apply. MCP hint annotations stay on the tool map for
+  visibility; they do not change the Trust decision.
 
   Injected `:security_module` values keep the capability-only seam used by
   fail-closed tests. Fails closed when security or Trust is unavailable.
@@ -79,11 +78,6 @@ defmodule Arbor.Gateway.MCP.ToolBridge do
           | {:error, :unauthorized, String.t()}
   def authorize(agent_id, server_name, tool_name, opts \\ []) do
     uri = capability_uri(server_name, tool_name)
-    annotations = annotations_from_opts(opts)
-
-    # Hints from MCP servers are advisory. Missing destructiveHint is
-    # destructive. readOnlyHint must never skip Trust/approval.
-    _destructive? = destructive_annotation?(annotations)
     authorize_held(agent_id, uri, :execute, opts)
   rescue
     # FAIL CLOSED: a crash while consulting security must DENY, never grant.
@@ -158,30 +152,6 @@ defmodule Arbor.Gateway.MCP.ToolBridge do
     end
   end
 
-  defp annotations_from_opts(opts) when is_list(opts) do
-    case Keyword.get(opts, :annotations) do
-      annotations when is_map(annotations) -> annotations
-      _ -> %{}
-    end
-  end
-
-  defp annotations_from_opts(_opts), do: %{}
-
-  defp destructive_annotation?(annotations) when is_map(annotations) do
-    # A missing hint is treated as destructive.
-    annotation_flag(annotations, "destructiveHint", :destructiveHint) != false
-  end
-
-  defp destructive_annotation?(_), do: true
-
-  defp annotation_flag(annotations, string_key, atom_key) do
-    cond do
-      Map.has_key?(annotations, string_key) -> Map.get(annotations, string_key)
-      Map.has_key?(annotations, atom_key) -> Map.get(annotations, atom_key)
-      true -> :missing
-    end
-  end
-
   defp authorize_held(agent_id, uri, action, opts) do
     if security_available?() do
       case security_module() do
@@ -201,9 +171,7 @@ defmodule Arbor.Gateway.MCP.ToolBridge do
 
   defp authorize_with_trust(agent_id, uri, action, opts) do
     if trust_available?() do
-      trust_opts = Keyword.drop(List.wrap(opts), [:annotations])
-
-      case trust_module().authorize(agent_id, uri, action, trust_opts) do
+      case trust_module().authorize(agent_id, uri, action, List.wrap(opts)) do
         {:ok, :authorized} ->
           :ok
 
