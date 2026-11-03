@@ -37,6 +37,7 @@ defmodule Arbor.Agent.SimpleAgentMissingAuthorityProbeTest do
 
   test "security regression: public SimpleAgent.run refuses a tool without capability authority" do
     assert Process.whereis(Arbor.Security.CapabilityStore) == nil
+    Application.put_env(:arbor_llm, :sensitivity_policy, Arbor.AI)
     Process.register(self(), __MODULE__)
     {:ok, registry} = Arbor.Common.ActionRegistry.start_link()
     :ok = Arbor.Common.ActionRegistry.register("missing_authority_probe", Probe)
