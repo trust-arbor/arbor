@@ -228,7 +228,7 @@
     "rationale": "This GenServer implements a normal-profile ETS cache over a pluggable Store backend, including hydration, replication, and acknowledged write modes. Its authority-mode and authoritative-read API is mixed with replaceable cache/backend mechanics; the future minimal host store and durability admission must be split out before this remains a provider."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/channel_store.ex",
+    "path": "apps/arbor_persistence_host/lib/arbor/persistence/channel_store.ex",
     "blob_oid": "68eba538096fa72d921ceb2daf09846d3b91dc29",
     "class": "system_extension",
     "rationale": "This Ecto context persists communication channels, membership, and messages. Normal Comms resolves this provider when Persistence is available, while provider-free safe mode does not require channel history."
@@ -264,7 +264,7 @@
     "rationale": "This release-inert ExUnit case template starts and sandboxes the Ecto Repo for cross-app database tests. It is first-party validation tooling, not production host or normal-profile provider runtime."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/engagement_store.ex",
+    "path": "apps/arbor_persistence_host/lib/arbor/persistence/engagement_store.ex",
     "blob_oid": "f05d547b38fcb030a1816e587186ed38e05f2a34",
     "class": "system_extension",
     "rationale": "This Ecto adapter durably stores Comms engagement records and converts them to and from the Comms contract. The normal Comms profile writes through to it for restart continuity, but safe mode can use neither Comms nor this provider."
@@ -276,13 +276,13 @@
     "rationale": "This bounded private-directory JSON store persists evaluation runs with path, file-identity, and publication checks. Those checks constrain an optional eval backend; they do not turn evaluation storage into a host reference monitor."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/eval/run_identity.ex",
+    "path": "apps/arbor_persistence_host/lib/arbor/persistence/eval/run_identity.ex",
     "blob_oid": "70bf2f3acdc73bf08241789264cd9c39eb2ad7cd",
     "class": "optional_extension",
     "rationale": "This eval helper captures Git state, dataset hashes, and configuration fingerprints for run provenance. Evaluation provenance is feature-specific tooling and is not needed to boot or recover Arbor."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/eval/store.ex",
+    "path": "apps/arbor_persistence_host/lib/arbor/persistence/eval/store.ex",
     "blob_oid": "e8d1d428bf1191b77fd0ae50ef6d5f62fda5e1fe",
     "class": "optional_extension",
     "rationale": "This high-level evaluation store chooses database or JSON-file persistence and manages eval runs and results. It is an optional first-party evaluation feature, not a normal-profile storage prerequisite."
@@ -450,7 +450,7 @@
     "rationale": "This Ecto schema maps namespaced QueryableStore records and backend-owned generation, revision, and tombstone fields. It is concrete representation for the normal durable key-value provider."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/schemas/relationship.ex",
+    "path": "apps/arbor_persistence_host/lib/arbor/persistence/schemas/relationship.ex",
     "blob_oid": "d23ab11b8b0c57b59ed165477f49a7e60014544a",
     "class": "system_extension",
     "rationale": "This Ecto schema defines tenant-owned relationship memory and closed plain-map conversion. It is storage representation for the normal first-party relationship-memory provider."
@@ -486,7 +486,7 @@
     "rationale": "This Ecto context manages normal agent sessions and append-only transcript entries, including tenant checks, transaction deadlines, SQLite contention handling, and export. Those strong provider invariants do not make session persistence a safe-boot host service."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/skill_search.ex",
+    "path": "apps/arbor_persistence_host/lib/arbor/persistence/skill_search.ex",
     "blob_oid": "6c766e14e48c28b68109c766424b2d36daf44470",
     "class": "system_extension",
     "rationale": "This module owns PostgreSQL hybrid skill search, indexing, embedding metadata, and fallback reporting. Runtime selects Arbor.Persistence as the normal skill provider, but this index is not the mandatory extension contribution registry."
@@ -528,7 +528,7 @@
     "rationale": "This Ecto schema records per-agent vector destruction fences. It is internal state of the strict first-party vector database provider."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/vector_store/ecto/codec.ex",
+    "path": "apps/arbor_persistence_host/lib/arbor/persistence/vector_store/ecto/codec.ex",
     "blob_oid": "bf3813b1fe739da735c6d8cd7566f36f704e26d6",
     "class": "system_extension",
     "rationale": "This codec serializes vector operation preflight ledgers and receipts, converts vectors, enforces encoding limits, and computes provider digests. It is protocol plumbing for the strict system vector provider."
@@ -564,13 +564,13 @@
     "rationale": "This Mix task presents the encrypted PostgreSQL backup operation and its prerequisites to an operator. It is optional development/operator tooling and is excluded from the safe release profile."
   },
   {
-    "path": "apps/arbor_persistence/lib/mix/tasks/arbor/backup/list.ex",
+    "path": "apps/arbor_persistence_host/lib/mix/tasks/arbor/backup/list.ex",
     "blob_oid": "3e3b70d16aa13e64278b356ae887f7658bc2f9d6",
     "class": "optional_extension",
     "rationale": "This Mix task lists and formats encrypted database backup files. It is optional operator presentation over the backup feature."
   },
   {
-    "path": "apps/arbor_persistence/lib/mix/tasks/arbor/backup/restore.ex",
+    "path": "apps/arbor_persistence_host/lib/mix/tasks/arbor/backup/restore.ex",
     "blob_oid": "7e408c6ba810a98f3bb9f904dc7aa46636b4146f",
     "class": "optional_extension",
     "rationale": "This Mix task confirms and invokes destructive PostgreSQL restore using an age private key. It is provider-specific operator tooling, not the mandatory headless safe-mode recovery API."
