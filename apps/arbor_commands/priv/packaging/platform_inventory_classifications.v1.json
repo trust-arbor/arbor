@@ -156,7 +156,7 @@
     "rationale": "This public Agent stores resettable stream counts and timestamps for fast statistics, and no production append path currently records into it. It is an optional operational projection, not authoritative durable state or an audit invariant."
   },
   {
-    "path": "apps/arbor_historian/lib/arbor/historian/taint_query.ex",
+    "path": "packages/arbor_historian/lib/arbor/historian/taint_query.ex",
     "blob_oid": "f82d56b0ab795ec9b4f96f3dda53c50c87534a10",
     "class": "optional_extension",
     "rationale": "This module filters stored security events and reconstructs historical taint chains and summaries. It observes past enforcement outcomes but does not enforce taint policy, so it is an optional historical view."
@@ -744,7 +744,7 @@
     "rationale": "This module defines the specialized first-party grant convention for an authenticated human to disclose one bounded turn to an external model route. Interactive disclosure is a future Voice/ingress feature, not required for boot or recovery; actual grant signing and enforcement remain host services."
   },
   {
-    "path": "apps/arbor_security/lib/arbor/security/double_ratchet.ex",
+    "path": "packages/arbor_capabilities/lib/arbor/security/double_ratchet.ex",
     "blob_oid": "ad9293092f459c81cd670b2251a2ee18228530a5",
     "class": "optional_extension",
     "rationale": "This module implements per-message forward secrecy and out-of-order key handling for two-party encrypted communications. Secure peer messaging is a first-party feature above the recovery boundary, while the underlying generic cryptography remains available independently."
@@ -876,7 +876,7 @@
     "rationale": "This public ETS registry stores mutable reflex policy definitions and loads the bundled set. It is currently the source for a normal-profile policy provider; future activation must make built-ins immutable and admit signed generations without allowing registry mutation to replace the host monitor."
   },
   {
-    "path": "apps/arbor_security/lib/arbor/security/revocation_fence.ex",
+    "path": "packages/arbor_capabilities/lib/arbor/security/revocation_fence.ex",
     "blob_oid": "59554fdcfee625d1aabb2584b4f8e01de7a0fe0c",
     "class": "trusted_host",
     "rationale": "This pure module defines the closed acknowledged-revoke fence, capability digest, bounds, and exact observed-record matching used around authoritative deletion. It is host revocation and recovery protocol, not a storage-provider schema."
@@ -1356,7 +1356,7 @@
     "rationale": "This CRC core currently computes the effective authorization mode by combining operator rules with mandatory security ceilings, model constraints, and the taint conjunct using most-restrictive resolution. Profile construction and persistence conversion should split, but the implemented authorization-time conjunction is trusted-host logic today."
   },
   {
-    "path": "apps/arbor_trust/lib/arbor/trust/authority_enumeration.ex",
+    "path": "packages/arbor_trust/lib/arbor/trust/authority_enumeration.ex",
     "blob_oid": "c719281c56c82ca2f7116de3fea719a86165d3ac",
     "class": "optional_extension",
     "rationale": "This read-only utility combines held capabilities with caller-supplied URIs that policy could mint, for inspection without mutation. Authority visualization and discovery are useful tooling but are not required to authorize or recover the system."
@@ -1458,7 +1458,7 @@
     "rationale": "This module audits and migrates legacy permissive profiles before restart and can grant missing explicit capabilities during an operator-selected migration. It is bounded operational tooling, not part of normal authorization or safe recovery."
   },
   {
-    "path": "apps/arbor_trust/lib/arbor/trust/profile_resolver.ex",
+    "path": "packages/arbor_trust/lib/arbor/trust/profile_resolver.ex",
     "blob_oid": "d9a319fff504f1e25740f956da5efcf88804f88c",
     "class": "trusted_host",
     "rationale": "This resolver performs segment-aware longest-prefix evaluation and takes the most restrictive result across user policy, system ceilings, model constraints, and taint. That deterministic conjunction is the host mechanism, though mutable ceiling overrides must be restricted to tightening boot-bound policy."

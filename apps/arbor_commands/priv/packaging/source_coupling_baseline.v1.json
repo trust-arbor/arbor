@@ -26601,62 +26601,6 @@
     {
       "class": "code",
       "fate": "downward",
-      "file": "apps/arbor_security/lib/arbor/security/revocation_fence.ex",
-      "from_app": "arbor_security",
-      "from_band": "P",
-      "from_module": "Arbor.Security.RevocationFence",
-      "kind": "alias",
-      "level_direction": "level_downward",
-      "occurrence_count": 1,
-      "target": "Arbor.Contracts.Security.Capability",
-      "to_app": "arbor_kernel",
-      "to_band": "K"
-    },
-    {
-      "class": "code",
-      "fate": "downward",
-      "file": "apps/arbor_security/lib/arbor/security/revocation_fence.ex",
-      "from_app": "arbor_security",
-      "from_band": "P",
-      "from_module": "Arbor.Security.RevocationFence",
-      "kind": "remote",
-      "level_direction": "level_downward",
-      "occurrence_count": 1,
-      "target": "Arbor.Contracts.Security.Capability",
-      "to_app": "arbor_kernel",
-      "to_band": "K"
-    },
-    {
-      "class": "code",
-      "fate": "downward",
-      "file": "apps/arbor_security/lib/arbor/security/revocation_fence.ex",
-      "from_app": "arbor_security",
-      "from_band": "P",
-      "from_module": "Arbor.Security.RevocationFence",
-      "kind": "struct",
-      "level_direction": "level_downward",
-      "occurrence_count": 7,
-      "target": "Arbor.Contracts.Security.Capability",
-      "to_app": "arbor_kernel",
-      "to_band": "K"
-    },
-    {
-      "class": "typespec_only",
-      "fate": "downward",
-      "file": "apps/arbor_security/lib/arbor/security/revocation_fence.ex",
-      "from_app": "arbor_security",
-      "from_band": "P",
-      "from_module": "Arbor.Security.RevocationFence",
-      "kind": "typespec",
-      "level_direction": "level_downward",
-      "occurrence_count": 5,
-      "target": "Arbor.Contracts.Security.Capability",
-      "to_app": "arbor_kernel",
-      "to_band": "K"
-    },
-    {
-      "class": "code",
-      "fate": "downward",
       "file": "apps/arbor_security/lib/arbor/security/session_token.ex",
       "from_app": "arbor_security",
       "from_band": "P",
@@ -27999,20 +27943,6 @@
       "to_band": "K"
     },
     {
-      "class": "typespec_only",
-      "fate": "downward",
-      "file": "apps/arbor_trust/lib/arbor/trust/authority_enumeration.ex",
-      "from_app": "arbor_trust",
-      "from_band": "P",
-      "from_module": "Arbor.Trust.AuthorityEnumeration",
-      "kind": "typespec",
-      "level_direction": "level_downward",
-      "occurrence_count": 1,
-      "target": "Arbor.Contracts.Security.Capability",
-      "to_app": "arbor_kernel",
-      "to_band": "K"
-    },
-    {
       "class": "code",
       "fate": "downward",
       "file": "apps/arbor_trust/lib/arbor/trust/capability_enforcement_matrix.ex",
@@ -28855,34 +28785,6 @@
     {
       "class": "code",
       "fate": "downward",
-      "file": "apps/arbor_trust/lib/arbor/trust/profile_resolver.ex",
-      "from_app": "arbor_trust",
-      "from_band": "P",
-      "from_module": "Arbor.Trust.ProfileResolver",
-      "kind": "remote",
-      "level_direction": "level_downward",
-      "occurrence_count": 1,
-      "target": "Arbor.Contracts.Trust.Profile",
-      "to_app": "arbor_kernel",
-      "to_band": "K"
-    },
-    {
-      "class": "code",
-      "fate": "downward",
-      "file": "apps/arbor_trust/lib/arbor/trust/profile_resolver.ex",
-      "from_app": "arbor_trust",
-      "from_band": "P",
-      "from_module": "Arbor.Trust.ProfileResolver",
-      "kind": "struct",
-      "level_direction": "level_downward",
-      "occurrence_count": 1,
-      "target": "Arbor.Contracts.Trust.Profile",
-      "to_app": "arbor_kernel",
-      "to_band": "K"
-    },
-    {
-      "class": "code",
-      "fate": "downward",
       "file": "apps/arbor_trust/lib/arbor/trust/store.ex",
       "from_app": "arbor_trust",
       "from_band": "P",
@@ -29377,5 +29279,5 @@
       "reason": "dynamic_module_concat"
     }
   ],
-  "entries_digest": "43fbd2e6b6fbd02973e110279a7924e05f0119e27f622339fe91effbe255c1ee"
+  "entries_digest": "ba00927a70d2b36aa74490f678b8f21859085663e8b9c7ec68c8503df4cd1ad9"
 }
