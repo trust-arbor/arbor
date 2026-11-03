@@ -243,7 +243,7 @@ defmodule Arbor.Orchestrator.EngineResumeAuthorizationSecurityRegressionTest do
       Arbor.Security.build_signing_authority_acquisition_proof(
         identity.agent_id,
         identity.private_key,
-        purpose: :engine_resume_test,
+        purpose: :session,
         owner: self()
       )
 
