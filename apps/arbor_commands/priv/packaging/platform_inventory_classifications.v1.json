@@ -126,7 +126,7 @@
     "rationale": "This engine reads normal-profile history from the ETS cache with best-effort Ecto fallthrough and converts results into query projections. Durable and query backends are replaceable provider behavior, not the minimal append-only audit mechanism required for safe recovery."
   },
   {
-    "path": "apps/arbor_historian/lib/arbor/historian/query_engine/aggregator.ex",
+    "path": "packages/arbor_historian/lib/arbor/historian/query_engine/aggregator.ex",
     "blob_oid": "7da1b6fe227a1eefc6433a2e6cd8515931a69ccb",
     "class": "optional_extension",
     "rationale": "This module derives counts, distributions, and activity summaries from query results. These analytical views are explicitly optional and are unnecessary for normal event capture, boot, or recovery."
@@ -144,13 +144,13 @@
     "rationale": "This pure core validates Historian stream-deletion requests and reduces backend purge and absence replies into progress envelopes. The mechanism is specific to the complete-history provider contract, so purity and fail-closed classification do not make it a K primitive or trusted host."
   },
   {
-    "path": "apps/arbor_historian/lib/arbor/historian/stream_ids.ex",
+    "path": "packages/arbor_historian/lib/arbor/historian/stream_ids.ex",
     "blob_oid": "606e473513d795dbe058ff9d10bcda11b72256e2",
     "class": "system_extension",
     "rationale": "This helper defines Historian's agent, category, session, and correlation stream naming convention. Those names are provider-domain query vocabulary rather than the generic capability or activation namespace."
   },
   {
-    "path": "apps/arbor_historian/lib/arbor/historian/stream_registry.ex",
+    "path": "packages/arbor_historian/lib/arbor/historian/stream_registry.ex",
     "blob_oid": "35f352f59c0fa4d596a04ea8c1481ed3de8ea83c",
     "class": "optional_extension",
     "rationale": "This public Agent stores resettable stream counts and timestamps for fast statistics, and no production append path currently records into it. It is an optional operational projection, not authoritative durable state or an audit invariant."
@@ -162,7 +162,7 @@
     "rationale": "This module filters stored security events and reconstructs historical taint chains and summaries. It observes past enforcement outcomes but does not enforce taint policy, so it is an optional historical view."
   },
   {
-    "path": "apps/arbor_historian/lib/arbor/historian/timeline.ex",
+    "path": "packages/arbor_historian/lib/arbor/historian/timeline.ex",
     "blob_oid": "bfe7c98e44b7d80f5599881c09c0851541d62e51",
     "class": "optional_extension",
     "rationale": "This module merges and deduplicates streams, applies span filters, and reconstructs causality timelines and summaries. Timeline reconstruction is a first-party historical view and is not required for event capture or recovery."
@@ -306,7 +306,7 @@
     "rationale": "This Agent-backed in-memory EventLog is described as a lightweight testing alternative. It is an optional process-lifetime provider rather than the normal hot or durable event store."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/event_log/bounded_worker.ex",
+    "path": "packages/arbor_persistence/lib/arbor/persistence/event_log/bounded_worker.ex",
     "blob_oid": "4983605d027e9a7494628aeb60f92b14fabffcce",
     "class": "system_extension",
     "rationale": "This helper owns deadline-bounded worker execution, owner liveness, termination, and mailbox cleanup for EventLog adapter effects. It is provider-operation containment scoped to the EventLog protocol; extension-wide invocation ownership must be supplied by Platform."
@@ -330,7 +330,7 @@
     "rationale": "This explicit PostgreSQL maintenance module audits and repairs legacy EventLog positions and identities with operator-bound rollback data. It is optional provider-specific repair tooling, not a mandatory host recovery service."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/event_log/snapshotter.ex",
+    "path": "packages/arbor_persistence/lib/arbor/persistence/event_log/snapshotter.ex",
     "blob_oid": "905a8d38892d5517a107434b735e24a508958e0b",
     "class": "optional_extension",
     "rationale": "This disabled-by-default GenServer snapshots EventLog.ETS into a selected Store and prunes retained snapshots. Snapshot acceleration is an optional feature layered on providers, not safe-mode recovery authority."
