@@ -312,10 +312,10 @@
     "rationale": "This helper owns deadline-bounded worker execution, owner liveness, termination, and mailbox cleanup for EventLog adapter effects. It is provider-operation containment scoped to the EventLog protocol; extension-wide invocation ownership must be supplied by Platform."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/event_log/ecto.ex",
-    "blob_oid": "810a12a298be22c382b3475e33fe7779c04f4057",
+    "path": "packages/arbor_persistence_sql/lib/arbor/persistence/event_log/ecto.ex",
+    "blob_oid": "939cbc07460c7ac0d4b91655ad4e79601d5a5479",
     "class": "system_extension",
-    "rationale": "This adapter implements durable EventLog operations, reconciliation, purge, and absence checks on Arbor.Persistence.Repo for SQLite or PostgreSQL. It is a replaceable first-party database provider used by the normal profile."
+    "rationale": "This adapter implements durable EventLog operations, reconciliation, purge, and absence checks on a selected Ecto Repo for SQLite or PostgreSQL. It is a replaceable first-party database provider used by the normal profile."
   },
   {
     "path": "apps/arbor_persistence/lib/arbor/persistence/event_log/ets.ex",
@@ -324,8 +324,8 @@
     "rationale": "This supervised ETS EventLog owns bounded hot event state, stream positions, identities, subscriptions, retention, and reconciliation. It is the normal-profile in-memory event provider and does not provide durable safe-mode audit recovery."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/event_log/postgres_repair.ex",
-    "blob_oid": "473f3fd258acef886596477c72a50b585bae564c",
+    "path": "packages/arbor_persistence_sql/lib/arbor/persistence/event_log/postgres_repair.ex",
+    "blob_oid": "cc5c7b83f04178365bba9964b9df3f09975bd9b0",
     "class": "optional_extension",
     "rationale": "This explicit PostgreSQL maintenance module audits and repairs legacy EventLog positions and identities with operator-bound rollback data. It is optional provider-specific repair tooling, not a mandatory host recovery service."
   },
