@@ -396,31 +396,31 @@
     "rationale": "This Ecto.Repo selects and owns the SQLite or PostgreSQL connection pool used by normal durable Persistence features. A concrete database runtime is replaceable provider infrastructure and is explicitly excluded from safe mode."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/schemas/channel.ex",
+    "path": "apps/arbor_persistence_host/lib/arbor/persistence/schemas/channel.ex",
     "blob_oid": "248f268e63a362f6f4766c86d11694f3a1d73e9b",
     "class": "system_extension",
     "rationale": "This Ecto schema defines communication channel rows and membership metadata. It is the storage representation used by the normal first-party Comms persistence provider, outside safe boot."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/schemas/channel_message.ex",
+    "path": "apps/arbor_persistence_host/lib/arbor/persistence/schemas/channel_message.ex",
     "blob_oid": "5351b7334da6a9f2676418e54abb1e6456a54a53",
     "class": "system_extension",
     "rationale": "This Ecto schema defines channel message rows, sender fields, content, and timestamps. It is storage representation for the normal first-party Comms channel provider."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/schemas/engagement.ex",
+    "path": "apps/arbor_persistence_host/lib/arbor/persistence/schemas/engagement.ex",
     "blob_oid": "5a06869da5c6bb9ab1d99d30d0b72f0afab2981f",
     "class": "system_extension",
     "rationale": "This Ecto schema persists device-independent Comms engagement state. It is concrete storage for the normal Comms continuity provider and is excluded from provider-free safe mode."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/schemas/eval_result.ex",
+    "path": "apps/arbor_persistence_host/lib/arbor/persistence/schemas/eval_result.ex",
     "blob_oid": "7957a238de5769ea4bf893996d8fb3f34a9e545e",
     "class": "optional_extension",
     "rationale": "This schema owns individual evaluation result rows and validation. Eval result retention is optional experimentation infrastructure, not boot or recovery state."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/schemas/eval_run.ex",
+    "path": "apps/arbor_persistence_host/lib/arbor/persistence/schemas/eval_run.ex",
     "blob_oid": "09bef3187afee89bdceecb7b7773ae3bed52a81e",
     "class": "optional_extension",
     "rationale": "This schema owns evaluation run metadata, status, provenance, and aggregate metrics. It supports the optional eval subsystem rather than a normal-profile persistence requirement."
@@ -438,7 +438,7 @@
     "rationale": "This Ecto schema stores EventLog operation fences, identity, status, and abort reason for reconciliation. It is internal durable state of the first-party EventLog provider, not generic Platform transaction state."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/schemas/memory_embedding.ex",
+    "path": "apps/arbor_persistence_host/lib/arbor/persistence/schemas/memory_embedding.ex",
     "blob_oid": "1ad14272fc5f0205af03e07c5ade982e38785516",
     "class": "optional_extension",
     "rationale": "This schema maps the legacy memory_embeddings table and pgvector field, with strict-vector ownership markers kept read-only. It belongs to the optional legacy embedding compatibility path."
@@ -456,7 +456,7 @@
     "rationale": "This Ecto schema defines tenant-owned relationship memory and closed plain-map conversion. It is storage representation for the normal first-party relationship-memory provider."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/schemas/session.ex",
+    "path": "apps/arbor_persistence_host/lib/arbor/persistence/schemas/session.ex",
     "blob_oid": "c6aa0f8efc3c3ebdc87ad5875b8ce530bb669d44",
     "class": "system_extension",
     "rationale": "This Ecto schema owns agent session identity, lifecycle status, model context, and entry association. Durable sessions are part of the normal agent profile but are not required for provider-free safe boot."
@@ -468,7 +468,7 @@
     "rationale": "This Ecto schema defines append-only session transcript entries, ordering, roles, tool content, and metadata. It is normal-profile agent session storage, not host recovery authority."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/schemas/skill_record.ex",
+    "path": "apps/arbor_persistence_host/lib/arbor/persistence/schemas/skill_record.ex",
     "blob_oid": "7a5e060c7e92a22af432622c3994a4d4e7bf7df6",
     "class": "system_extension",
     "rationale": "This Ecto schema stores skill content, provenance, taint, full-text fields, and embeddings for hybrid search. Runtime wires the persistent skill provider into the normal profile; it must remain distinct from extension activation authority."
@@ -510,7 +510,7 @@
     "rationale": "This boundary validates vector requests and results, enforces tenant consistency, resolves the configured backend, and dispatches vector operations. It is the normal vector provider protocol boundary; authenticated caller and exact provider-generation authorization must be added outside it by Platform."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/vector_store.ex",
+    "path": "apps/arbor_persistence_host/lib/arbor/persistence/vector_store.ex",
     "blob_oid": "f66e6b1f330fed15ea0f7eab6fa462a07d538aa9",
     "class": "system_extension",
     "rationale": "This behaviour defines the strict vector provider operations for execute, reconcile, fetch, list, search, and destroy. It is the first-party vector protocol selected for the system-extension proof, not a generic pre-Platform ABI."
@@ -522,7 +522,7 @@
     "rationale": "This Ecto implementation owns strict vector rows, agent fences, mutation receipts, transactional reconciliation, search, and destructive cleanup. It is the concrete release-bundled vector provider chosen for the system-extension lifecycle proof."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/vector_store/ecto/agent_fence_row.ex",
+    "path": "apps/arbor_persistence_host/lib/arbor/persistence/vector_store/ecto/agent_fence_row.ex",
     "blob_oid": "3e34488056223c459c54c923d2af84b29aa695aa",
     "class": "system_extension",
     "rationale": "This Ecto schema records per-agent vector destruction fences. It is internal state of the strict first-party vector database provider."
@@ -534,7 +534,7 @@
     "rationale": "This codec serializes vector operation preflight ledgers and receipts, converts vectors, enforces encoding limits, and computes provider digests. It is protocol plumbing for the strict system vector provider."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/vector_store/ecto/operation_receipt_row.ex",
+    "path": "apps/arbor_persistence_host/lib/arbor/persistence/vector_store/ecto/operation_receipt_row.ex",
     "blob_oid": "b16f1099cb1d9225e3e69fa18ead04e552633c53",
     "class": "system_extension",
     "rationale": "This Ecto schema stores strict vector operation fingerprints, receipts, and reconciliation status. It is provider-owned operation state and must not be confused with Platform activation receipts."
@@ -546,7 +546,7 @@
     "rationale": "This Ecto schema defines tenant-scoped strict vector records, source identity, model descriptor, category, metadata, and pgvector value. It is the concrete data model of the normal first-party vector provider."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/vector_store/unsupported.ex",
+    "path": "apps/arbor_persistence_host/lib/arbor/persistence/vector_store/unsupported.ex",
     "blob_oid": "17e5edad1feb7b35be17858317f24daca6cdfc71",
     "class": "system_extension",
     "rationale": "This inert adapter returns unsupported for every vector operation when no concrete backend is configured. It is the fail-closed default implementation of the system vector provider seam, not a host reference monitor."
