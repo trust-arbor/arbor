@@ -240,16 +240,16 @@
     "rationale": "This module provides process checkpoint save, retrying load, periodic scheduling, and callback-based restore over a caller-selected Store. It supports normal agent recovery but is not the extension-platform boot recovery mechanism and is not non-bypassable host code."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/checkpoint/store/agent.ex",
-    "blob_oid": "b9f49b30bdb67be474c154822aa69a09b6bc0414",
+    "path": "packages/arbor_persistence/lib/arbor/persistence/checkpoint/store/agent.ex",
+    "blob_oid": "4cbcc408d5f757ae5be1869979c63c0e0811c5bb",
     "class": "optional_extension",
     "rationale": "This process-lifetime Agent checkpoint backend is documented for isolated tests and small scenarios. It is an optional first-party test/development provider, not the normal checkpoint backend."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/checkpoint/store/ets.ex",
-    "blob_oid": "41faed39cf5cf81fecc64a6eb7131b67805bdcf2",
+    "path": "packages/arbor_persistence/lib/arbor/persistence/checkpoint/store/ets.ex",
+    "blob_oid": "fe618f0db09ed1c630dd9c63b8e294af090990aa",
     "class": "system_extension",
-    "rationale": "This GenServer owns the named ETS checkpoint table started by the Persistence application and configured for normal agent checkpointing. It is a process-lifetime provider and cannot satisfy safe-mode durable recovery."
+    "rationale": "This GenServer owns the named ETS checkpoint table composed by Persistence Host and selected in the repository's agent checkpoint configuration. It is a process-lifetime provider and cannot satisfy safe-mode durable recovery."
   },
   {
     "path": "apps/arbor_persistence/lib/arbor/persistence/config.ex",
