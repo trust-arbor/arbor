@@ -56,6 +56,7 @@ defmodule Arbor.Security.SigningAuthorityBrokerTest do
         for purpose <- [
               :session,
               :heartbeat,
+              :pipeline_run,
               :coding_task_executor,
               :coding_task_recovery,
               :oidc_operator

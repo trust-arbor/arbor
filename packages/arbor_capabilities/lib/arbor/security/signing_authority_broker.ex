@@ -295,6 +295,7 @@ defmodule Arbor.Security.SigningAuthorityBroker do
     "arbor.signing_authority.v1/engine_checkpoint_hmac_v3" => [
       :session,
       :heartbeat,
+      :pipeline_run,
       :coding_task_executor,
       :coding_task_recovery,
       :oidc_operator
