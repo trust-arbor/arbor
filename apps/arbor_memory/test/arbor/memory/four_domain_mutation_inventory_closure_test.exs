@@ -220,6 +220,25 @@ defmodule Arbor.Memory.FourDomainMutationInventoryClosureTest do
   @tag :integration
   @tag :database
   test "same-agent drain denies all four public mutations while an independent agent remains writable" do
+    previous_durable_target =
+      Application.fetch_env(:arbor_historian, :durable_event_log_target)
+
+    on_exit(fn ->
+      case previous_durable_target do
+        {:ok, value} ->
+          Application.put_env(:arbor_historian, :durable_event_log_target, value)
+
+        :error ->
+          Application.delete_env(:arbor_historian, :durable_event_log_target)
+      end
+    end)
+
+    Application.put_env(:arbor_historian, :durable_event_log_target, %{
+      name: :historian_durable_event_log,
+      backend: Arbor.Persistence.EventLog.Ecto,
+      opts: [repo: Arbor.Persistence.Repo]
+    })
+
     SignalsConfig.isolate_namespace()
     SignalsConfig.put(:durable_sink_module, Arbor.Historian)
 
