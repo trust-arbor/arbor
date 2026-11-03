@@ -12,6 +12,7 @@
 # starts a strict superset of what this file used to, and raises instead of
 # warning. See its moduledoc for why it lives in lib/.
 :ok = Arbor.Security.TestBootstrap.start!()
+:ok = Arbor.Signals.restore_runtime_fixture()
 
 # The Store and Manager belong under Arbor.Trust.Supervisor. Starting them
 # directly under ApplicationSupervisor leaves registered processes with the
