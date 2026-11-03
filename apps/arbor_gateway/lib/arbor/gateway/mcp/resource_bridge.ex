@@ -58,32 +58,22 @@ defmodule Arbor.Gateway.MCP.ResourceBridge do
   end
 
   @doc """
-  Check if an agent has the capability to read an MCP resource.
+  Authorize an agent to read an MCP resource.
 
-  Delegates to `Arbor.Security.authorize/3`. Fails closed: when the security
-  subsystem is not loaded or its `CapabilityStore` is not running (startup,
-  restart), the call is denied rather than granted.
+  Production uses `Arbor.Trust.authorize/4`, matching native actions. MCP
+  resources carry no destructive/read-only hints, so a missing hint is treated
+  as destructive and never skips Trust or approval.
+
+  Injected `:security_module` values keep the capability-only seam used by
+  fail-closed tests. Fails closed when security or Trust is unavailable.
   """
-  @spec authorize(String.t(), String.t(), String.t()) ::
-          :ok | {:error, :unauthorized, String.t()}
-  def authorize(agent_id, server_name, resource_name) do
-    uri = capability_uri(server_name, resource_name)
-
-    if security_available?() do
-      case apply(security_module(), :authorize, [agent_id, uri, :read]) do
-        {:ok, _} ->
+  @spec authorize(String.t(), String.t(), String.t(), keyword()) ::
           :ok
-
-        {:error, reason} ->
-          {:error, :unauthorized,
-           "Agent #{agent_id} lacks capability: #{uri} (#{inspect(reason)})"}
-      end
-    else
-      # FAIL CLOSED: no security subsystem means no authorization decision, so
-      # deny. This branch used to return :ok ("permissive mode"), granting every
-      # external MCP resource read while CapabilityStore was down or restarting.
-      {:error, :unauthorized, "security subsystem unavailable; cannot authorize #{uri}"}
-    end
+          | {:ok, :pending_approval, String.t()}
+          | {:error, :unauthorized, String.t()}
+  def authorize(agent_id, server_name, resource_name, opts \\ []) do
+    uri = capability_uri(server_name, resource_name)
+    authorize_held(agent_id, uri, :read, opts)
   rescue
     # FAIL CLOSED: a crash while consulting security must DENY, never grant.
     # (2026-06-09 Sentinel finding — the previous `:ok` auto-authorized an
@@ -121,9 +111,67 @@ defmodule Arbor.Gateway.MCP.ResourceBridge do
 
   # -- Private --
 
+  defp authorize_held(agent_id, uri, action, opts) do
+    if security_available?() do
+      case security_module() do
+        Arbor.Security ->
+          authorize_with_trust(agent_id, uri, action, opts)
+
+        injected ->
+          authorize_with_injected_security(injected, agent_id, uri, action)
+      end
+    else
+      # FAIL CLOSED: no security subsystem means no authorization decision, so
+      # deny. This branch used to return :ok ("permissive mode"), granting every
+      # external MCP resource read while CapabilityStore was down or restarting.
+      {:error, :unauthorized, "security subsystem unavailable; cannot authorize #{uri}"}
+    end
+  end
+
+  defp authorize_with_trust(agent_id, uri, action, opts) do
+    if trust_available?() do
+      trust_opts = Keyword.drop(List.wrap(opts), [:annotations])
+
+      case trust_module().authorize(agent_id, uri, action, trust_opts) do
+        {:ok, :authorized} ->
+          :ok
+
+        {:ok, :pending_approval, proposal_id} when is_binary(proposal_id) ->
+          {:ok, :pending_approval, proposal_id}
+
+        {:error, {:pending_approval, proposal_id}} when is_binary(proposal_id) ->
+          {:ok, :pending_approval, proposal_id}
+
+        {:error, reason} ->
+          {:error, :unauthorized,
+           "Agent #{agent_id} lacks capability: #{uri} (#{inspect(reason)})"}
+
+        other ->
+          {:error, :unauthorized,
+           "Agent #{agent_id} lacks capability: #{uri} (#{inspect(other)})"}
+      end
+    else
+      {:error, :unauthorized, "security subsystem unavailable; cannot authorize #{uri}"}
+    end
+  end
+
+  defp authorize_with_injected_security(injected, agent_id, uri, action) do
+    case apply(injected, :authorize, [agent_id, uri, action]) do
+      {:ok, _} ->
+        :ok
+
+      {:error, reason} ->
+        {:error, :unauthorized, "Agent #{agent_id} lacks capability: #{uri} (#{inspect(reason)})"}
+    end
+  end
+
   # Security module, overridable via config for tests / deployment swaps.
   defp security_module do
     Application.get_env(:arbor_gateway, :security_module, Arbor.Security)
+  end
+
+  defp trust_module do
+    Application.get_env(:arbor_gateway, :trust_module, Arbor.Trust)
   end
 
   defp security_available? do
@@ -137,4 +185,10 @@ defmodule Arbor.Gateway.MCP.ResourceBridge do
     do: Arbor.Security.capability_authorization_available?()
 
   defp security_running?(_injected), do: true
+
+  defp trust_available? do
+    mod = trust_module()
+
+    Code.ensure_loaded?(mod) and function_exported?(mod, :authorize, 4)
+  end
 end

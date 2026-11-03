@@ -180,13 +180,15 @@ defmodule Arbor.Gateway do
   ## Options
 
   - `:timeout` — call timeout in ms (default: 30_000)
-  - `:agent_id` — agent ID for capability authorization. Required unless
-    `skip_auth: true`; omitting it returns `{:error, :missing_agent_id}`.
-  - `:skip_auth` — skip capability check (default: false). Only the literal
-    `true` skips; this is the sole bypass.
+  - `:agent_id` — agent ID for Trust + capability authorization. Required
+    unless `skip_auth: true`; omitting it returns `{:error, :missing_agent_id}`.
+  - `:skip_auth` — skip Trust/capability check (default: false). Only the
+    literal `true` skips; this is the sole bypass.
 
   ## Errors
 
+  - `{:ok, :pending_approval, id}` — Trust/ApprovalGuard requires a human
+    answer; the MCP tool is not invoked.
   - `{:error, :missing_agent_id}` — no agent id and no explicit `skip_auth: true`.
   - `{:error, :unauthorized, reason}` — the agent lacks the tool capability.
   - `{:error, {:not_connected, server_name}}` — no connection exists for the
@@ -197,6 +199,7 @@ defmodule Arbor.Gateway do
   """
   @spec call_mcp_tool(String.t(), String.t(), map(), keyword()) ::
           {:ok, map()}
+          | {:ok, :pending_approval, String.t()}
           | {:error,
              :missing_agent_id
              | {:not_connected, String.t()}
@@ -207,10 +210,18 @@ defmodule Arbor.Gateway do
     agent_id = Keyword.get(opts, :agent_id)
     skip_auth = Keyword.get(opts, :skip_auth, false)
 
-    with :ok <- maybe_authorize(agent_id, server_name, tool_name, skip_auth),
-         {:ok, pid} <- find_connection(server_name),
-         {:ok, result} <- ClientConnection.call_tool(pid, tool_name, arguments, opts) do
-      {:ok, ToolBridge.taint_result(result, server_name, tool_name)}
+    case maybe_authorize(agent_id, server_name, tool_name, skip_auth, opts) do
+      :ok ->
+        with {:ok, pid} <- find_connection(server_name),
+             {:ok, result} <- ClientConnection.call_tool(pid, tool_name, arguments, opts) do
+          {:ok, ToolBridge.taint_result(result, server_name, tool_name)}
+        end
+
+      {:ok, :pending_approval, _id} = pending ->
+        pending
+
+      error ->
+        error
     end
   end
 
@@ -263,13 +274,13 @@ defmodule Arbor.Gateway do
   ## Options
 
   - `:timeout` — read timeout in ms (default: 30_000)
-  - `:agent_id` — agent ID for capability authorization. Required unless
-    `skip_auth: true`; omitting it returns `{:error, :missing_agent_id}`.
-  - `:skip_auth` — skip capability check (default: false). Only the literal
-    `true` skips; this is the sole bypass.
+  - `:agent_id` — agent ID for Trust + capability authorization. Required
+    unless `skip_auth: true`; omitting it returns `{:error, :missing_agent_id}`.
+  - `:skip_auth` — skip Trust/capability check (default: false). Only the
+    literal `true` skips; this is the sole bypass.
   """
   @spec read_mcp_resource(String.t(), String.t(), keyword()) ::
-          {:ok, map()} | {:error, term()}
+          {:ok, map()} | {:ok, :pending_approval, String.t()} | {:error, term()}
   def read_mcp_resource(server_name, resource_uri, opts \\ []) do
     agent_id = Keyword.get(opts, :agent_id)
     skip_auth = Keyword.get(opts, :skip_auth, false)
@@ -277,10 +288,18 @@ defmodule Arbor.Gateway do
     # Derive resource name from URI for authorization
     resource_name = resource_name_from_uri(server_name, resource_uri)
 
-    with :ok <- maybe_authorize_resource(agent_id, server_name, resource_name, skip_auth),
-         {:ok, pid} <- find_connection(server_name),
-         {:ok, contents} <- ClientConnection.read_resource(pid, resource_uri, opts) do
-      {:ok, ResourceBridge.taint_contents(contents, server_name, resource_uri)}
+    case maybe_authorize_resource(agent_id, server_name, resource_name, skip_auth, opts) do
+      :ok ->
+        with {:ok, pid} <- find_connection(server_name),
+             {:ok, contents} <- ClientConnection.read_resource(pid, resource_uri, opts) do
+          {:ok, ResourceBridge.taint_contents(contents, server_name, resource_uri)}
+        end
+
+      {:ok, :pending_approval, _id} = pending ->
+        pending
+
+      error ->
+        error
     end
   end
 
@@ -418,14 +437,19 @@ defmodule Arbor.Gateway do
   # bypasses the capability check. A missing or blank `:agent_id` is a denial,
   # never an implicit skip — the old `nil -> :ok` clause let any caller that
   # dropped the option reach an external MCP server with no authorization.
-  defp maybe_authorize(_agent_id, _server, _tool, true), do: :ok
+  defp maybe_authorize(_agent_id, _server, _tool, true, _opts), do: :ok
 
-  defp maybe_authorize(agent_id, server_name, tool_name, _skip)
+  defp maybe_authorize(agent_id, server_name, tool_name, _skip, opts)
        when is_binary(agent_id) and agent_id != "" do
-    ToolBridge.authorize(agent_id, server_name, tool_name)
+    ToolBridge.authorize(
+      agent_id,
+      server_name,
+      tool_name,
+      trust_auth_opts(server_name, tool_name, opts)
+    )
   end
 
-  defp maybe_authorize(_agent_id, _server, _tool, _skip), do: {:error, :missing_agent_id}
+  defp maybe_authorize(_agent_id, _server, _tool, _skip, _opts), do: {:error, :missing_agent_id}
 
   defp find_connection(server_name) do
     case ClientSupervisor.find_connection(server_name) do
@@ -435,15 +459,42 @@ defmodule Arbor.Gateway do
   end
 
   # Same fail-closed rule as maybe_authorize/4 (Imp review D2).
-  defp maybe_authorize_resource(_agent_id, _server, _resource, true), do: :ok
+  defp maybe_authorize_resource(_agent_id, _server, _resource, true, _opts), do: :ok
 
-  defp maybe_authorize_resource(agent_id, server_name, resource_name, _skip)
+  defp maybe_authorize_resource(agent_id, server_name, resource_name, _skip, opts)
        when is_binary(agent_id) and agent_id != "" do
-    ResourceBridge.authorize(agent_id, server_name, resource_name)
+    ResourceBridge.authorize(agent_id, server_name, resource_name, resource_auth_opts(opts))
   end
 
-  defp maybe_authorize_resource(_agent_id, _server, _resource, _skip),
+  defp maybe_authorize_resource(_agent_id, _server, _resource, _skip, _opts),
     do: {:error, :missing_agent_id}
+
+  defp trust_auth_opts(server_name, tool_name, opts) do
+    opts
+    |> forwarded_trust_opts()
+    |> Keyword.put(:annotations, mcp_tool_annotations(server_name, tool_name))
+  end
+
+  defp resource_auth_opts(opts), do: forwarded_trust_opts(opts)
+
+  defp forwarded_trust_opts(opts) when is_list(opts) do
+    Keyword.take(opts, [
+      :approved_invocation,
+      :argument_digest,
+      :approval_action,
+      :receipt_action,
+      :verify_identity
+    ])
+  end
+
+  defp forwarded_trust_opts(_opts), do: []
+
+  defp mcp_tool_annotations(server_name, tool_name) do
+    case Enum.find(list_mcp_tools(server_name), &(&1.mcp_tool_name == tool_name)) do
+      %{annotations: annotations} when is_map(annotations) -> annotations
+      _ -> %{}
+    end
+  end
 
   # Derive a short resource name from a URI for capability lookups.
   # Tries to find a matching cached resource name, falls back to URI basename.

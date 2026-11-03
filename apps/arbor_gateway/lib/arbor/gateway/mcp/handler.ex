@@ -1410,6 +1410,9 @@ defmodule Arbor.Gateway.MCP.Handler do
       {:ok, %{value: value}} ->
         "## Success (MCP: #{server_name}/#{tool_name})\n\n#{format_result(value)}"
 
+      {:ok, :pending_approval, proposal_id} ->
+        "## Pending Approval\n\nProposal #{proposal_id} created. Awaiting consensus."
+
       {:error, {:not_connected, name}} ->
         "## Error\n\nMCP server '#{name}' is not connected. " <>
           "Use arbor_status component=mcp to see connected servers."
