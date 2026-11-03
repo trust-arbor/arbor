@@ -426,13 +426,13 @@
     "rationale": "This schema owns evaluation run metadata, status, provenance, and aggregate metrics. It supports the optional eval subsystem rather than a normal-profile persistence requirement."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/schemas/event.ex",
+    "path": "packages/arbor_persistence_sql/lib/arbor/persistence/schemas/event.ex",
     "blob_oid": "19b2d63881c1e1121c97f89eac6f71652f35f3d1",
     "class": "system_extension",
     "rationale": "This Ecto schema maps canonical Persistence events to durable rows with stream, global-position, and operation identity constraints. It is concrete storage representation for the normal EventLog database provider."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/schemas/event_log_operation.ex",
+    "path": "packages/arbor_persistence_sql/lib/arbor/persistence/schemas/event_log_operation.ex",
     "blob_oid": "156992639e1fe61f25191638a8e0e078e6d1717b",
     "class": "system_extension",
     "rationale": "This Ecto schema stores EventLog operation fences, identity, status, and abort reason for reconciliation. It is internal durable state of the first-party EventLog provider, not generic Platform transaction state."
@@ -588,7 +588,7 @@
     "rationale": "This facade exposes an explicitly configured EventStore-backed Postgres adapter and availability probe. The separate EventStore package is an opt-in first-party alternative to the normal Repo-backed EventLog provider."
   },
   {
-    "path": "apps/arbor_persistence_ecto/lib/arbor/persistence/ecto/application.ex",
+    "path": "packages/arbor_persistence_eventstore/lib/arbor/persistence/ecto/application.ex",
     "blob_oid": "4e88aecdca1a849b7efcc755ff1e56e5f21e0e51",
     "class": "optional_extension",
     "rationale": "This application starts an empty supervisor and requires users to add the EventStore child explicitly. It is lifecycle scaffolding for the opt-in EventStore provider, not normal-profile or safe-host startup."
@@ -606,7 +606,7 @@
     "rationale": "This module migrates and verifies the exact PostgreSQL schema, constraints, locks, triggers, and protocol version required by the opt-in EventStore adapter. Strong schema admission remains provider implementation responsibility."
   },
   {
-    "path": "apps/arbor_persistence_ecto/lib/arbor/persistence/ecto/event_serializer.ex",
+    "path": "packages/arbor_persistence_eventstore/lib/arbor/persistence/ecto/event_serializer.ex",
     "blob_oid": "4eab62c0fecc3657a5a4fe95a60aed949bfeb7b6",
     "class": "optional_extension",
     "rationale": "This JSON serializer adapts Arbor's string-typed event contract to the EventStore library. It is implementation plumbing for the optional first-party Postgres provider."
@@ -618,7 +618,7 @@
     "rationale": "This module instantiates the external EventStore library with Arbor configuration and serializer. It is an independently selectable Arbor-supplied database adapter, not independently supplied third-party extension code."
   },
   {
-    "path": "apps/arbor_persistence_ecto/lib/mix/tasks/arbor.event_log.migrate.ex",
+    "path": "packages/arbor_persistence_eventstore/lib/mix/tasks/arbor.event_log.migrate.ex",
     "blob_oid": "1469df74b3fa6b25c055625fb6d66c8b875fd3fc",
     "class": "optional_extension",
     "rationale": "This Mix task runs and verifies the optional EventStore provider's PostgreSQL migrations. It is provider-specific operator tooling and is not part of normal or safe boot."
