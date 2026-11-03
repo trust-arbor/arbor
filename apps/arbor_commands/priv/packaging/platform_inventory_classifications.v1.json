@@ -252,14 +252,14 @@
     "rationale": "This GenServer owns the named ETS checkpoint table composed by Persistence Host and selected in the repository's agent checkpoint configuration. It is a process-lifetime provider and cannot satisfy safe-mode durable recovery."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/config.ex",
-    "blob_oid": "5f4a4c0d09171e8de63fa82e858ea51c2f365283",
+    "path": "apps/arbor_persistence_host/lib/arbor/persistence/host/config.ex",
+    "blob_oid": "ff6dd753b2d84cc5f070eb2404cbdc12aaa5e200",
     "class": "system_extension",
     "rationale": "This file selects the first-party vector provider from application environment and defaults to the fail-closed unsupported adapter. Target architecture replaces this module-atom selection with authorized provider resolution, so the current responsibility remains with the system vector extension."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/database_case.ex",
-    "blob_oid": "6964092e4cb544700af7c463c6225e578a80cd3c",
+    "path": "apps/arbor_persistence_host/lib/arbor/persistence/database_case.ex",
+    "blob_oid": "c67ec14eee9f3ed072c86f24b127147adfa5ec70",
     "class": "optional_extension",
     "rationale": "This release-inert ExUnit case template starts and sandboxes the Ecto Repo for cross-app database tests. It is first-party validation tooling, not production host or normal-profile provider runtime."
   },
