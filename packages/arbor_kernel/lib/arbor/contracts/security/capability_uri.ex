@@ -34,6 +34,7 @@ defmodule Arbor.Contracts.Security.CapabilityUri do
   def parse(uri) when is_binary(uri) do
     with {:ok, rest} <- strip_scheme(uri),
          {:ok, raw_segments} <- split_segments(rest),
+         :ok <- reject_dot_segments(raw_segments),
          {:ok, wildcard} <- validate_wildcard(raw_segments),
          {:ok, body_segments} <- validate_domain_and_operation(raw_segments, wildcard) do
       {:ok,
@@ -169,6 +170,34 @@ defmodule Arbor.Contracts.Security.CapabilityUri do
         end
     end
   end
+
+  defp reject_dot_segments(segments) do
+    if Enum.any?(segments, &dot_segment?/1) do
+      {:error, :traversal_segment}
+    else
+      :ok
+    end
+  end
+
+  # A later `;param` strip or percent-decode must not be able to turn a
+  # stored segment into a parent (or current-directory) reference.
+  defp dot_segment?(segment) when is_binary(segment) do
+    segment
+    |> strip_uri_parameters()
+    |> URI.decode()
+    |> kernel_dot_name?()
+  end
+
+  defp strip_uri_parameters(segment) do
+    case :binary.split(segment, ";") do
+      [name, _params] -> name
+      [name] -> name
+    end
+  end
+
+  defp kernel_dot_name?("."), do: true
+  defp kernel_dot_name?(".."), do: true
+  defp kernel_dot_name?(_name), do: false
 
   defp internal_empty_segment?(segments, last_index) do
     segments
