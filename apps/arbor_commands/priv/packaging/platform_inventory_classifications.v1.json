@@ -342,8 +342,8 @@
     "rationale": "This Persistence namespace facade delegates query-filter construction and evaluation through the selected persistence contract provider. It supplies a compatibility API for queryable storage providers."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/legacy_embedding_store.ex",
-    "blob_oid": "603b66f073272de6d07e74756f49a13fe7b72a86",
+    "path": "apps/arbor_persistence_host/lib/arbor/persistence/legacy_embedding_store.ex",
+    "blob_oid": "bc39d369097031443c9626ab63e7dfb7871d22f0",
     "class": "optional_extension",
     "rationale": "This module validates and operates the retired memory_embeddings representation alongside the strict vector path. It is a compatibility provider retained for migration and is not required by the target normal profile."
   },
@@ -504,8 +504,8 @@
     "rationale": "This supervised ETS Store supplies bounded process-lifetime key-value storage and CAS, primarily as an injected test or lightweight backend. The normal application starts QueryableStore.ETS instead, so this is an optional provider."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/vector_boundary.ex",
-    "blob_oid": "a3538f890aee91eb9e2852f07e6c133a4e7780ad",
+    "path": "apps/arbor_persistence_host/lib/arbor/persistence/vector_boundary.ex",
+    "blob_oid": "8223f7db9112de09a7f4345d92ceec640b52dc45",
     "class": "system_extension",
     "rationale": "This boundary validates vector requests and results, enforces tenant consistency, resolves the configured backend, and dispatches vector operations. It is the normal vector provider protocol boundary; authenticated caller and exact provider-generation authorization must be added outside it by Platform."
   },
