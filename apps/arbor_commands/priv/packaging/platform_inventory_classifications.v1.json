@@ -288,8 +288,8 @@
     "rationale": "This high-level evaluation store chooses database or JSON-file persistence and manages eval runs and results. It is an optional first-party evaluation feature, not a normal-profile storage prerequisite."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/event.ex",
-    "blob_oid": "7a5508922e2306cda75e7c390dddca5e03b12c7f",
+    "path": "packages/arbor_persistence/lib/arbor/persistence/event.ex",
+    "blob_oid": "ca19e3ffd17ed0271c3035873fd51fb56127932b",
     "class": "system_extension",
     "rationale": "This typed event value and constructor are the in-app representation used by the first-party EventLog providers. The generic cross-extension envelope belongs in Kernel, while this Persistence event model belongs with the normal-profile event provider protocol."
   },
@@ -336,10 +336,10 @@
     "rationale": "This disabled-by-default GenServer snapshots EventLog.ETS into a selected Store and prunes retained snapshots. Snapshot acceleration is an optional feature layered on providers, not safe-mode recovery authority."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/filter.ex",
-    "blob_oid": "b78cc17305842205c37717afa4ced5eeaccface8",
+    "path": "packages/arbor_persistence/lib/arbor/persistence/filter.ex",
+    "blob_oid": "55f8d663e6d4172665296feb6a61763beb392dbb",
     "class": "system_extension",
-    "rationale": "This compatibility facade delegates query-filter construction and evaluation to the Kernel contract used by QueryableStore providers. The primitive already lives in Kernel; this Persistence namespace shim belongs with the normal provider API."
+    "rationale": "This Persistence namespace facade delegates query-filter construction and evaluation through the selected persistence contract provider. It supplies a compatibility API for queryable storage providers."
   },
   {
     "path": "apps/arbor_persistence/lib/arbor/persistence/legacy_embedding_store.ex",
@@ -378,10 +378,10 @@
     "rationale": "This Ecto-backed QueryableStore implements namespaced records, bounded listing, filtering, aggregation, tombstones, and linearizable CAS. It is the normal first-party durable key-value provider, not the host durability reference monitor."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/record.ex",
-    "blob_oid": "d4a2e57eaf46e4495a7c0d7be47ab4dadd58e385",
+    "path": "packages/arbor_persistence/lib/arbor/persistence/record.ex",
+    "blob_oid": "a549a2aaf9cbd9103b20b2fd98574a61efc2c6a7",
     "class": "system_extension",
-    "rationale": "This Persistence namespace wrapper delegates record construction and update to the Kernel contract used by Store implementations. The stable value primitive is already Kernel-owned; this shim belongs to the system provider surface."
+    "rationale": "This Persistence namespace wrapper constructs and updates records through the selected persistence contract provider. It supplies a compatibility API for storage providers."
   },
   {
     "path": "apps/arbor_persistence/lib/arbor/persistence/relationship_store.ex",
