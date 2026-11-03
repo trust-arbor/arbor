@@ -1362,7 +1362,7 @@
     "rationale": "This read-only utility combines held capabilities with caller-supplied URIs that policy could mint, for inspection without mutation. Authority visualization and discovery are useful tooling but are not required to authorize or recover the system."
   },
   {
-    "path": "apps/arbor_trust/lib/arbor/trust/behaviour.ex",
+    "path": "packages/arbor_trust/lib/arbor/trust/behaviour.ex",
     "blob_oid": "ca82847a4e419a923506c26dae47707f78db88c3",
     "class": "system_extension",
     "rationale": "This internal behaviour defines the profile, event, freeze, and lifecycle interface implemented only by Trust.Manager. It is the contract of the first-party policy-state provider, not a shared pre-Platform ABI or host reference-monitor contract."

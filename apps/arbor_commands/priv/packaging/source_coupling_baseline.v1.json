@@ -28015,34 +28015,6 @@
     {
       "class": "code",
       "fate": "downward",
-      "file": "apps/arbor_trust/lib/arbor/trust/behaviour.ex",
-      "from_app": "arbor_trust",
-      "from_band": "P",
-      "from_module": "Arbor.Trust.Behaviour",
-      "kind": "alias",
-      "level_direction": "level_downward",
-      "occurrence_count": 1,
-      "target": "Arbor.Contracts.Trust.Profile",
-      "to_app": "arbor_kernel",
-      "to_band": "K"
-    },
-    {
-      "class": "typespec_only",
-      "fate": "downward",
-      "file": "apps/arbor_trust/lib/arbor/trust/behaviour.ex",
-      "from_app": "arbor_trust",
-      "from_band": "P",
-      "from_module": "Arbor.Trust.Behaviour",
-      "kind": "typespec",
-      "level_direction": "level_downward",
-      "occurrence_count": 2,
-      "target": "Arbor.Contracts.Trust.Profile",
-      "to_app": "arbor_kernel",
-      "to_band": "K"
-    },
-    {
-      "class": "code",
-      "fate": "downward",
       "file": "apps/arbor_trust/lib/arbor/trust/capability_enforcement_matrix.ex",
       "from_app": "arbor_trust",
       "from_band": "P",
@@ -29405,5 +29377,5 @@
       "reason": "dynamic_module_concat"
     }
   ],
-  "entries_digest": "49c815c91a1c8d6d429161908665de78f95847af2d48acfc8786905321c844f6"
+  "entries_digest": "43fbd2e6b6fbd02973e110279a7924e05f0119e27f622339fe91effbe255c1ee"
 }
