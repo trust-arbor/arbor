@@ -192,8 +192,8 @@
     "rationale": "Arbor.LLM.ArborActionsExecutor.definitions/1 (arbor_actions_executor.ex:35-42) loads the actions catalog through the orchestrator executor and maps it with to_openai_format/1 (116-124). execute/4 (107-109) apply/3s execute_classified on that executor rather than compiling a direct dependency. Current owner is arbor_orchestrator. This is cognition tool integration: it delegates execution and does not grant the capability the executor checks. Class system_extension."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence.ex",
-    "blob_oid": "30e39b948e19a8201e4df9c5ff786bc658bd293d",
+    "path": "apps/arbor_persistence_host/lib/arbor/persistence.ex",
+    "blob_oid": "aa17150577bfb147560bda933bdddb9b786ec786",
     "class": "system_extension",
     "rationale": "This public facade dispatches normal-profile key-value, event, vector, session, relationship, telemetry, and Ecto operations to concrete Persistence implementations. Its authorization and durability-reporting clauses are mixed into a provider-facing facade and must split into the future host admission and invocation boundary rather than making the whole file trusted host."
   },
@@ -222,8 +222,8 @@
     "rationale": "This disabled-by-default GenServer schedules and invokes PostgreSQL backups. It is an optional operational provider that Persistence Host can compose when Repo startup and backups are enabled."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/buffered_store.ex",
-    "blob_oid": "bfb2fa8758eff176cf9388f001ca987aa9112bd2",
+    "path": "packages/arbor_persistence/lib/arbor/persistence/buffered_store.ex",
+    "blob_oid": "d607944ac415290a88cf24b3029a68006d955751",
     "class": "system_extension",
     "rationale": "This GenServer implements a normal-profile ETS cache over a pluggable Store backend, including hydration, replication, and acknowledged write modes. Its authority-mode and authoritative-read API is mixed with replaceable cache/backend mechanics; the future minimal host store and durability admission must be split out before this remains a provider."
   },
@@ -270,8 +270,8 @@
     "rationale": "This Ecto adapter durably stores Comms engagement records and converts them to and from the Comms contract. The normal Comms profile writes through to it for restart continuity, but safe mode can use neither Comms nor this provider."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/eval/file_store.ex",
-    "blob_oid": "f662d056fee0b18ccc58d4381595acbf1a6750ac",
+    "path": "apps/arbor_persistence_host/lib/arbor/persistence/eval/file_store.ex",
+    "blob_oid": "60e1b6216918100aff35b22e8c7cf8880d3ac72d",
     "class": "optional_extension",
     "rationale": "This bounded private-directory JSON store persists evaluation runs with path, file-identity, and publication checks. Those checks constrain an optional eval backend; they do not turn evaluation storage into a host reference monitor."
   },
@@ -318,8 +318,8 @@
     "rationale": "This adapter implements durable EventLog operations, reconciliation, purge, and absence checks on a selected Ecto Repo for SQLite or PostgreSQL. It is a replaceable first-party database provider used by the normal profile."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/event_log/ets.ex",
-    "blob_oid": "e841ad173c55014653672b547eacf6231d8a5381",
+    "path": "packages/arbor_persistence/lib/arbor/persistence/event_log/ets.ex",
+    "blob_oid": "8be45ec1c0de3cf28c34eca8436c6117bfe6cefd",
     "class": "system_extension",
     "rationale": "This supervised ETS EventLog owns bounded hot event state, stream positions, identities, subscriptions, retention, and reconciliation. It is the normal-profile in-memory event provider and does not provide durable safe-mode audit recovery."
   },
