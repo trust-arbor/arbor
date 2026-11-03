@@ -1159,7 +1159,7 @@
   },
   {
     "path": "apps/arbor_shell/lib/arbor/shell/linux_dependency_baseline_builder.ex",
-    "blob_oid": "30442e81be178f065e08f67b35099f35b290c0df",
+    "blob_oid": "57f0a13d041b7599a511a9558b788abed155ede8",
     "class": "optional_extension",
     "rationale": "Builds bounded Linux arm64 dependency manifests from an explicit source tree, including ELF architecture checks. This operator tooling provisions an optional provider dependency set."
   },
@@ -1237,7 +1237,7 @@
   },
   {
     "path": "apps/arbor_shell/lib/arbor/shell/spawn_capable_timeout.ex",
-    "blob_oid": "fcd3990185d3234a9733eced2c66a1df8abc28b0",
+    "blob_oid": "f71cd97c1620d4478e2b0f220ce8cb27f99e89c6",
     "class": "trusted_host",
     "rationale": "Defines and validates non-bypassable wall-clock ceilings by closed resource profile, plus bounded probe deadlines. These resource limits constrain providers and therefore remain fixed host policy."
   },
@@ -1303,7 +1303,7 @@
   },
   {
     "path": "apps/arbor_shell/lib/arbor/shell/trusted_build/plan.ex",
-    "blob_oid": "ecabc43a03b563e445a3242f54b1496e4d4652e2",
+    "blob_oid": "aa9e631c7414c571e608b1b0e823aef866b5b29f",
     "class": "trusted_host",
     "rationale": "Defines the closed phase set and order, the fixed argv per phase, bounded timeouts, the writable-name allowlist, and the pinned environment vocabulary for build execution. Build runners consume these ceilings but cannot choose or weaken them."
   },
