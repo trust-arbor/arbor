@@ -114,8 +114,8 @@
     "rationale": "This converter maps Historian events to and from Persistence.Event, including provider type conventions and safe atom decoding. It is adapter glue inside the normal Historian provider rather than a host verification boundary."
   },
   {
-    "path": "apps/arbor_historian/lib/arbor/historian/history_entry.ex",
-    "blob_oid": "b44efd1a9e40b0f92441b9110516b7eb0b604426",
+    "path": "packages/arbor_historian/lib/arbor/historian/history_entry.ex",
+    "blob_oid": "418aa9aa403dd42c0f8af6871b6d0dc2374895c6",
     "class": "system_extension",
     "rationale": "This struct is Historian's persisted-event query projection and implements its filter semantics. It belongs to the normal history provider's read contract and has no boot, recovery, or reference-monitor role."
   },
@@ -168,8 +168,8 @@
     "rationale": "This module merges and deduplicates streams, applies span filters, and reconstructs causality timelines and summaries. Timeline reconstruction is a first-party historical view and is not required for event capture or recovery."
   },
   {
-    "path": "apps/arbor_historian/lib/arbor/historian/timeline/span.ex",
-    "blob_oid": "f4c494259c2f1385d947b0f31d44ad9ce34fa8fa",
+    "path": "packages/arbor_historian/lib/arbor/historian/timeline/span.ex",
+    "blob_oid": "16594dab56ece1f9fb1c6f3c213aad9fd3520448",
     "class": "optional_extension",
     "rationale": "This struct describes time-bounded filters for the optional timeline reconstruction feature. It is query-view vocabulary with no role in mandatory audit append, boot, or extension recovery."
   },
