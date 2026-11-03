@@ -261,6 +261,46 @@ defmodule Arbor.Gateway.MCP.TrustApprovalSecurityRegressionTest do
     refute_received {:tool_executed, _, _}
   end
 
+  test "security regression: a receipt for args A cannot authorize args B",
+       %{agent_id: agent_id} do
+    uri = "arbor://mcp/#{@server}/#{@tool}"
+    {:ok, _cap} = Arbor.Security.grant_fixture(principal: agent_id, resource: uri)
+
+    args_a = %{"target" => "scratch"}
+    args_b = %{"target" => "production"}
+    {:ok, digest_a} = Arbor.Security.approval_argument_digest(args_a)
+
+    {:ok, receipt} =
+      Arbor.Security.issue_approval_receipt_fixture(
+        agent_id,
+        uri,
+        :execute,
+        digest_a,
+        "irq_mcp_arg_binding"
+      )
+
+    mismatched =
+      Arbor.Gateway.call_mcp_tool(@server, @tool, args_b,
+        agent_id: agent_id,
+        approved_invocation: receipt,
+        argument_digest: digest_a
+      )
+
+    refute match?({:ok, %{value: _}}, mismatched),
+           "receipt for #{inspect(args_a)} authorized different args: #{inspect(mismatched, limit: 8)}"
+
+    refute_received {:tool_executed, @tool, ^args_b}
+
+    assert {:ok, %{value: _, taint: %{level: :untrusted}}} =
+             Arbor.Gateway.call_mcp_tool(@server, @tool, args_a,
+               agent_id: agent_id,
+               approved_invocation: receipt,
+               argument_digest: digest_a
+             )
+
+    assert_receive {:tool_executed, @tool, ^args_a}, 1_000
+  end
+
   defp restore(app, key, nil), do: Application.delete_env(app, key)
   defp restore(app, key, value), do: Application.put_env(app, key, value)
 
