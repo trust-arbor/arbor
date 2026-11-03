@@ -210,16 +210,16 @@
     "rationale": "This OTP application supervises the normal-profile checkpoint, jobs, and hot EventLog providers and conditionally starts Repo, backup, and snapshot children. It is provider lifecycle wiring; safe mode must omit it and use the planned host-owned minimal state service instead."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/backup.ex",
-    "blob_oid": "1bd5eb1a595d5fbdf0b3348da003fb68b000a608",
+    "path": "apps/arbor_persistence_host/lib/arbor/persistence/backup.ex",
+    "blob_oid": "fa48c7485736704f3880aa7d6f81981be0885e52",
     "class": "optional_extension",
     "rationale": "This file owns PostgreSQL dump, age encryption, restore, retention, and backup-file management. It is provider-specific operator recovery tooling, not the mandatory provider-independent recovery service required by safe mode."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/backup/scheduler.ex",
-    "blob_oid": "5a652a91c7a3f259d7ef37853ee57cb1c8c2751f",
+    "path": "apps/arbor_persistence_host/lib/arbor/persistence/backup/scheduler.ex",
+    "blob_oid": "3c1fb78fa73bd0641622408dd9bf3d9e59bebef6",
     "class": "optional_extension",
-    "rationale": "This disabled-by-default GenServer schedules and invokes PostgreSQL backups. Scheduled backups are an optional operational feature and do not participate in host boot or reference-monitor recovery."
+    "rationale": "This disabled-by-default GenServer schedules and invokes PostgreSQL backups. It is an optional operational provider that Persistence Host can compose when Repo startup and backups are enabled."
   },
   {
     "path": "apps/arbor_persistence/lib/arbor/persistence/buffered_store.ex",
@@ -558,8 +558,8 @@
     "rationale": "This module projects council verdicts and findings into eval-run persistence when the Repo is available. Council result history is an optional Cognition feature and is distinct from mandatory security lifecycle audit."
   },
   {
-    "path": "apps/arbor_persistence/lib/mix/tasks/arbor/backup.ex",
-    "blob_oid": "04be9edad4d44d0964f30520673bbe8129e2ad40",
+    "path": "apps/arbor_persistence_host/lib/mix/tasks/arbor/backup.ex",
+    "blob_oid": "a5f5df6849632ab3a35b12d6978f21049b2179f5",
     "class": "optional_extension",
     "rationale": "This Mix task presents the encrypted PostgreSQL backup operation and its prerequisites to an operator. It is optional development/operator tooling and is excluded from the safe release profile."
   },
