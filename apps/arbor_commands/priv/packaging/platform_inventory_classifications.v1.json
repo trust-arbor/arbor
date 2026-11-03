@@ -372,8 +372,8 @@
     "rationale": "This GenServer owns the bounded ETS QueryableStore started as the normal-profile jobs store, including record revision and CAS semantics. It is a replaceable process-lifetime provider and is not safe-mode durable state."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/queryable_store/postgres.ex",
-    "blob_oid": "d666e98595674d6aec252a5045f8cf34725828a1",
+    "path": "packages/arbor_persistence_sql/lib/arbor/persistence/queryable_store/postgres.ex",
+    "blob_oid": "aaf3b4a7215b939083251337b94f6be304eb706e",
     "class": "system_extension",
     "rationale": "This Ecto-backed QueryableStore implements namespaced records, bounded listing, filtering, aggregation, tombstones, and linearizable CAS. It is the normal first-party durable key-value provider, not the host durability reference monitor."
   },
@@ -384,8 +384,8 @@
     "rationale": "This Persistence namespace wrapper constructs and updates records through the selected persistence contract provider. It supplies a compatibility API for storage providers."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/relationship_store.ex",
-    "blob_oid": "7f5641ab330c862ccbff2dfe93b09015007299fe",
+    "path": "apps/arbor_persistence_host/lib/arbor/persistence/relationship_store.ex",
+    "blob_oid": "1e3e17bd46611cec16487a9dbb0cdd0aeeaeebb8",
     "class": "system_extension",
     "rationale": "This bounded Ecto store owns tenant-scoped relationship rows, transactional deletion, and plain-map conversion for normal agent memory. It is a first-party normal-profile memory provider and carries no safe-boot reference-monitor role."
   },
@@ -480,8 +480,8 @@
     "rationale": "This schema represents historical telemetry rows and validates required fields and supported event types. It is concrete storage for the telemetry provider wired into the normal runtime profile."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/session_store.ex",
-    "blob_oid": "d3071f4eb6390ea6f5849b18731b8fb125b212e8",
+    "path": "apps/arbor_persistence_host/lib/arbor/persistence/session_store.ex",
+    "blob_oid": "5cedeeaccb4021056ac4513631972775b0fd8d28",
     "class": "system_extension",
     "rationale": "This Ecto context manages normal agent sessions and append-only transcript entries, including tenant checks, transaction deadlines, SQLite contention handling, and export. Those strong provider invariants do not make session persistence a safe-boot host service."
   },
@@ -516,8 +516,8 @@
     "rationale": "This behaviour defines the strict vector provider operations for execute, reconcile, fetch, list, search, and destroy. It is the first-party vector protocol selected for the system-extension proof, not a generic pre-Platform ABI."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/vector_store/ecto.ex",
-    "blob_oid": "04b92296fa35c6203fc53244e2eeffb418b4d323",
+    "path": "apps/arbor_persistence_host/lib/arbor/persistence/vector_store/ecto.ex",
+    "blob_oid": "7903aa60bfea9cc6b0b2eda7b61e27b5e1f6e408",
     "class": "system_extension",
     "rationale": "This Ecto implementation owns strict vector rows, agent fences, mutation receipts, transactional reconciliation, search, and destructive cleanup. It is the concrete release-bundled vector provider chosen for the system-extension lifecycle proof."
   },
