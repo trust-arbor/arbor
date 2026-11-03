@@ -204,8 +204,8 @@
     "rationale": "This module inserts and queries historical agent telemetry through the configured Ecto Repo, including adapter-specific SQL. Runtime configuration wires Arbor.Persistence as the normal telemetry provider; the history remains outside safe boot and host recovery."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/application.ex",
-    "blob_oid": "654f8db6291d4904a25cbe8edda0076cf012c637",
+    "path": "apps/arbor_persistence_host/lib/arbor/persistence/host/application.ex",
+    "blob_oid": "012afe33d5054c61c3b7e5d70b32c086d4a859c5",
     "class": "system_extension",
     "rationale": "This OTP application supervises the normal-profile checkpoint, jobs, and hot EventLog providers and conditionally starts Repo, backup, and snapshot children. It is provider lifecycle wiring; safe mode must omit it and use the planned host-owned minimal state service instead."
   },
@@ -354,20 +354,20 @@
     "rationale": "This helper supplies adapter-aware schema inspection and SQL fragments for the normal SQLite/PostgreSQL Repo migrations. It is lifecycle support for the first-party database provider, not host-owned boot state."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/postgrex_types.ex",
+    "path": "apps/arbor_persistence_host/lib/arbor/persistence/postgrex_types.ex",
     "blob_oid": "e938eb8e1833ddb9e542858a80a82e7eb51bf9b9",
     "class": "system_extension",
     "rationale": "This compile-time Postgrex type definition adds pgvector and Ecto PostgreSQL extensions for Arbor.Persistence.Repo. It is concrete PostgreSQL provider plumbing required only when that first-party backend is selected."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/queryable_store/agent.ex",
-    "blob_oid": "8027b7bb1fd3a5cf1a0273e8b6af9870040d6182",
+    "path": "packages/arbor_persistence/lib/arbor/persistence/queryable_store/agent.ex",
+    "blob_oid": "cef83a1bfe832c76946f04700bdbe82d773842c7",
     "class": "optional_extension",
     "rationale": "This Agent-backed QueryableStore offers process-lifetime filtering and CAS for tests and small datasets. It is an optional first-party alternative, not the normal jobs or durable record provider."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/queryable_store/ets.ex",
-    "blob_oid": "a409b4ebd8971417329e6b02a1bb468ca9f671d5",
+    "path": "packages/arbor_persistence/lib/arbor/persistence/queryable_store/ets.ex",
+    "blob_oid": "90880d0efcfb60405d831336a04d60fee7ea20dd",
     "class": "system_extension",
     "rationale": "This GenServer owns the bounded ETS QueryableStore started as the normal-profile jobs store, including record revision and CAS semantics. It is a replaceable process-lifetime provider and is not safe-mode durable state."
   },
@@ -390,8 +390,8 @@
     "rationale": "This bounded Ecto store owns tenant-scoped relationship rows, transactional deletion, and plain-map conversion for normal agent memory. It is a first-party normal-profile memory provider and carries no safe-boot reference-monitor role."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/repo.ex",
-    "blob_oid": "1ffc646a1d5a7951e0c5ebb5c41a31f96226de7e",
+    "path": "apps/arbor_persistence_host/lib/arbor/persistence/repo.ex",
+    "blob_oid": "1c446698313a46db5c674eae6b821e04b14b6200",
     "class": "system_extension",
     "rationale": "This Ecto.Repo selects and owns the SQLite or PostgreSQL connection pool used by normal durable Persistence features. A concrete database runtime is replaceable provider infrastructure and is explicitly excluded from safe mode."
   },
@@ -474,10 +474,10 @@
     "rationale": "This Ecto schema stores skill content, provenance, taint, full-text fields, and embeddings for hybrid search. Runtime wires the persistent skill provider into the normal profile; it must remain distinct from extension activation authority."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/schemas/telemetry_event.ex",
-    "blob_oid": "2c5e90674d8614084c25ed878946c19017fca289",
+    "path": "apps/arbor_persistence_host/lib/arbor/persistence/schemas/telemetry_event.ex",
+    "blob_oid": "b0feffbf03accea3f3ca651e46945488475e9601",
     "class": "system_extension",
-    "rationale": "This schema represents historical telemetry rows and normalizes telemetry payloads for JSON storage. It is concrete storage for the telemetry provider wired into the normal runtime profile."
+    "rationale": "This schema represents historical telemetry rows and validates required fields and supported event types. It is concrete storage for the telemetry provider wired into the normal runtime profile."
   },
   {
     "path": "apps/arbor_persistence/lib/arbor/persistence/session_store.ex",
@@ -492,14 +492,14 @@
     "rationale": "This module owns PostgreSQL hybrid skill search, indexing, embedding metadata, and fallback reporting. Runtime selects Arbor.Persistence as the normal skill provider, but this index is not the mandatory extension contribution registry."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/store/agent.ex",
-    "blob_oid": "ba71375f9a8e8f9b98433c3258b05ba65b07ba02",
+    "path": "packages/arbor_persistence/lib/arbor/persistence/store/agent.ex",
+    "blob_oid": "ce7780b00ed0d9b8fb5f7921ac4b99c533ca32d2",
     "class": "optional_extension",
     "rationale": "This Agent-backed Store provides process-lifetime values, revision fencing, and CAS for tests and small datasets. It is an optional in-memory provider, not normal durable or safe-mode state."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/store/ets.ex",
-    "blob_oid": "b3a0143f4d71bb33a76c939a38aa416f137b5546",
+    "path": "packages/arbor_persistence/lib/arbor/persistence/store/ets.ex",
+    "blob_oid": "8467c15d6556c3107295f36d6615952bab873f32",
     "class": "optional_extension",
     "rationale": "This supervised ETS Store supplies bounded process-lifetime key-value storage and CAS, primarily as an injected test or lightweight backend. The normal application starts QueryableStore.ETS instead, so this is an optional provider."
   },
