@@ -532,7 +532,8 @@ defmodule Arbor.Gateway.MCP.ClientConnection do
     %{
       "name" => Map.get(tool, :name) || Map.get(tool, "name"),
       "description" => Map.get(tool, :description) || Map.get(tool, "description", ""),
-      "inputSchema" => Map.get(tool, :inputSchema) || Map.get(tool, "inputSchema", %{})
+      "inputSchema" => Map.get(tool, :inputSchema) || Map.get(tool, "inputSchema", %{}),
+      "annotations" => Map.get(tool, :annotations) || Map.get(tool, "annotations") || %{}
     }
   end
 

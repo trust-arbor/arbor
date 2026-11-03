@@ -30,6 +30,27 @@ defmodule Arbor.Gateway.MCP.ToolBridgeTest do
       assert result.capability_uri == "arbor://mcp/github/create_issue"
       assert result.input_schema["type"] == "object"
       assert result.input_schema["properties"]["title"]["type"] == "string"
+      assert result.annotations == %{}
+    end
+
+    test "keeps MCP hint annotations" do
+      mcp_tool = %{
+        "name" => "delete_repo",
+        "description" => "Delete a repository",
+        "annotations" => %{
+          "destructiveHint" => true,
+          "readOnlyHint" => false,
+          "idempotentHint" => false,
+          "openWorldHint" => true
+        }
+      }
+
+      result = ToolBridge.to_arbor_tool("github", mcp_tool)
+
+      assert result.annotations["destructiveHint"] == true
+      assert result.annotations["readOnlyHint"] == false
+      assert result.annotations["idempotentHint"] == false
+      assert result.annotations["openWorldHint"] == true
     end
 
     test "handles tool with no description" do
