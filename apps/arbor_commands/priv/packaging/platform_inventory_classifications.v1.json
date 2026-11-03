@@ -348,8 +348,8 @@
     "rationale": "This module validates and operates the retired memory_embeddings representation alongside the strict vector path. It is a compatibility provider retained for migration and is not required by the target normal profile."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/migration_helper.ex",
-    "blob_oid": "0325b687ce042188e14c2e5136771c2e470c9e7c",
+    "path": "packages/arbor_persistence_sql/lib/arbor/persistence/migration_helper.ex",
+    "blob_oid": "ab3e89249e8b8f5c1a4be4d0586da5f5ca9fdc56",
     "class": "system_extension",
     "rationale": "This helper supplies adapter-aware schema inspection and SQL fragments for the normal SQLite/PostgreSQL Repo migrations. It is lifecycle support for the first-party database provider, not host-owned boot state."
   },
@@ -444,8 +444,8 @@
     "rationale": "This schema maps the legacy memory_embeddings table and pgvector field, with strict-vector ownership markers kept read-only. It belongs to the optional legacy embedding compatibility path."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/schemas/record.ex",
-    "blob_oid": "7527479b9951eda53bcc2b77b49f19f53644e255",
+    "path": "packages/arbor_persistence_sql/lib/arbor/persistence/schemas/record.ex",
+    "blob_oid": "88876237752fa3300df68fe8e72128688a6d020f",
     "class": "system_extension",
     "rationale": "This Ecto schema maps namespaced QueryableStore records and backend-owned generation, revision, and tombstone fields. It is concrete representation for the normal durable key-value provider."
   },
@@ -576,8 +576,8 @@
     "rationale": "This Mix task confirms and invokes destructive PostgreSQL restore using an age private key. It is provider-specific operator tooling, not the mandatory headless safe-mode recovery API."
   },
   {
-    "path": "apps/arbor_persistence/lib/mix/tasks/arbor/event_log/repair.ex",
-    "blob_oid": "bfcfd661a02dd660c599e40e4b9b2e3d7d7e6558",
+    "path": "packages/arbor_persistence_sql/lib/mix/tasks/arbor/event_log/repair.ex",
+    "blob_oid": "c49f923174d3f15eb9eb6c55d93142a83ac5774e",
     "class": "optional_extension",
     "rationale": "This Mix task starts database dependencies and exposes audited legacy EventLog repair modes. It is optional PostgreSQL maintenance presentation and should not ship in the safe host payload."
   },
