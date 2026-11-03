@@ -3,6 +3,8 @@ defmodule Arbor.Contracts.Security.CapabilityUriTest do
 
   alias Arbor.Contracts.Security.CapabilityUri
 
+  @moduletag :fast
+
   describe "parse/1" do
     test "parses a concrete resource URI" do
       assert {:ok,
@@ -62,6 +64,49 @@ defmodule Arbor.Contracts.Security.CapabilityUriTest do
 
       assert {:error, {:invalid_operation, "read-files"}} =
                CapabilityUri.parse("arbor://fs/read-files")
+    end
+
+    test "security regression: parameterized and percent-encoded dot segments are rejected" do
+      # The existing closed-set error for a traversal segment is
+      # `{:error, :traversal_segment}` (see CapabilityProfile / CapsFile).
+      # Exact ".." is already treated as traversal after a successful parse;
+      # these variants must fail at parse with that same shape so a later
+      # `;param` strip or percent-decode cannot turn them into parent refs.
+      disguised_dot_segments = [
+        "..;",
+        "..;x",
+        "%2e%2e",
+        "%2E%2E;",
+        ".%2e",
+        "%2e.",
+        ".;",
+        "%2e"
+      ]
+
+      Enum.each(disguised_dot_segments, fn segment ->
+        uri = "arbor://fs/read/" <> segment
+
+        assert {:error, :traversal_segment} = CapabilityUri.parse(uri),
+               "expected #{inspect(uri)} to be rejected as :traversal_segment"
+      end)
+
+      # Existing valid URIs from this suite, including names that contain
+      # dots or semicolons but do not normalize to "." or "..".
+      assert {:ok, _} = CapabilityUri.parse("arbor://fs/read/project/src")
+      assert {:ok, _} = CapabilityUri.parse("arbor://action/git/commit")
+      assert {:ok, _} = CapabilityUri.parse("arbor://**")
+      assert {:ok, _} = CapabilityUri.parse("arbor://fs/read/**")
+      assert {:ok, _} = CapabilityUri.parse("arbor://fs/read/*")
+      assert {:ok, _} = CapabilityUri.parse("arbor://mcp/")
+      assert {:ok, _} = CapabilityUri.parse("arbor://fs/read/docs/secret.txt")
+      assert {:ok, _} = CapabilityUri.parse("arbor://fs/read/docs/file.txt")
+      assert {:ok, _} = CapabilityUri.parse("arbor://fs/write/project/file.txt")
+      assert {:ok, _} = CapabilityUri.parse("arbor://fs/read/my..file")
+      assert {:ok, _} = CapabilityUri.parse("arbor://fs/read/..hidden")
+      assert {:ok, _} = CapabilityUri.parse("arbor://fs/read/version.1.0")
+      assert {:ok, _} = CapabilityUri.parse("arbor://fs/read/.hidden")
+      assert {:ok, _} = CapabilityUri.parse("arbor://fs/read/file;draft")
+      assert {:ok, _} = CapabilityUri.parse("arbor://fs/read/foo.bar;meta=1")
     end
   end
 
