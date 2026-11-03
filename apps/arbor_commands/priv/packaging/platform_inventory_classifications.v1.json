@@ -462,8 +462,8 @@
     "rationale": "This Ecto schema owns agent session identity, lifecycle status, model context, and entry association. Durable sessions are part of the normal agent profile but are not required for provider-free safe boot."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/schemas/session_entry.ex",
-    "blob_oid": "b677b3cf383912cd32e2d608eaed53f807ae2be7",
+    "path": "apps/arbor_persistence_host/lib/arbor/persistence/schemas/session_entry.ex",
+    "blob_oid": "1b330b54fa1c8abe7926794c833bf81d50af6341",
     "class": "system_extension",
     "rationale": "This Ecto schema defines append-only session transcript entries, ordering, roles, tool content, and metadata. It is normal-profile agent session storage, not host recovery authority."
   },
@@ -540,8 +540,8 @@
     "rationale": "This Ecto schema stores strict vector operation fingerprints, receipts, and reconciliation status. It is provider-owned operation state and must not be confused with Platform activation receipts."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/vector_store/ecto/vector_row.ex",
-    "blob_oid": "88b2c967943935caf32b7d410b11b23992953a96",
+    "path": "apps/arbor_persistence_host/lib/arbor/persistence/vector_store/ecto/vector_row.ex",
+    "blob_oid": "c55307a639b9b25adba13beb7c9d8352df271202",
     "class": "system_extension",
     "rationale": "This Ecto schema defines tenant-scoped strict vector records, source identity, model descriptor, category, metadata, and pgvector value. It is the concrete data model of the normal first-party vector provider."
   },
