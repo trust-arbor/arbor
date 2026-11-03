@@ -198,8 +198,8 @@
     "rationale": "This public facade dispatches normal-profile key-value, event, vector, session, relationship, telemetry, and Ecto operations to concrete Persistence implementations. Its authorization and durability-reporting clauses are mixed into a provider-facing facade and must split into the future host admission and invocation boundary rather than making the whole file trusted host."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/agent_telemetry.ex",
-    "blob_oid": "f257f2cef2edf8efcfd197c5cd385e5e8486148a",
+    "path": "apps/arbor_persistence_host/lib/arbor/persistence/agent_telemetry.ex",
+    "blob_oid": "9149faefe975eb3d9026d0506f76a800ec168bfd",
     "class": "system_extension",
     "rationale": "This module inserts and queries historical agent telemetry through the configured Ecto Repo, including adapter-specific SQL. Runtime configuration wires Arbor.Persistence as the normal telemetry provider; the history remains outside safe boot and host recovery."
   },
@@ -234,8 +234,8 @@
     "rationale": "This Ecto context persists communication channels, membership, and messages. Normal Comms resolves this provider when Persistence is available, while provider-free safe mode does not require channel history."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/checkpoint.ex",
-    "blob_oid": "8860984d1e66ce5f271dd7967341915a79f4cc66",
+    "path": "packages/arbor_persistence/lib/arbor/persistence/checkpoint.ex",
+    "blob_oid": "82320ac0ae33fd3ad10ece33ea00d674d8037b6e",
     "class": "system_extension",
     "rationale": "This module provides process checkpoint save, retrying load, periodic scheduling, and callback-based restore over a caller-selected Store. It supports normal agent recovery but is not the extension-platform boot recovery mechanism and is not non-bypassable host code."
   },
@@ -552,8 +552,8 @@
     "rationale": "This inert adapter returns unsupported for every vector operation when no concrete backend is configured. It is the fail-closed default implementation of the system vector provider seam, not a host reference monitor."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/verdict_log.ex",
-    "blob_oid": "20fc4c3af885d77d846dbefd7388d118f19de70d",
+    "path": "apps/arbor_persistence_host/lib/arbor/persistence/verdict_log.ex",
+    "blob_oid": "b6c6359289cf691ba9e0d739ad00a30f703ec2be",
     "class": "optional_extension",
     "rationale": "This module projects council verdicts and findings into eval-run persistence when the Repo is available. Council result history is an optional Cognition feature and is distinct from mandatory security lifecycle audit."
   },
