@@ -294,14 +294,14 @@
     "rationale": "This typed event value and constructor are the in-app representation used by the first-party EventLog providers. The generic cross-extension envelope belongs in Kernel, while this Persistence event model belongs with the normal-profile event provider protocol."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/event_log.ex",
-    "blob_oid": "c23e18df5c4d8e60bead1308d59eff3c7d1d6c97",
+    "path": "packages/arbor_persistence/lib/arbor/persistence/event_log.ex",
+    "blob_oid": "d5941f39b7c24f7395b6e70436866509570a294d",
     "class": "system_extension",
     "rationale": "This file defines the EventLog callback surface and implements bounded request, deadline, fingerprint, receipt, and reconciliation rules shared by its adapters. It is the normal first-party event-provider protocol, not the mandatory security audit spool or a pre-Platform primitive."
   },
   {
-    "path": "apps/arbor_persistence/lib/arbor/persistence/event_log/agent.ex",
-    "blob_oid": "ccb33d0ee421ae9456ad4b5c886111a15050a5c6",
+    "path": "packages/arbor_persistence/lib/arbor/persistence/event_log/agent.ex",
+    "blob_oid": "9555b42ff6a18c3492b30e023ea5b6d750b03cae",
     "class": "optional_extension",
     "rationale": "This Agent-backed in-memory EventLog is described as a lightweight testing alternative. It is an optional process-lifetime provider rather than the normal hot or durable event store."
   },
