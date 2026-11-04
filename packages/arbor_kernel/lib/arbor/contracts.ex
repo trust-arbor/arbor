@@ -41,6 +41,9 @@ defmodule Arbor.Contracts do
   - `Arbor.Contracts.Trust.Profile` - Agent trust state
   - `Arbor.Contracts.Trust.Event` - Trust-affecting events
 
+  ### First-Party Feature Declarations
+  - `Arbor.Contracts.Feature` - Passive contributions from statically assembled features
+
   ### Library Interfaces
   - `Arbor.Contracts.API.Shell` - Command execution interface
   - `Arbor.Contracts.API.Signals` - Event emission interface
@@ -103,6 +106,8 @@ defmodule Arbor.Contracts do
       # Trust
       Arbor.Contracts.Trust.Profile,
       Arbor.Contracts.Trust.Event,
+      # First-party feature declarations
+      Arbor.Contracts.Feature,
       # Library interfaces
       Arbor.Contracts.API.Shell,
       Arbor.Contracts.API.Signals,

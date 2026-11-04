@@ -31,7 +31,51 @@ defmodule Arbor.Orchestrator.MixProject do
   def application do
     [
       extra_applications: [:logger],
-      mod: {Arbor.Orchestrator.Application, []}
+      mod: {Arbor.Orchestrator.Application, []},
+      env: [
+        arbor_feature: Arbor.Orchestrator.Feature,
+        arbor_feature_metadata: %{
+          id: :orchestrator,
+          requires: [:core],
+          dependency_role: :fixed_host_prerequisite,
+          contribution_scope: :direct_application_entrypoint,
+          snapshot_required_keys: [
+            :event_log_backend,
+            :event_log_name,
+            :run_journal,
+            :journal_store_admission,
+            :engine_checkpoints,
+            :checkpoint_store_admission
+          ],
+          public_child_ids: [
+            Arbor.Common.HandlerRegistry,
+            Arbor.Orchestrator.Handlers.RegistryAuthority,
+            Arbor.Persistence.EventLog.ETS,
+            Arbor.Persistence.BufferedStore,
+            Arbor.Orchestrator.EventRegistry,
+            Arbor.Orchestrator.SignalsBridge,
+            Arbor.Orchestrator.RunJournal,
+            Arbor.Orchestrator.JobRegistry,
+            Arbor.Orchestrator.DotCache,
+            Arbor.Orchestrator.PipelineSupervisor,
+            Arbor.Orchestrator.SessionRegistry,
+            Arbor.Orchestrator.Session.Supervisor,
+            Arbor.Orchestrator.Session.TaskSupervisor,
+            Arbor.Orchestrator.RecoveryCoordinator
+          ],
+          sources: %{
+            application: Arbor.Orchestrator.Application,
+            physical_catalog_owner: :arbor_actions,
+            catalog_producer: Arbor.Actions,
+            registering_actor: Arbor.Orchestrator.Registrar,
+            action_catalog_scope: :full_registration_catalog,
+            uri_role: :nonexclusive_action_catalog_namespace_reference,
+            uri_registration_actor: Arbor.Actions.Application,
+            uri_registration_status: :unobserved,
+            startup_effects: [:registrar_registration, :optional_async_preflight]
+          }
+        }
+      ]
     ]
   end
 

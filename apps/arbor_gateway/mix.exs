@@ -24,7 +24,54 @@ defmodule ArborGateway.MixProject do
   def application do
     [
       extra_applications: [:logger],
-      mod: {Arbor.Gateway.Application, []}
+      mod: {Arbor.Gateway.Application, []},
+      env: [
+        arbor_feature: Arbor.Gateway.Feature,
+        arbor_feature_metadata: %{
+          id: :gateway,
+          requires: [:core],
+          dependency_role: :fixed_host_prerequisite,
+          contribution_scope: :direct_application_entrypoint,
+          snapshot_required_keys: [:mcp_client_enabled, :start_server, :http_admission],
+          snapshot_conditional_required_keys: %{
+            http_admission: %{
+              not_requested: [],
+              port_in_use: [:port],
+              available: [:port, :bind_ip, :http_idle_timeout_ms, :handler_call_timeout_ms]
+            }
+          },
+          public_child_ids: [
+            Arbor.Gateway.MCP.ClientSupervisor,
+            Arbor.Gateway.MCP.EndpointRegistry,
+            Arbor.Gateway.Chat.LifecycleAuthority,
+            {:ranch_embedded_sup, Arbor.Gateway.Router.HTTP}
+          ],
+          sources: %{
+            application: %{
+              path: "apps/arbor_gateway/lib/arbor/gateway/application.ex",
+              sha256: "def51d6acd2b3ad76a5aef794863317b077956187e6ab568472e3b80175a381b"
+            },
+            http_options: %{
+              path: "apps/arbor_gateway/lib/arbor/gateway/http_server_options.ex",
+              sha256: "84cb2ab726ae86b77c06b4c850354a3194631c4612a07af1a20ba8cf860b2eee"
+            },
+            routes: %{
+              owner: Arbor.Gateway.Router,
+              path: "apps/arbor_gateway/lib/arbor/gateway/router.ex",
+              sha256: "1b96edc4c05841d379698fb3c24c349bf0fa2013e94b9a0f10409a9157aa192b",
+              coverage: :top_level_mounts_with_delegation_and_build_guards
+            },
+            ranch_constructor: %{
+              physical_owner: :ranch,
+              source: "ranch/src/ranch.erl",
+              sha256: "670c017fd5cb1ca3349515f49423e259f364270eeb3fb65f02e4f598d9dcf717"
+            },
+            direct_global_action_catalog: :no_additional_contribution_declared_here,
+            direct_global_uri_provider: :no_additional_contribution_declared_here,
+            observation: :source_declaration
+          }
+        }
+      ]
     ]
   end
 
