@@ -1434,16 +1434,16 @@
     "rationale": "This GenServer currently couples profile creation and freeze lifecycle to baseline capability grants and grant or revoke synchronization triggers. Because it initiates authority mutations, the current mixed file is trusted-host code; profile state, history, and lifecycle orchestration must split from an authenticated host mutation boundary."
   },
   {
-    "path": "apps/arbor_trust/lib/arbor/trust/policy.ex",
-    "blob_oid": "52e70ceb6cd68684fffc5b1ac81b9f40fb190f48",
+    "path": "packages/arbor_trust/lib/arbor/trust/policy.ex",
+    "blob_oid": "9b4a5f19b64213e3b99a392eb39c8281a4344c17",
     "class": "trusted_host",
-    "rationale": "This module is the runtime bridge from supplied profile state to effective mode, egress mode, and capability authorization behavior. Its base-grant and profile lookup conveniences are mixed provider concerns, but deterministic ceiling application and fail-closed integration govern the file."
+    "rationale": "This module reads PolicyHost snapshots, builds profile or stub inputs and snapshot-based options, and calls ProfileResolver for modes and explanations. It exposes confirmation, egress and preset APIs. Its baseline-grant and bulk-revoke paths require a non-nil actor_authority option and forward it to Security."
   },
   {
-    "path": "apps/arbor_trust/lib/arbor/trust/policy_enforcer.ex",
-    "blob_oid": "fcc1d4ca0fcac14e738f8e1092b20f6166d3a6c0",
+    "path": "packages/arbor_trust/lib/arbor/trust/policy_enforcer.ex",
+    "blob_oid": "58fd793dc21488edd38108fcf893163638a70d9f",
     "class": "trusted_host",
-    "rationale": "This is the current policy-side pre-authorization boundary that decides whether a bounded capability may be minted before Security performs concrete authorization. It mixes provider profile lookup with grant effects; the target host must consume a recommendation and exclusively own issuance."
+    "rationale": "This module looks up existing capabilities through Security and forwards a supplied capability_grant_request to the configured CapabilityGrantOwner, checking returned principal/resource equality. It builds grant specifications from configured policy-mode and capability-profile calls, exposes a known-profile mintability query, and requests revocation of stale trust-marked capabilities with a supplied non-nil actor_authority."
   },
   {
     "path": "packages/arbor_trust/lib/arbor/trust/presets.ex",
@@ -1482,10 +1482,10 @@
     "rationale": "This conjunct prevents static standing from yielding automatic high-risk effects when current inputs are untrusted or hostile. Because provider-supplied policy cannot waive taint-based egress, process, financial, or identity restrictions, the decision belongs to the fixed host."
   },
   {
-    "path": "apps/arbor_trust/lib/mix/tasks/arbor.trust.audit_profiles.ex",
+    "path": "apps/arbor_commands/lib/mix/tasks/arbor.trust.audit_profiles.ex",
     "blob_oid": "642236132e19c83e7991e68c416f1b1aaa18ba38",
     "class": "optional_extension",
-    "rationale": "This Mix task is an operator presentation for running the profile exit audit or migration locally or over RPC. It is development and migration tooling, not production authorization, boot, or recovery mechanism."
+    "rationale": "This Mix task parses audit/migration, local/RPC, output and limit flags. Its local branch requests startup of :arbor_trust and calls the Trust audit or migration facade; the default branch delegates distribution, server and RPC handling. It formats returned reports and exits with failure when the returned audit status is unclean or migration errors remain."
   },
   {
     "path": "packages/arbor_llm/lib/arbor.ex",
