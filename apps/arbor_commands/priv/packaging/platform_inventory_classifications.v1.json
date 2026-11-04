@@ -78,10 +78,10 @@
     "rationale": "Mix.Tasks.Arbor.Llm.Free.run/1 (free.ex:17-22) prints Arbor.LLM.OpenCodeZen.listing/0 and tells the operator to acknowledge before the first request. The moduledoc (4-11) says the list comes from recorded eval evidence and prints the disclosure warning. Current owner is arbor_commands. This is OpenCode catalog UX. It does not send a prompt or admit egress for other providers. Class optional_extension."
   },
   {
-    "path": "apps/arbor_historian/lib/arbor/historian.ex",
-    "blob_oid": "a5a3824665c30d31378b48052d8e221e7a094b4d",
+    "path": "packages/arbor_historian/lib/arbor/historian.ex",
+    "blob_oid": "85eb31ed395a52e93925896a95b47089c8bb9c72",
     "class": "system_extension",
-    "rationale": "This normal-profile facade combines the configured durable-sink callback, history queries, stream-content lifecycle, and optional views. Its query authorization is bypassable through raw query functions and its sink is not synchronous, so a future trusted audit-intent spool must be split from this provider facade."
+    "rationale": "This Historian facade exposes raw query delegates and separate agent-authorization wrappers that call an authorizer port. It resolves a configured target for a direct read and delegates event persistence, audit-related requests, stream-content lifecycle and optional views. It also coordinates stream metadata, statistics and cluster queries as provider-specific API composition."
   },
   {
     "path": "packages/arbor_historian/lib/arbor/historian/application.ex",
@@ -120,10 +120,10 @@
     "rationale": "This struct is Historian's persisted-event query projection and implements its filter semantics. It belongs to the normal history provider's read contract and has no boot, recovery, or reference-monitor role."
   },
   {
-    "path": "apps/arbor_historian/lib/arbor/historian/query_engine.ex",
-    "blob_oid": "fc79d9fd6e8e838521d7d2e2b765dfe149c1df17",
+    "path": "packages/arbor_historian/lib/arbor/historian/query_engine.ex",
+    "blob_oid": "e6b72472d5da2abac248246e0af3dbfedfdd1e17",
     "class": "system_extension",
-    "rationale": "This engine reads normal-profile history from the ETS cache with best-effort Ecto fallthrough and converts results into query projections. Durable and query backends are replaceable provider behavior, not the minimal append-only audit mechanism required for safe recovery."
+    "rationale": "This Historian query module resolves Config targets and conditionally calls projection-probe, stream-read and event-conversion interfaces. It offers convenience reads, option-driven filters and paginated filtered or signal-ID scans with local page/cursor checks and error paths. It coordinates provider-specific query options and reply processing."
   },
   {
     "path": "packages/arbor_historian/lib/arbor/historian/query_engine/aggregator.ex",
