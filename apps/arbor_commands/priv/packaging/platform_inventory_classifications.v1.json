@@ -582,10 +582,10 @@
     "rationale": "This Mix task starts database dependencies and exposes audited legacy EventLog repair modes. It is optional PostgreSQL maintenance presentation and should not ship in the safe host payload."
   },
   {
-    "path": "apps/arbor_persistence_ecto/lib/arbor/persistence/ecto.ex",
-    "blob_oid": "25005a4374beeb85b7ca87dbe3d455c1116ca83d",
+    "path": "packages/arbor_persistence_eventstore/lib/arbor/persistence/ecto.ex",
+    "blob_oid": "4938290b04779d125ebc60fd3a685d24b97af637",
     "class": "optional_extension",
-    "rationale": "This facade exposes an explicitly configured EventStore-backed Postgres adapter and availability probe. The separate EventStore package is an opt-in first-party alternative to the normal Repo-backed EventLog provider."
+    "rationale": "This facade exposes an explicitly configured EventStore-backed Postgres adapter and a configuration-presence check under :arbor_persistence_eventstore. The separate EventStore package is an opt-in Arbor-supplied adapter whose EventStore child is explicitly supervised by its consumer."
   },
   {
     "path": "packages/arbor_persistence_eventstore/lib/arbor/persistence/ecto/application.ex",
@@ -612,10 +612,10 @@
     "rationale": "This JSON serializer adapts Arbor's string-typed event contract to the EventStore library. It is implementation plumbing for the optional first-party Postgres provider."
   },
   {
-    "path": "apps/arbor_persistence_ecto/lib/arbor/persistence/ecto/event_store.ex",
-    "blob_oid": "743d92b62cf2ca2435a6aa8eda50e4e8aa1b7a7f",
+    "path": "packages/arbor_persistence_eventstore/lib/arbor/persistence/ecto/event_store.ex",
+    "blob_oid": "240accf324e5e4df4887d45bd809ef535788b7db",
     "class": "optional_extension",
-    "rationale": "This module instantiates the external EventStore library with Arbor configuration and serializer. It is an independently selectable Arbor-supplied database adapter, not independently supplied third-party extension code."
+    "rationale": "This module instantiates the external EventStore library with Arbor configuration and serializer under :arbor_persistence_eventstore. It is an independently selectable Arbor-supplied database adapter, not independently supplied third-party extension code."
   },
   {
     "path": "packages/arbor_persistence_eventstore/lib/mix/tasks/arbor.event_log.migrate.ex",
