@@ -1374,10 +1374,10 @@
     "rationale": "This module explicitly declares an audit matrix of soft and intended hard enforcement targets and does not enforce authorization. It is architecture and diagnostics support, so it is optional even though it documents security-critical gaps."
   },
   {
-    "path": "apps/arbor_trust/lib/arbor/trust/capability_profile_registry.ex",
-    "blob_oid": "f68067c7afdc6d3c140b15124e72e80369c8d072",
+    "path": "packages/arbor_trust/lib/arbor/trust/capability_profile_registry.ex",
+    "blob_oid": "f918684951460299da394e04c8c1e8c6a1d65390",
     "class": "system_extension",
-    "rationale": "This projection maps registered URIs to first-party risk-profile defaults and runtime action-profile contributions. It is a normal-profile policy source; the upward Actions provider and mutable contribution path must be replaced without letting it define host authority."
+    "rationale": "This module returns capability profiles from a matching PolicyHost snapshot reply and projects Trust risk profiles without action provider contributions on other replies. Its explicit projection API can include a configured action provider. It selects profiles by URI prefix and builds registered URI coverage and owner/reason rows from fixed owners and a snapshot owner fallback."
   },
   {
     "path": "apps/arbor_trust/lib/arbor/trust/capability_risk_profiles.ex",
@@ -1446,10 +1446,10 @@
     "rationale": "This is the current policy-side pre-authorization boundary that decides whether a bounded capability may be minted before Security performs concrete authorization. It mixes provider profile lookup with grant effects; the target host must consume a recommendation and exclusively own issuance."
   },
   {
-    "path": "apps/arbor_trust/lib/arbor/trust/presets.ex",
-    "blob_oid": "e9327c184e8e0862f02f9072cc659454e48c6af9",
+    "path": "packages/arbor_trust/lib/arbor/trust/presets.ex",
+    "blob_oid": "936d15505a37ca9582c40909c4a542da16fe1329",
     "class": "system_extension",
-    "rationale": "This file defines replaceable first-party onboarding baselines and URI rules for cautious through full-trust profiles. Its compatibility function only forwards default ceiling lookup to trusted-host CapabilityRiskProfiles; that forwarding dependency must be removed so authorization never relies on an extension-classified preset module."
+    "rationale": "This module returns baseline and URI rule maps for cautious, balanced, hands_off and full_trust presets, falling back to cautious for unknown names. All four literal baselines are :ask. Its compatibility function default_security_ceilings/0 delegates to CapabilityRiskProfiles.security_ceilings/0."
   },
   {
     "path": "packages/arbor_trust/lib/arbor/trust/profile_exit_audit.ex",
@@ -1464,10 +1464,10 @@
     "rationale": "This resolver performs segment-aware longest-prefix evaluation and takes the most restrictive result across user policy, system ceilings, model constraints, and taint. That deterministic conjunction is the host mechanism, though mutable ceiling overrides must be restricted to tightening boot-bound policy."
   },
   {
-    "path": "apps/arbor_trust/lib/arbor/trust/store.ex",
-    "blob_oid": "f624f584d13679bbf68c58956438a9304f3fff1c",
+    "path": "packages/arbor_trust/lib/arbor/trust/store.ex",
+    "blob_oid": "bf52e6ae4450fc8ae303e6b9c3446d2f136311cf",
     "class": "system_extension",
-    "rationale": "This service owns ETS-cached, write-through storage and distributed synchronization for operator trust profiles. Profile state is a normal-profile policy source and its Postgres/Persistence implementation cannot be required by the provider-free recovery host."
+    "rationale": "This GenServer caches Trust profiles in ETS with memory mode or a configured persistence backend. Store and update handlers cache after :ok persistence replies. The deletion error branch caches a disabled profile and records a persistent_term marker. Startup proceeds on a :ok ProfileSync.subscribe/1 reply. Mutations request broadcasts; returned broadcast errors trigger logging and telemetry calls. It provides cache reads, listing and callback updates."
   },
   {
     "path": "packages/arbor_trust/lib/arbor/trust/supervisor.ex",
