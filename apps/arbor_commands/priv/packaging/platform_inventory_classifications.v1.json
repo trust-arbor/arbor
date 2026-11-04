@@ -1368,8 +1368,8 @@
     "rationale": "This internal behaviour defines the profile, event, freeze, and lifecycle interface implemented only by Trust.Manager. It is the contract of the first-party policy-state provider, not a shared pre-Platform ABI or host reference-monitor contract."
   },
   {
-    "path": "apps/arbor_trust/lib/arbor/trust/capability_enforcement_matrix.ex",
-    "blob_oid": "89170b2d1808813c7d12a4f3ecd51214eb708fc7",
+    "path": "packages/arbor_trust/lib/arbor/trust/capability_enforcement_matrix.ex",
+    "blob_oid": "3c83d08975da2a71752c60cb6993d065877cf6ec",
     "class": "optional_extension",
     "rationale": "This module explicitly declares an audit matrix of soft and intended hard enforcement targets and does not enforce authorization. It is architecture and diagnostics support, so it is optional even though it documents security-critical gaps."
   },
@@ -1404,10 +1404,10 @@
     "rationale": "This Trust module reads application settings, exposes baseline capability data and generates agent-specific capability maps. It applies local feature-domain and mode-map checks and assembles startup-profile maps from selected settings and delegated default/profile inputs. Its responsibility is configuration reading and capability/profile map processing."
   },
   {
-    "path": "apps/arbor_trust/lib/arbor/trust/confirmation_tracker.ex",
-    "blob_oid": "e71006872209ee62d41b5811be27b37ed58cef45",
+    "path": "packages/arbor_trust/lib/arbor/trust/confirmation_tracker.ex",
+    "blob_oid": "fb7c3398c083c10df586fa948363e76efa9bfacd",
     "class": "optional_extension",
-    "rationale": "This transient tracker records approval streaks and emits human-facing graduation suggestions; authorization explicitly does not read its graduated flag. Confirm-then-automate advice is an optional first-party feature, not a host decision source."
+    "rationale": "This GenServer tracks confirmation counters and reads approval answers through a configured provider. It calls Security to claim issuer custody and request approval receipts, delegates graduation decisions, and can use Store.update_profile to set a URI-prefix rule to :auto when the acceptance branch's authorization and eligibility calls succeed."
   },
   {
     "path": "packages/arbor_trust/lib/arbor/trust/event_converter.ex",
@@ -1422,10 +1422,10 @@
     "rationale": "This GenServer attempts topic subscriptions when Config.pubsub is non-nil; rescued subscription exceptions are logged. While enabled, it translates supported action, test, rollback, improvement, reload, compilation and security message shapes into Manager.record_trust_event calls with selected metadata. Disabling changes the local flag; unmatched outer messages are ignored."
   },
   {
-    "path": "apps/arbor_trust/lib/arbor/trust/event_store.ex",
-    "blob_oid": "60b32c297585a7283faf537fc487e81b59304b90",
+    "path": "packages/arbor_trust/lib/arbor/trust/event_store.ex",
+    "blob_oid": "19d3fda9ff3e65f71e28ffc933d589af9a84aa7e",
     "class": "optional_extension",
-    "rationale": "This service persists, indexes, queries, aggregates, and signals trust history through the Persistence EventLog. Historical analysis and progression views are optional provider functionality and are not needed for safe boot or capability recovery."
+    "rationale": "This GenServer caches and indexes trust events for queries, timelines, progression and statistics, and requests EventLog appends and Observation notifications. Cache processing continues when the event log is nil or an append returns an error; returned append errors are logged."
   },
   {
     "path": "apps/arbor_trust/lib/arbor/trust/manager.ex",
@@ -1452,10 +1452,10 @@
     "rationale": "This file defines replaceable first-party onboarding baselines and URI rules for cautious through full-trust profiles. Its compatibility function only forwards default ceiling lookup to trusted-host CapabilityRiskProfiles; that forwarding dependency must be removed so authorization never relies on an extension-classified preset module."
   },
   {
-    "path": "apps/arbor_trust/lib/arbor/trust/profile_exit_audit.ex",
-    "blob_oid": "9ec4132981ed7df28c8b12ab5af258562685eac7",
+    "path": "packages/arbor_trust/lib/arbor/trust/profile_exit_audit.ex",
+    "blob_oid": "919e95bcb56aadfa957776bcf389c472fa5eb172",
     "class": "optional_extension",
-    "rationale": "This module audits and migrates legacy permissive profiles before restart and can grant missing explicit capabilities during an operator-selected migration. It is bounded operational tooling, not part of normal authorization or safe recovery."
+    "rationale": "This module audits profiles for legacy baselines and auto/allow rules lacking matching capabilities. Its migration calls Store to update baselines and, with grant_missing enabled, calls Security.grant with the supplied actor_authority. Invalid-principal grant errors lead to a Store call to demote the rule to :ask."
   },
   {
     "path": "packages/arbor_trust/lib/arbor/trust/profile_resolver.ex",
