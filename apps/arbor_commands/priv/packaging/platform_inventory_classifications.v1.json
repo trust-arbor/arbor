@@ -1338,10 +1338,10 @@
     "rationale": "This facade owns the current end-to-end authorization integration: policy preflight, Security authorization, and approval gating. Profile lifecycle, event history, enumeration, and graduation APIs are mixed provider or optional concerns that must split from the fixed host authorization surface."
   },
   {
-    "path": "apps/arbor_trust/lib/arbor/trust/application.ex",
-    "blob_oid": "5b3e3ebe36d4a17b0ded99da1217e9811a3776c2",
+    "path": "packages/arbor_trust/lib/arbor/trust/application.ex",
+    "blob_oid": "4735817020cb2884cf2a3418919dc638275dff25",
     "class": "system_extension",
-    "rationale": "This callback starts the full Trust supervision tree as a configurable application. That tree selects persistence and advisory services needed by the normal Arbor profile, while the deterministic ceiling and authorization pieces must be extracted for provider-free safe boot."
+    "rationale": "This Trust application callback calls Runtime startup preparation and handles full or activation-only profiles, returned profile errors and invalid profile values. It selects child-list composition and supervision calls from the profile and start_children flag, requesting a ProviderGate specification on the full consumer path and composing or delegating calls with the selected PolicyHost, gate and Trust.Supervisor entries."
   },
   {
     "path": "apps/arbor_trust/lib/arbor/trust/approval_guard.ex",
@@ -1470,10 +1470,10 @@
     "rationale": "This service owns ETS-cached, write-through storage and distributed synchronization for operator trust profiles. Profile state is a normal-profile policy source and its Postgres/Persistence implementation cannot be required by the provider-free recovery host."
   },
   {
-    "path": "apps/arbor_trust/lib/arbor/trust/supervisor.ex",
-    "blob_oid": "e38c3348ff3f53446797d0192f0cdb55c08bee07",
+    "path": "packages/arbor_trust/lib/arbor/trust/supervisor.ex",
+    "blob_oid": "12b0dca062641bbc459dfe835c40708c73e86395",
     "class": "system_extension",
-    "rationale": "This supervisor assembles the full normal Trust profile stack, including a hard-coded Postgres BufferedStore plus optional events, anomaly, confirmation, and synchronization children. It must be separated from the small deterministic Trust mechanisms required in the host safe profile."
+    "rationale": "This Trust supervisor requests ProfileStore child specifications on enabled startup paths. It combines the profile children returned during init with EventStore, Manager, ConfirmationTracker and CapabilityGrantOwner entries, conditionally appending CircuitBreaker, EventHandler and CapabilitySync from local options. Disabled init selects an empty child list."
   },
   {
     "path": "apps/arbor_trust/lib/arbor/trust/taint_conjunct.ex",
