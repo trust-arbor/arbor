@@ -285,6 +285,69 @@ defmodule Arbor.Orchestrator.EngineCheckpointStoreConfigL4Test do
     end
   end
 
+  describe "Config.fetch_engine_checkpoints/1" do
+    test "keeps explicit normalization independent of poisoned env and module loading" do
+      poison = "invalid global checkpoint configuration"
+      Application.put_env(:arbor_orchestrator, :engine_checkpoints, poison)
+      assert {:error, :not_keyword} = Config.fetch_engine_checkpoints()
+
+      assert {:ok, nil_opts} = apply(Config, :fetch_engine_checkpoints, [nil])
+      refute Keyword.has_key?(nil_opts[:store_child_opts], :name)
+
+      assert {:ok, empty_opts} = apply(Config, :fetch_engine_checkpoints, [[]])
+      assert empty_opts[:store] == BufferedStore
+
+      assert Keyword.delete(empty_opts, :store_child_opts) ==
+               Keyword.delete(nil_opts, :store_child_opts)
+
+      assert empty_opts[:store_child_opts] ==
+               Keyword.put(nil_opts[:store_child_opts], :name, nil_opts[:store_name])
+
+      assert {:ok, file_opts} = apply(Config, :fetch_engine_checkpoints, [[store: nil]])
+      assert Map.new(file_opts) == Map.put(Map.new(empty_opts), :store, nil)
+
+      unloaded_store =
+        :"Elixir.Arbor.Orchestrator.ExplicitInputCheckpointStoreMustRemainUnloaded"
+
+      assert :code.is_loaded(unloaded_store) == false
+
+      assert {:ok, unloaded_opts} =
+               apply(Config, :fetch_engine_checkpoints, [[store: unloaded_store]])
+
+      assert unloaded_opts[:store] == unloaded_store
+      assert unloaded_opts[:start_store] == true
+      assert :code.is_loaded(unloaded_store) == false
+      assert Application.fetch_env(:arbor_orchestrator, :engine_checkpoints) == {:ok, poison}
+      assert {:error, :not_keyword} = Config.fetch_engine_checkpoints()
+    end
+
+    test "preserves validation error families and their order for explicit input" do
+      cases = [
+        {"not-a-keyword", :not_keyword},
+        {%{store: nil}, :not_keyword},
+        {[store: "bad", store_name: "bad"], :store_not_atom_or_nil},
+        {[store_name: "bad", store_opts: %{}], :store_name_not_atom},
+        {[store_opts: %{}, start_store: "yes"], :store_opts_not_keyword},
+        {[start_store: "yes", store_child_opts: %{}], :start_store_not_boolean},
+        {[store_child_opts: %{}, durability_class: :warp_drive], :store_child_opts_not_keyword},
+        {[durability_class: :warp_drive, unknown_key: true], :invalid_durability_class},
+        {[
+           unknown_key: true,
+           other_unknown_key: true,
+           store_child_opts: [name: :other_name]
+         ], {:unknown_keys, [:unknown_key, :other_unknown_key]}},
+        {[
+           store_name: :canonical_checkpoint_store,
+           store_child_opts: [name: :other_name]
+         ], {:store_child_name_conflict, :other_name, :canonical_checkpoint_store}}
+      ]
+
+      for {raw, expected} <- cases do
+        assert {:error, ^expected} = apply(Config, :fetch_engine_checkpoints, [raw])
+      end
+    end
+  end
+
   describe "Application checkpoint child derivation" do
     test "invalid env fails closed before supervision (same branch as Application.start)" do
       Application.put_env(:arbor_orchestrator, :engine_checkpoints, store: "nope")

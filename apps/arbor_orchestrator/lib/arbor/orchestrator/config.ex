@@ -771,6 +771,18 @@ defmodule Arbor.Orchestrator.Config do
   @spec fetch_engine_checkpoints() :: {:ok, keyword()} | {:error, term()}
   def fetch_engine_checkpoints do
     raw = Application.get_env(@app, :engine_checkpoints, [])
+    fetch_engine_checkpoints(raw)
+  end
+
+  @doc """
+  Validates explicit Engine checkpoint-store input as data only.
+
+  Uses the same normalization as `fetch_engine_checkpoints/0`, without reading
+  Application env or loading store modules. It does not admit a backend at
+  runtime or prove durability.
+  """
+  @spec fetch_engine_checkpoints(term()) :: {:ok, keyword()} | {:error, term()}
+  def fetch_engine_checkpoints(raw) do
     normalize_engine_checkpoints(raw)
   end
 
