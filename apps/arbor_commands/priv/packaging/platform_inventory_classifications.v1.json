@@ -102,14 +102,14 @@
     "rationale": "This is the normal-profile Signals-to-Persistence adapter: it appends to the hot target and spawns a durable write. Because it can report success after missing hot storage and before durable completion, it is not the mandatory audit boundary; the synchronous pre-effect spool must be split into trusted host code."
   },
   {
-    "path": "apps/arbor_historian/lib/arbor/historian/event.ex",
-    "blob_oid": "2c3f069289e0e4bbbb9d64ecef6f8cf9ec2b522b",
+    "path": "packages/arbor_historian/lib/arbor/historian/event.ex",
+    "blob_oid": "8ac25b9701ffd7d5532fb15919aff6fd9405ce27",
     "class": "system_extension",
     "rationale": "This file defines and validates Historian's versioned domain event with subject, causality, stream-position, and metadata fields. It is provider-specific storage and query vocabulary, not a generic mechanism required before extensions can exist."
   },
   {
-    "path": "apps/arbor_historian/lib/arbor/historian/event_converter.ex",
-    "blob_oid": "d4bb42b9fa26deb76dd889c003a18e2f94699e49",
+    "path": "packages/arbor_historian/lib/arbor/historian/event_converter.ex",
+    "blob_oid": "d372f7dfb4217ee0754c502783dbca73d7cdbc40",
     "class": "system_extension",
     "rationale": "This converter maps Historian events to and from Persistence.Event, including provider type conventions and safe atom decoding. It is adapter glue inside the normal Historian provider rather than a host verification boundary."
   },
