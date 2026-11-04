@@ -84,10 +84,10 @@
     "rationale": "This normal-profile facade combines the configured durable-sink callback, history queries, stream-content lifecycle, and optional views. Its query authorization is bypassable through raw query functions and its sink is not synchronous, so a future trusted audit-intent spool must be split from this provider facade."
   },
   {
-    "path": "apps/arbor_historian/lib/arbor/historian/application.ex",
-    "blob_oid": "f3015e9a5a834ec673fc395d17f94c5c510fb7c2",
+    "path": "packages/arbor_historian/lib/arbor/historian/application.ex",
+    "blob_oid": "0179dec9a75480620c6b3ad43aa382bda6467124",
     "class": "system_extension",
-    "rationale": "This application boots the Historian ETS cache and metadata registry, then replays provider identity metadata from the configured durable Repo. It preserves normal-profile append coherence but depends on replaceable persistence and is not the provider-free recovery host."
+    "rationale": "This application supplies projection-mode ETS, stream-registry and authority-audit-puller children to Historian's supervisor when enabled, then calls the observation port after successful supervisor startup. This module contains no durable metadata or identity replay implementation. It coordinates Historian-specific startup."
   },
   {
     "path": "packages/arbor_historian/lib/arbor/historian/config.ex",
@@ -96,10 +96,10 @@
     "rationale": "This module validates mutable hot and durable EventLog backend targets used by Historian append and stream-content operations. Backend selection is system-provider configuration, not immutable host policy or a pre-Platform primitive."
   },
   {
-    "path": "apps/arbor_historian/lib/arbor/historian/durable_signal_sink.ex",
-    "blob_oid": "8b49594d807ead80ccaf2a45bcec0e485b10e3d4",
+    "path": "packages/arbor_historian/lib/arbor/historian/durable_signal_sink.ex",
+    "blob_oid": "3fbba534a7266b5e32a50b835a2dad9f9f2a69ac",
     "class": "system_extension",
-    "rationale": "This is the normal-profile Signals-to-Persistence adapter: it appends to the hot target and spawns a durable write. Because it can report success after missing hot storage and before durable completion, it is not the mandatory audit boundary; the synchronous pre-effect spool must be split into trusted host code."
+    "rationale": "This Historian adapter constructs a Persistence event and calls the configured durable target inline. A singleton event reply is passed to a submission-match predicate; a truthy result permits best-effort hot projection and an :ok return path. Durable-target or reply failures return persist_failed. It coordinates provider-specific event delivery and projection."
   },
   {
     "path": "packages/arbor_historian/lib/arbor/historian/event.ex",
@@ -132,14 +132,14 @@
     "rationale": "This module derives counts, distributions, and activity summaries from query results. These analytical views are explicitly optional and are unnecessary for normal event capture, boot, or recovery."
   },
   {
-    "path": "apps/arbor_historian/lib/arbor/historian/stream_content.ex",
-    "blob_oid": "b6d966a056d77eeb7defb9af69df0909a910c905",
+    "path": "packages/arbor_historian/lib/arbor/historian/stream_content.ex",
+    "blob_oid": "12f05d42a7027a2cbac20f7ded5ab021ef78dbea",
     "class": "system_extension",
-    "rationale": "This imperative shell coordinates bounded purge and independent absence proof across Historian's durable and hot provider targets. It is normal-profile data-lifecycle behavior over replaceable backends; strong uncertainty handling does not make it a Platform recovery reference monitor."
+    "rationale": "This Historian lifecycle shell admits stream-delete requests, requests durable purge, and requires an affirmative absence reply before requesting hot projection eviction. Delete success requires an eviction acknowledgement; absent? consults only the durable target. It reports stage and progress uncertainty for this provider-specific stream-content workflow."
   },
   {
-    "path": "apps/arbor_historian/lib/arbor/historian/stream_content/core.ex",
-    "blob_oid": "617523b2ad5fae8d8d8b47c3231522a593ed936c",
+    "path": "packages/arbor_historian/lib/arbor/historian/stream_content/core.ex",
+    "blob_oid": "7228b0ee13f85f3ba23d52c5dc1ca229b9d43db6",
     "class": "system_extension",
     "rationale": "This pure core validates Historian stream-deletion requests and reduces backend purge and absence replies into progress envelopes. The mechanism is specific to the complete-history provider contract, so purity and fail-closed classification do not make it a K primitive or trusted host."
   },
