@@ -1398,10 +1398,10 @@
     "rationale": "This service applies configurable anomaly heuristics to trust events and requests profile freezes or recovery transitions. It is a first-party protective strategy, but its thresholds and reactions are advisory policy rather than the mandatory reference monitor."
   },
   {
-    "path": "apps/arbor_trust/lib/arbor/trust/config.ex",
-    "blob_oid": "374f6baa30ea2e111c5ae594e1ddfaecb12a30f4",
+    "path": "packages/arbor_trust/lib/arbor/trust/config.ex",
+    "blob_oid": "e8f2f6efa3819063d11afd0af2bcfac08bc185e6",
     "class": "system_extension",
-    "rationale": "This reader supplies Trust policy modules, persistence and PubSub settings, baseline capability generation, and the upward action-profile provider. Host approval and policy-enforcer switches are mixed in and must become frozen host configuration, while the remaining settings configure normal-profile providers."
+    "rationale": "This Trust module reads application settings, exposes baseline capability data and generates agent-specific capability maps. It applies local feature-domain and mode-map checks and assembles startup-profile maps from selected settings and delegated default/profile inputs. Its responsibility is configuration reading and capability/profile map processing."
   },
   {
     "path": "apps/arbor_trust/lib/arbor/trust/confirmation_tracker.ex",
@@ -1410,8 +1410,8 @@
     "rationale": "This transient tracker records approval streaks and emits human-facing graduation suggestions; authorization explicitly does not read its graduated flag. Confirm-then-automate advice is an optional first-party feature, not a host decision source."
   },
   {
-    "path": "apps/arbor_trust/lib/arbor/trust/event_converter.ex",
-    "blob_oid": "224724df3c4efa24443619405e17f806e912e236",
+    "path": "packages/arbor_trust/lib/arbor/trust/event_converter.ex",
+    "blob_oid": "daa8bf21697513d687669cbf98f7f869765dc250",
     "class": "optional_extension",
     "rationale": "This boundary adapter converts Trust events to and from the Persistence event format and stream naming convention. It belongs with optional durable trust history, not the host's authorization or recovery state."
   },
