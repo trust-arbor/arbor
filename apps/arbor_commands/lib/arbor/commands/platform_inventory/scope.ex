@@ -22,6 +22,7 @@ defmodule Arbor.Commands.PlatformInventory.Scope do
     "apps/arbor_commands/lib/mix/tasks/arbor.login.ex" => "arbor_commands",
     "apps/arbor_commands/lib/mix/tasks/arbor.oauth.login.ex" => "arbor_commands",
     "apps/arbor_commands/lib/mix/tasks/arbor/llm/free.ex" => "arbor_commands",
+    "apps/arbor_commands/lib/mix/tasks/arbor.trust.audit_profiles.ex" => "arbor_commands",
     "apps/arbor_commands/lib/arbor/commands/llm/disclosure_prompt.ex" => "arbor_commands"
   }
   @whole_source_apps Enum.sort(@umbrella_apps ++ @package_apps)

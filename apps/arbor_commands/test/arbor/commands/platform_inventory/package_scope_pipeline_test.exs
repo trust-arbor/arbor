@@ -190,6 +190,37 @@ defmodule Arbor.Commands.PlatformInventory.PackageScopePipelineTest do
     assert {:error, {:invalid_path, ^wrong_path}} = Core.project(inventory)
   end
 
+  test "relocated Trust audit sources preserve physical consumer ownership" do
+    root = repository!()
+    path = "apps/arbor_commands/lib/mix/tasks/arbor.trust.audit_profiles.ex"
+
+    neighbors = [
+      "apps/arbor_commands/lib/mix/tasks/arbor.trust.audit_profiles_extra.ex",
+      "apps/arbor_commands/lib/arbor/commands/application.ex"
+    ]
+
+    for source <- [path | neighbors], do: source!(root, source)
+    git!(root, ["add", "."])
+
+    assert {:ok, inventory} = load_scope(root)
+    assert Enum.map(inventory.files, & &1.path) == [path]
+    assert {:ok, report} = Core.project(inventory)
+    assert Map.new(report["entries"], &{&1["path"], &1["app"]}) == %{path => "arbor_commands"}
+    assert report["counts"]["total_files"] == 1
+    assert report["counts"]["unreviewed_files"] == 1
+    assert {:ok, _json} = Encode.encode_report(report)
+
+    for neighbor <- neighbors do
+      assert {:error, :outside_platform_scope} = Scope.source_app(neighbor)
+    end
+
+    old_path = "apps/arbor_trust/lib/mix/tasks/arbor.trust.audit_profiles.ex"
+    source!(root, old_path)
+    git!(root, ["add", "."])
+    assert {:ok, with_embedded_copy} = load_scope(root)
+    assert {:error, {:invalid_path, ^old_path}} = Core.project(with_embedded_copy)
+  end
+
   defp load_scope(root) do
     GitInventory.load_selected_blobs(root, Scope.whole_source_apps(),
       extra_paths: Scope.relocated_source_paths()
