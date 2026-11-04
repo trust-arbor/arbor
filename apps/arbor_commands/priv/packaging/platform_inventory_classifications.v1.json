@@ -1392,10 +1392,10 @@
     "rationale": "This listener currently translates profile creation, freeze, and unfreeze events into direct Security grant, list, and revoke effects. Those authority mutations make the present file part of the trusted host; the target split must leave event strategy outside and move all mutations behind a bounded host command."
   },
   {
-    "path": "apps/arbor_trust/lib/arbor/trust/circuit_breaker.ex",
-    "blob_oid": "553ec8bae6dce0ebb423e959e8774a3bcebd5a4e",
+    "path": "packages/arbor_trust/lib/arbor/trust/circuit_breaker.ex",
+    "blob_oid": "3d5473bd9d036e8ddbfd08600cf90caaea59e841",
     "class": "optional_extension",
-    "rationale": "This service applies configurable anomaly heuristics to trust events and requests profile freezes or recovery transitions. It is a first-party protective strategy, but its thresholds and reactions are advisory policy rather than the mandatory reference monitor."
+    "rationale": "This GenServer tracks per-agent event history and circuit states. Configured event-count and time-window checks select freeze requests to Manager; a trip calls Observation.emit and schedules a half-open transition. Reset and half-open auto-close handlers request unfreezes, periodic cleanup prunes old events, and rollback threshold crossings log warnings."
   },
   {
     "path": "packages/arbor_trust/lib/arbor/trust/config.ex",
@@ -1416,10 +1416,10 @@
     "rationale": "This boundary adapter converts Trust events to and from the Persistence event format and stream naming convention. It belongs with optional durable trust history, not the host's authorization or recovery state."
   },
   {
-    "path": "apps/arbor_trust/lib/arbor/trust/event_handler.ex",
-    "blob_oid": "105ceeb7937db5e2a22b5439d8b10789a6c72b47",
+    "path": "packages/arbor_trust/lib/arbor/trust/event_handler.ex",
+    "blob_oid": "4018e7e70a0513849e9a7eee5f84bbca3e30df83",
     "class": "optional_extension",
-    "rationale": "This subscriber translates agent, self-improvement, compilation, reload, and security activity into trust-affecting events. Learned behavioral policy input is optional and may advise profile management, but it cannot grant authority or replace fixed enforcement."
+    "rationale": "This GenServer attempts topic subscriptions when Config.pubsub is non-nil; rescued subscription exceptions are logged. While enabled, it translates supported action, test, rollback, improvement, reload, compilation and security message shapes into Manager.record_trust_event calls with selected metadata. Disabling changes the local flag; unmatched outer messages are ignored."
   },
   {
     "path": "apps/arbor_trust/lib/arbor/trust/event_store.ex",
