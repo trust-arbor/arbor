@@ -1746,6 +1746,163 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
     Base.encode16(:crypto.hash(:sha256, value), case: :lower)
   end
 
+  # Observe only this test process's fixed public readiness return. Call events
+  # carry arity, never plan/compilation arguments. The collector stays private.
+  defp with_admitted_readiness_report(fun) do
+    tracee = self()
+    mfa = {Arbor.Orchestrator.CodingPlan.Readiness, :check_prepared, 3}
+    Code.ensure_loaded!(Arbor.Orchestrator.CodingPlan.Readiness)
+
+    {tracer, monitor} =
+      spawn_monitor(fn -> readiness_report_trace_loop(tracee, 0, []) end)
+
+    try do
+      assert :erlang.trace_pattern(mfa, [{:_, [], [{:return_trace}]}], []) == 1
+      assert :erlang.trace(tracee, true, [:call, :arity, {:tracer, tracer}]) == 1
+
+      outcome =
+        try do
+          {:returned, fun.()}
+        catch
+          kind, reason -> {:raised, kind, reason, __STACKTRACE__}
+        end
+
+      :erlang.trace(tracee, false, [:call, :arity])
+      send(tracer, {:drain_readiness_report, tracee})
+
+      {call_count, reports} =
+        receive do
+          {:readiness_evidence_reports, ^tracer, call_count, reports} ->
+            {call_count, reports}
+
+          {:readiness_evidence_trace_error, ^tracer, :delivery_timeout} ->
+            flunk("readiness return trace delivery timed out")
+        after
+          5_000 -> flunk("readiness return trace capture timed out")
+        end
+
+      case outcome do
+        {:returned, result} ->
+          assert call_count == 1
+          assert [report] = reports
+          assert ReadinessReport.valid?(report)
+          {[report], result}
+
+        {:raised, kind, reason, stacktrace} ->
+          :erlang.raise(kind, reason, stacktrace)
+      end
+    after
+      :erlang.trace(tracee, false, [:call, :arity])
+      :erlang.trace_pattern(mfa, false, [])
+      Process.exit(tracer, :kill)
+
+      receive do
+        {:DOWN, ^monitor, :process, ^tracer, _reason} -> :ok
+      after
+        1_000 -> flunk("readiness return trace collector did not stop")
+      end
+    end
+  end
+
+  defp readiness_report_trace_loop(tracee, call_count, reports) do
+    receive do
+      {:trace, ^tracee, :call, {Arbor.Orchestrator.CodingPlan.Readiness, :check_prepared, 3}} ->
+        readiness_report_trace_loop(tracee, call_count + 1, reports)
+
+      {:trace, ^tracee, :return_from,
+       {Arbor.Orchestrator.CodingPlan.Readiness, :check_prepared, 3}, {:ok, report}}
+      when is_map(report) ->
+        readiness_report_trace_loop(tracee, call_count, [report | reports])
+
+      {:drain_readiness_report, ^tracee} ->
+        delivery_ref = :erlang.trace_delivered(tracee)
+        drain_readiness_report_trace(tracee, delivery_ref, call_count, reports)
+
+      _other ->
+        readiness_report_trace_loop(tracee, call_count, reports)
+    end
+  end
+
+  defp drain_readiness_report_trace(tracee, delivery_ref, call_count, reports) do
+    receive do
+      {:trace, ^tracee, :call, {Arbor.Orchestrator.CodingPlan.Readiness, :check_prepared, 3}} ->
+        drain_readiness_report_trace(tracee, delivery_ref, call_count + 1, reports)
+
+      {:trace, ^tracee, :return_from,
+       {Arbor.Orchestrator.CodingPlan.Readiness, :check_prepared, 3}, {:ok, report}}
+      when is_map(report) ->
+        drain_readiness_report_trace(tracee, delivery_ref, call_count, [report | reports])
+
+      {:trace_delivered, ^tracee, ^delivery_ref} ->
+        send(tracee, {:readiness_evidence_reports, self(), call_count, Enum.reverse(reports)})
+
+      _other ->
+        drain_readiness_report_trace(tracee, delivery_ref, call_count, reports)
+    after
+      1_000 ->
+        send(tracee, {:readiness_evidence_trace_error, self(), :delivery_timeout})
+    end
+  end
+
+  # This oracle knows only the closed report/diagnostic schemas. Field order is
+  # explicit, not the product helper's recursive sorting/coercion algorithm.
+  defp readiness_evidence_bytes(report) do
+    assert ReadinessReport.valid?(report)
+
+    fields =
+      [{"diagnostics", Enum.map(report["diagnostics"], &readiness_diagnostic_object/1)}] ++
+        readiness_optional_field(report, "expires_at") ++
+        [
+          {"observed_at", Map.fetch!(report, "observed_at")},
+          {"plan_digest", Map.fetch!(report, "plan_digest")},
+          {"status", Map.fetch!(report, "status")},
+          {"version", Map.fetch!(report, "version")}
+        ]
+
+    fields |> Jason.OrderedObject.new() |> Jason.encode!()
+  end
+
+  defp readiness_diagnostic_object(diagnostic) do
+    assert Diagnostic.valid?(diagnostic)
+
+    fields =
+      [
+        {"code", Map.fetch!(diagnostic, "code")},
+        {"decision", Map.fetch!(diagnostic, "decision")}
+      ] ++
+        readiness_optional_field(diagnostic, "evidence_ref") ++
+        [{"gate_id", Map.fetch!(diagnostic, "gate_id")}] ++
+        readiness_optional_field(diagnostic, "message") ++
+        [
+          {"observed_at", Map.fetch!(diagnostic, "observed_at")},
+          {"phase", Map.fetch!(diagnostic, "phase")}
+        ] ++
+        readiness_optional_field(diagnostic, "remediation") ++
+        [{"version", Map.fetch!(diagnostic, "version")}]
+
+    Jason.OrderedObject.new(fields)
+  end
+
+  defp readiness_optional_field(object, key) do
+    case Map.fetch(object, key) do
+      {:ok, value} -> [{key, value}]
+      :error -> []
+    end
+  end
+
+  defp drift_evidence_bytes(admitted_evidence_ref, admitted_observed_at, report, diagnostic) do
+    [
+      {"admitted_evidence_ref", admitted_evidence_ref},
+      {"admitted_observed_at", admitted_observed_at},
+      {"code", Map.fetch!(diagnostic, "code")},
+      {"gate_id", Map.fetch!(diagnostic, "gate_id")},
+      {"observed_at", Map.fetch!(report, "observed_at")},
+      {"plan_digest", Map.fetch!(report, "plan_digest")}
+    ]
+    |> Jason.OrderedObject.new()
+    |> Jason.encode!()
+  end
+
   defp maybe_add_verification_evidence(context) do
     status = Map.get(context, "status")
 
@@ -4983,12 +5140,16 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
         Process.put(:coding_executor_archived_artifact_mutation, mutation)
         task_id = "task_post_readiness_drift_#{mutation}"
 
-        assert {:error, {:coding_execution_state_drift, report}} =
-                 CodingTaskExecutor.run(
-                   "agent_1",
-                   valid_task(),
-                   valid_context(%{"task_id" => task_id})
-                 )
+        {[admitted_report], result} =
+          with_admitted_readiness_report(fn ->
+            CodingTaskExecutor.run(
+              "agent_1",
+              valid_task(),
+              valid_context(%{"task_id" => task_id})
+            )
+          end)
+
+        assert {:error, {:coding_execution_state_drift, report}} = result
 
         assert_receive {:post_readiness_artifact_mutated, ^mutation, admitted_plan}
 
@@ -5015,6 +5176,17 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
         refute admitted_observed_at == report["observed_at"]
         assert admitted_evidence_ref =~ ~r/\Asha256:[0-9a-f]{64}\z/
         assert diagnostic["evidence_ref"] =~ ~r/\Asha256:[0-9a-f]{64}\z/
+        assert ReadinessReport.valid?(admitted_report)
+        assert admitted_observed_at == admitted_report["observed_at"]
+        assert report["plan_digest"] == admitted_report["plan_digest"]
+
+        assert admitted_evidence_ref ==
+                 "sha256:" <> sha256(readiness_evidence_bytes(admitted_report))
+
+        expected_drift_bytes =
+          drift_evidence_bytes(admitted_evidence_ref, admitted_observed_at, report, diagnostic)
+
+        assert diagnostic["evidence_ref"] == "sha256:" <> sha256(expected_drift_bytes)
         assert {:ok, _json} = Jason.encode(report)
 
         refute inspect(report) =~ "beam_sha256"
@@ -5022,6 +5194,89 @@ defmodule Arbor.Orchestrator.CodingTaskExecutorTest do
         refute_receive {:coding_executor_captured_run, _path, _opts}
         assert Process.get(:coding_executor_last_run) == nil
       end
+    end
+
+    test "state-drift evidence schemas match independent canonical byte and hash vectors" do
+      observed_at = "2026-07-22T12:00:00Z"
+      plan_digest = "sha256:" <> String.duplicate("a", 64)
+
+      {:ok, report} =
+        ReadinessReport.new(%{
+          version: 1,
+          status: "degraded",
+          plan_digest: plan_digest,
+          observed_at: observed_at,
+          expires_at: "2026-07-22T12:00:30Z",
+          diagnostics: [
+            %{
+              version: 1,
+              gate_id: "compiler",
+              phase: "preflight",
+              decision: "passed",
+              code: "compilation_valid",
+              observed_at: observed_at,
+              message: ~S(UTF-8 café "quoted" \ path),
+              remediation: "Keep the reviewed order.",
+              evidence_ref: "fixture/v1"
+            },
+            %{
+              version: 1,
+              gate_id: "acp_health",
+              phase: "preflight",
+              decision: "degraded",
+              code: "unobserved",
+              observed_at: observed_at
+            }
+          ]
+        })
+
+      report = ReadinessReport.to_map(report)
+
+      expected_report_bytes =
+        ~S|{"diagnostics":[{"code":"compilation_valid","decision":"passed","evidence_ref":"fixture/v1","gate_id":"compiler","message":"UTF-8 café \"quoted\" \\ path","observed_at":"2026-07-22T12:00:00Z","phase":"preflight","remediation":"Keep the reviewed order.","version":1},{"code":"unobserved","decision":"degraded","gate_id":"acp_health","observed_at":"2026-07-22T12:00:00Z","phase":"preflight","version":1}],"expires_at":"2026-07-22T12:00:30Z","observed_at":"2026-07-22T12:00:00Z","plan_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","status":"degraded","version":1}|
+
+      expected_report_ref =
+        "sha256:a8724d6cb06db63461c4b4d1cd8e319a43da6e5cebd2c5629ffda05ec3381af7"
+
+      assert readiness_evidence_bytes(report) == expected_report_bytes
+      assert "sha256:" <> sha256(expected_report_bytes) == expected_report_ref
+
+      {:ok, empty_report} =
+        ReadinessReport.new(%{
+          version: 1,
+          status: "degraded",
+          plan_digest: plan_digest,
+          observed_at: observed_at,
+          diagnostics: []
+        })
+
+      expected_empty_bytes =
+        ~S|{"diagnostics":[],"observed_at":"2026-07-22T12:00:00Z","plan_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","status":"degraded","version":1}|
+
+      assert readiness_evidence_bytes(ReadinessReport.to_map(empty_report)) ==
+               expected_empty_bytes
+
+      assert "sha256:" <> sha256(expected_empty_bytes) ==
+               "sha256:52375865ef570283b09196965692c3234d90a0fcdd6d0225f30eef21950c2978"
+
+      drift_report = %{
+        "observed_at" => "2026-07-22T12:00:01Z",
+        "plan_digest" => plan_digest
+      }
+
+      diagnostic = %{
+        "code" => "immutable_artifact_state_drift",
+        "gate_id" => "immutable_execution_boundary"
+      }
+
+      expected_drift_bytes =
+        ~S|{"admitted_evidence_ref":"sha256:a8724d6cb06db63461c4b4d1cd8e319a43da6e5cebd2c5629ffda05ec3381af7","admitted_observed_at":"2026-07-22T12:00:00Z","code":"immutable_artifact_state_drift","gate_id":"immutable_execution_boundary","observed_at":"2026-07-22T12:00:01Z","plan_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}|
+
+      assert drift_evidence_bytes(expected_report_ref, observed_at, drift_report, diagnostic) ==
+               expected_drift_bytes
+
+      assert "sha256:" <> sha256(expected_drift_bytes) ==
+               "sha256:54e9296152ca630a6c870a465abfe05c963cb3fe74d18898a45a8b18279f6a9f"
     end
 
     test "security regression: compiler cannot redirect the canonical worktree base" do
