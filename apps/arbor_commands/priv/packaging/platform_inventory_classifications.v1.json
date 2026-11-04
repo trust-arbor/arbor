@@ -90,8 +90,8 @@
     "rationale": "This application boots the Historian ETS cache and metadata registry, then replays provider identity metadata from the configured durable Repo. It preserves normal-profile append coherence but depends on replaceable persistence and is not the provider-free recovery host."
   },
   {
-    "path": "apps/arbor_historian/lib/arbor/historian/config.ex",
-    "blob_oid": "1b51a08e81ea952a2ede1c9b01ba536b49a1cb02",
+    "path": "packages/arbor_historian/lib/arbor/historian/config.ex",
+    "blob_oid": "97a6c7ca9f4d686a63ede3cd3c829e3750a7b47d",
     "class": "system_extension",
     "rationale": "This module validates mutable hot and durable EventLog backend targets used by Historian append and stream-content operations. Backend selection is system-provider configuration, not immutable host policy or a pre-Platform primitive."
   },
