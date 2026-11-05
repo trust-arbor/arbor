@@ -714,10 +714,10 @@
     "rationale": "This module supplies identity, signing, replay, quota, constraint, authority, and distributed-security controls consumed by the reference monitor. OIDC and approval-delivery settings need a provider split, and weakening host controls must become boot-bound rather than mutable application configuration."
   },
   {
-    "path": "apps/arbor_security/lib/arbor/security/constraint.ex",
-    "blob_oid": "3359ca2c9d27fe9fb722e7f8376b1e90028f5351",
+    "path": "packages/arbor_capabilities/lib/arbor/security/constraint.ex",
+    "blob_oid": "8b973e2c3d8b37e53310af813cc4b1a435127602",
     "class": "trusted_host",
-    "rationale": "This evaluator enforces time, path, and rate constraints carried by an admitted capability before use. Constraint enforcement is part of the non-bypassable capability decision, while approval policy is deliberately handled at a separate integration point."
+    "rationale": "This evaluator participates in the host gate for capability constraints. When configured checking is enabled, applicable time, path, and rate checks must pass before the inspected ordinary authorization and approval graduation paths finalize authorized effects. Non-test startup code invokes the Application's snapshot protocol for the configured enforcement setting."
   },
   {
     "path": "apps/arbor_security/lib/arbor/security/constraint/rate_limiter.ex",
