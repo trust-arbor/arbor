@@ -855,7 +855,7 @@ defmodule Arbor.Contracts.AdmissionTest do
          } do
       e = by_path["lib/arbor/contracts/security/signing_authority/validator.ex"]
       assert e
-      assert Enum.sort(e.external_consumers) == ["arbor_security", "arbor_trust"]
+      assert Enum.sort(e.external_consumers) == ["arbor_capabilities", "arbor_trust"]
       assert e.tier == :shared
       assert length(e.internal_consumers) == 8
       assert Enum.count(e.internal_consumers, &String.starts_with?(&1, "lib/")) == 7

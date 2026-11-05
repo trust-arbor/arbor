@@ -4,9 +4,18 @@ defmodule Arbor.LLM.Plugs.FixturePackageLocationTest do
   alias Arbor.LLM.Plugs.Fixture
 
   @moduletag :fast
-  @moduletag :tmp_dir
 
   setup do
+    root =
+      Path.join(
+        System.tmp_dir!(),
+        "arbor-llm-fixture-location-#{Base.encode16(:crypto.strong_rand_bytes(12), case: :lower)}"
+      )
+
+    File.mkdir!(root)
+    on_exit(fn -> File.rm_rf!(root) end)
+    File.chmod!(root, 0o700)
+
     previous = Application.fetch_env(:arbor_llm, :recorder)
 
     on_exit(fn ->
@@ -17,7 +26,7 @@ defmodule Arbor.LLM.Plugs.FixturePackageLocationTest do
     end)
 
     Application.delete_env(:arbor_llm, :recorder)
-    :ok
+    {:ok, tmp_dir: root}
   end
 
   test "repository and package callers resolve the canonical package recordings", %{tmp_dir: root} do
