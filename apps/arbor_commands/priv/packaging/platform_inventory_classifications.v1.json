@@ -594,16 +594,16 @@
     "rationale": "This application starts an empty supervisor and requires users to add the EventStore child explicitly. It is lifecycle scaffolding for the opt-in EventStore provider, not normal-profile or safe-host startup."
   },
   {
-    "path": "apps/arbor_persistence_ecto/lib/arbor/persistence/ecto/event_log.ex",
-    "blob_oid": "008c04f2e2d046a7b6c32142c0ca4419cb81ebe1",
+    "path": "packages/arbor_persistence_eventstore/lib/arbor/persistence/ecto/event_log.ex",
+    "blob_oid": "abbad9b8f77ee3450f9dc48dd078b729d3072e85",
     "class": "optional_extension",
     "rationale": "This adapter implements the Persistence EventLog contract over the external EventStore library and PostgreSQL, including operation fences and reconciliation. It is Arbor-supplied but opt-in, so it is an optional rather than third-party extension."
   },
   {
-    "path": "apps/arbor_persistence_ecto/lib/arbor/persistence/ecto/event_log_schema.ex",
-    "blob_oid": "400ad34bfe411c2cde51f93cc57af7b15a280541",
+    "path": "packages/arbor_persistence_eventstore/lib/arbor/persistence/ecto/event_log_schema.ex",
+    "blob_oid": "352af89de84d25a232605107d9cc4de354b62d92",
     "class": "optional_extension",
-    "rationale": "This module migrates and verifies the exact PostgreSQL schema, constraints, locks, triggers, and protocol version required by the opt-in EventStore adapter. Strong schema admission remains provider implementation responsibility."
+    "rationale": "This module owns explicit protocol migrations and runtime schema admission for the opt-in EventStore adapter, including column, constraint, index, trigger/function, and protocol-version checks plus requested locking. Strong schema admission remains provider implementation responsibility."
   },
   {
     "path": "packages/arbor_persistence_eventstore/lib/arbor/persistence/ecto/event_serializer.ex",
