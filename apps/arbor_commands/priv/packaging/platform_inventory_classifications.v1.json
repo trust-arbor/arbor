@@ -942,10 +942,10 @@
     "rationale": "This best-effort helper projects security events into telemetry metadata for the normal Signals observability bridge and intentionally rescues emission failures. It is instrumentation, not the future mandatory audit-intent boundary required for safe recovery."
   },
   {
-    "path": "apps/arbor_security/lib/arbor/security/test_bootstrap.ex",
-    "blob_oid": "3c5f0baea5cb51cb47271e0019747989d3f6879d",
+    "path": "packages/arbor_capabilities/lib/arbor/security/test_bootstrap.ex",
+    "blob_oid": "96b328015378254379e0a18416dfdb46a4389d26",
     "class": "optional_extension",
-    "rationale": "This inert release module starts Security and BufferedStore children only for isolated ExUnit consumers when normal children are disabled. It is first-party development support and has no production boot, authorization, or recovery responsibility."
+    "rationale": "This first-party development-support helper compiles its operational implementation only for test builds. It reconciles or rebuilds the test authority supervision tree, completes store and authority startup, and provides audit-consumer/report support. Non-test builds expose a start!/1 stub returning :skipped; within test builds, the activation-only profile also skips this helper. These test-support responsibilities support optional_extension classification."
   },
   {
     "path": "apps/arbor_security/lib/arbor/security/uri_registry.ex",
