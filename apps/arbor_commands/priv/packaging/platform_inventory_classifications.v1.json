@@ -2170,5 +2170,23 @@
     "blob_oid": "737fe781a2d55d5525b101e1dd58564de5b00a7b",
     "class": "optional_extension",
     "rationale": "Implements Historian's Observation callback by forwarding diagnostic emissions to Signals. This is optional observation binding, matching the existing optional Historian observation contract and port; this module contains no authorization decision or durable acknowledgement."
+  },
+  {
+    "path": "packages/arbor_trust/lib/arbor/trust/contracts/observation.ex",
+    "blob_oid": "c27e9a8f721f9ca92edb6f930927d4826136726d",
+    "class": "optional_extension",
+    "rationale": "Declares the optional Trust diagnostics emit/4 callback shape. It defines no policy decision, persistence acknowledgement or process lifecycle; the declaration itself supplies no latency, effect-isolation or delivery guarantee."
+  },
+  {
+    "path": "packages/arbor_trust/lib/arbor/trust/observation.ex",
+    "blob_oid": "fff5fa22645fa2f4c304f4145dae7c6952581fd0",
+    "class": "optional_extension",
+    "rationale": "Selects the configured Trust observation provider, with :ok for absent or unusable providers. It may load an available module and invokes emit/4 inline; normal results and rescued/caught failures are discarded into :ok. This optional diagnostics port supplies neither bounded latency, effect isolation nor a persistence acknowledgement."
+  },
+  {
+    "path": "apps/arbor_trust_host/lib/arbor/trust/host/observation.ex",
+    "blob_oid": "5d0dd2486b7a309a9d4e54a3d70ff15a5b11aedd",
+    "class": "optional_extension",
+    "rationale": "Implements Trust diagnostics by forwarding to the public Signals facade. The :stream_id key's presence, including nil, selects durable_emit/4; otherwise emit/4. It implements no authority admission or durable acknowledgement of its own: the facade's durable branch ignores the sink result, and the Core port normalizes provider outcomes. Inline effects and delays remain possible."
   }
 ]
