@@ -1105,9 +1105,9 @@
   },
   {
     "path": "apps/arbor_shell/lib/arbor/shell/application.ex",
-    "blob_oid": "0ec6dd80a97f3a44f4f65ac0801e24bbb5f461d4",
+    "blob_oid": "b2cc1b129b32f9b9acdb758974f3e9979577e326",
     "class": "trusted_host",
-    "rationale": "Owns Shell's ordered supervision and the planned shutdown barrier that protects process ownership and recovery. It currently starts optional Apple and Linux provider children directly; profile activation must split those children from the minimal host tree."
+    "rationale": "This OTP callback orders Shell policy, authority and execution/recovery owners under rest-for-one supervision, captures startup epoch/child state, coordinates planned-shutdown drain acknowledgement and invokes epoch cleanup on returned startup failure or stop."
   },
   {
     "path": "apps/arbor_shell/lib/arbor/shell/cap_policy.ex",
