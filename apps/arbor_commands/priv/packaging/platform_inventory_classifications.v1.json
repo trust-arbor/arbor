@@ -2086,5 +2086,53 @@
     "blob_oid": "80014b5a35522e1d6765a167264eedd9c184208d",
     "class": "system_extension",
     "rationale": "Arbor.Orchestrator.ToolHooks.run/4 (tool_hooks.ex:16-19) executes a hook and normalizes the result. Function hooks run directly (25-26). A binary command uses run_command/3 (108-115), which calls an injected :tool_hook_runner when present. run_shell_hook/3 (123-126) otherwise returns an error that agent-authored command expansion is disabled and does not spawn a shell. Current owner is arbor_llm despite the Arbor.Orchestrator name. The shell authorization boundary is outside this module. This is a fail-closed hook seam, not that boundary. Class system_extension."
+  },
+  {
+    "path": "packages/arbor_historian/lib/arbor/historian/authority_audit_puller.ex",
+    "blob_oid": "0701fa44876a289dea21b6c58553859b4ff61f86",
+    "class": "system_extension",
+    "rationale": "This Historian worker polls the authority-source port, requests a node-restart durable EventLog target and rereads submitted content before requesting acknowledgement of the source intent. It retries delivery failures and reports stuck conflicts. It coordinates provider-specific durable audit delivery; journal admission and retirement remain delegated to the source."
+  },
+  {
+    "path": "packages/arbor_historian/lib/arbor/historian/contracts/authority_source.ex",
+    "blob_oid": "db5f8a75bdc84d4e8e7ee9647c80032378aaaff1",
+    "class": "system_extension",
+    "rationale": "Defines Historian reconciliation, delivery-batch and acknowledgement callbacks for an authority mutation source. The contract keeps journal denials source-owned and requires calls in the actual puller process. It supplies the history provider’s delivery interface rather than implementing journal admission or retirement."
+  },
+  {
+    "path": "packages/arbor_historian/lib/arbor/historian/contracts/authorizer.ex",
+    "blob_oid": "9da045671f6622faa6c7661e58e1bdb19ae7f30e",
+    "class": "system_extension",
+    "rationale": "Defines the configured authorization-provider interface and decision shapes for Historian agent-facing reads, including self-scoped requests. It forwards provider-denial vocabulary and distinguishes intentionally ungated trusted-host queries. It is domain admission vocabulary rather than a universal authorization gate."
+  },
+  {
+    "path": "packages/arbor_historian/lib/arbor/historian/contracts/observation.ex",
+    "blob_oid": "b384c9c793df94d092104139cc9deb751d8fc95b",
+    "class": "optional_extension",
+    "rationale": "Defines an optional Historian diagnostic emission callback. Its contract states that results never authorize reads or acknowledge durable state. It is observation-interface vocabulary separate from audit delivery and admission."
+  },
+  {
+    "path": "packages/arbor_historian/lib/arbor/historian/ports/authority_source.ex",
+    "blob_oid": "50bd23632283dd493ae356b2c8ddaf2e9d0d905b",
+    "class": "system_extension",
+    "rationale": "Synchronously forwards Historian reconciliation, batch and acknowledgement calls to a configured authority-source provider. It checks callback availability and reply shapes and returns unavailable or malformed-reply errors. It is delivery-adapter glue; journal enforcement remains delegated to the source."
+  },
+  {
+    "path": "packages/arbor_historian/lib/arbor/historian/ports/authorizer.ex",
+    "blob_oid": "3462dae7f9a608fde5fad35028a8a84e1efddd66",
+    "class": "system_extension",
+    "rationale": "Dispatches Historian authorization and self-scoped authorization to a configured provider after checking both callbacks. It admits authorized, pending-approval and error replies and maps missing, exceptional or malformed providers to errors. It adapts the history provider’s read-authorization contract."
+  },
+  {
+    "path": "packages/arbor_historian/lib/arbor/historian/ports/observation.ex",
+    "blob_oid": "48eead3cca804edc8ff3b9c255251568d41c8e1a",
+    "class": "optional_extension",
+    "rationale": "Forwards Historian diagnostic emission to an optional configured provider and returns that provider’s result unchanged. An absent provider or exception returns :ok. Its declared observation contract treats these results as non-authoritative; this port contains no local authorization or durable-acknowledgement implementation."
+  },
+  {
+    "path": "packages/arbor_historian/lib/arbor/historian/security_invocation_sink.ex",
+    "blob_oid": "c095bc7e3040b8ebc82344699c7b7c41e0663348",
+    "class": "system_extension",
+    "rationale": "Validates invocation-audit event shape, requests a node-restart durable target and appends the event. It checks a singleton append reply against the submission or rereads after an ambiguous append, and exposes bounded readback and implementation identity data. It implements durable audit-provider delivery rather than the host decision to admit an effect."
   }
 ]
