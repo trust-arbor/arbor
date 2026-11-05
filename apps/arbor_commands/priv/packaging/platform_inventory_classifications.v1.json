@@ -2134,5 +2134,41 @@
     "blob_oid": "c095bc7e3040b8ebc82344699c7b7c41e0663348",
     "class": "system_extension",
     "rationale": "Validates invocation-audit event shape, requests a node-restart durable target and appends the event. It checks a singleton append reply against the submission or rereads after an ambiguous append, and exposes bounded readback and implementation identity data. It implements durable audit-provider delivery rather than the host decision to admit an effect."
+  },
+  {
+    "path": "apps/arbor_historian_host/lib/arbor/historian/adapters/security_event_log.ex",
+    "blob_oid": "1d1fc475112819d84eb12f2375411d05eec0f432",
+    "class": "system_extension",
+    "rationale": "Implements Security's EventLogAdapter by translating persist/read requests onto Historian and a configured Persistence target. It retains persist_failed/event_log_unavailable error mapping, rejects projection-backed reads and applies target options. This is normal history-provider integration; downstream authorization and journal authority remain outside this adapter."
+  },
+  {
+    "path": "apps/arbor_historian_host/lib/arbor/historian/host.ex",
+    "blob_oid": "b6182bccb682cf00e377e2cabbf2d24b4a87d3ee",
+    "class": "system_extension",
+    "rationale": "Declares the product Boundary for Historian, Security and Signals. The module explicitly owns no authority tree and contains no application callback or runtime operation. It is passive composition for the canonical Historian system provider; its Host name does not itself establish fixed-host enforcement."
+  },
+  {
+    "path": "apps/arbor_historian_host/lib/arbor/historian/host/authority_source.ex",
+    "blob_oid": "ecadc5e593d33652afcce7a58bfb6a6e4a7a706f",
+    "class": "system_extension",
+    "rationale": "Implements Historian's AuthoritySource callbacks as direct inline calls to the Security facade for reconciliation, delivery batches and acknowledgement. Inline delegation preserves the real puller caller PID. It binds the history delivery provider to the existing journal owner; it does not implement journal admission, retirement or policy."
+  },
+  {
+    "path": "apps/arbor_historian_host/lib/arbor/historian/host/authorizer.ex",
+    "blob_oid": "083d70484939cbcdbb85789830aed0a7b5b9c576",
+    "class": "system_extension",
+    "rationale": "Implements Historian's Authorizer contract by forwarding ordinary and self-scoped authorization calls unchanged to the Security facade. It is the provider-specific product binding for Historian reads; authorization decisions remain delegated to Security."
+  },
+  {
+    "path": "apps/arbor_historian_host/lib/arbor/historian/host/durable_sink.ex",
+    "blob_oid": "e11c676d456bbb4606ea05127335880d5a8a00ac",
+    "class": "system_extension",
+    "rationale": "Implements the Signals-owned DurableSink contract with an inline call to Historian.persist_durable_event/4. Durable event construction and acknowledgement remain Historian-owned. This binds normal durable history delivery and adds no independent authority or process lifecycle."
+  },
+  {
+    "path": "apps/arbor_historian_host/lib/arbor/historian/host/observation.ex",
+    "blob_oid": "737fe781a2d55d5525b101e1dd58564de5b00a7b",
+    "class": "optional_extension",
+    "rationale": "Implements Historian's Observation callback by forwarding diagnostic emissions to Signals. This is optional observation binding, matching the existing optional Historian observation contract and port; this module contains no authorization decision or durable acknowledgement."
   }
 ]
