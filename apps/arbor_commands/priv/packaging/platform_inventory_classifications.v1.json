@@ -1009,9 +1009,9 @@
   },
   {
     "path": "apps/arbor_shell/lib/arbor/shell/apple_container_probe_runtime.ex",
-    "blob_oid": "d8f59e5dba42ca33fa5119327c97142adfa09766",
+    "blob_oid": "643347afe1e0f2af51326549263e083548054c7c",
     "class": "optional_extension",
-    "rationale": "Performs Apple-specific probe execution, authority checkout, identity verification, and bounded config reads. It is the imperative probe adapter for an optional provider, despite reusing host executable verification."
+    "rationale": "This Apple Container admission-probe runtime adapter routes probe execution, requests control-plane/image-policy data and executable/path verification, and reads plugin-configuration bytes for its consumer contract."
   },
   {
     "path": "apps/arbor_shell/lib/arbor/shell/apple_container_prober.ex",
@@ -1147,9 +1147,9 @@
   },
   {
     "path": "apps/arbor_shell/lib/arbor/shell/executor.ex",
-    "blob_oid": "df7a45d7c0f522d5c02b324066dd016737c1454d",
+    "blob_oid": "6f7e73428b073ce30eae75249751d437d7f54bb5",
     "class": "system_extension",
-    "rationale": "Implements bounded native direct-argv execution and maps native process-group terminals into Shell results. It is the first-party native executor required by the normal profile, while enforcement independent of backend choice must remain in the host."
+    "rationale": "Shell-owned execution adapter called by the facade's synchronous and asynchronous string-command paths, direct-argv path, and synchronous/asynchronous prepared-command paths. Its ordinary and executable-bound wrappers normalize timeout/output values before delegating to ProcessGroup; trusted-build forwards lease/permit values. It translates reported terminal and setup outcomes into Shell results."
   },
   {
     "path": "apps/arbor_shell/lib/arbor/shell/linux_dependency_baseline_authority.ex",
