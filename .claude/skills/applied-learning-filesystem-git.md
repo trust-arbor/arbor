@@ -377,8 +377,9 @@ treating them as package roots (found 2026-08-14 during K2 app-env validation).
 The reverse also bites: a pathspec with a wildcard is matched against the whole
 path, not used as a directory prefix, so `git grep ... -- 'apps/*/lib'` matches
 no file under those directories and silently returns nothing, which reads as
-"no callers". Use `'apps/*/lib/**'`, or `-- apps` and filter the paths (found
-2026-10-24 checking reachability for eval findings).
+"no callers". Use `'apps/*/lib/**'` or `'apps/*/lib/*'`, or `-- apps` and filter the paths. Run
+the pathspec once on a symbol you know exists before you trust an empty result or put it in a brief
+for another agent (found 2026-10-24 checking reachability for eval findings).
 
 <!-- applied-learning: git-checkout-double-dash-restores-from-the-index-not-head -->
 <a id="applied-learning-git-checkout-double-dash-restores-from-the-index-not-head"></a>

@@ -13273,9 +13273,9 @@
       "source_session": "unknown",
       "source_incident": "found 2026-08-14 during K2 app-env validation).",
       "scope": [],
-      "last_confirmed": "2026-10-24",
-      "confirmed_by": "secreview-eval-2026-10-24",
-      "content_sha256": "32c5e7349121ca9b9973481240f56c043668c673fb30ad135f2427e9c0036195",
+      "last_confirmed": "2026-11-05",
+      "confirmed_by": "sast-saas-triage-2026-11-05",
+      "content_sha256": "c4aaab80c294b5cbeceb2bd0462e9f1842fc8ea58403cd8004def6b826d12095",
       "always_loaded": false
     },
     {
