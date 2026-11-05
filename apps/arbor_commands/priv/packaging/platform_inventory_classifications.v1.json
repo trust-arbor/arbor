@@ -1015,9 +1015,9 @@
   },
   {
     "path": "apps/arbor_shell/lib/arbor/shell/apple_container_prober.ex",
-    "blob_oid": "a0343f8345bb2058400be252f183e800c8be4ee5",
+    "blob_oid": "6659afb847f5f2a366158ac7c8e71bb2294a54e8",
     "class": "optional_extension",
-    "rationale": "Orchestrates collection and admission of Apple Container host, control-plane, image, and dependency evidence. This is provider readiness logic invoked only by the optional Apple executor."
+    "rationale": "This module orchestrates Apple Container evidence collection, receipt normalization and admission requests, then rechecks bindings, policy, receipt and executables."
   },
   {
     "path": "apps/arbor_shell/lib/arbor/shell/apple_container_unit_core.ex",
@@ -1219,9 +1219,9 @@
   },
   {
     "path": "apps/arbor_shell/lib/arbor/shell/runtime_config_loader.ex",
-    "blob_oid": "c725d11237a292c30af395c3dc4cede7b0a8aef9",
+    "blob_oid": "122e379a05565702215d0362dab9a0c3ec975d64",
     "class": "optional_extension",
-    "rationale": "Loads a root-owned bounded JSON document containing only Apple, Linux baseline, image policy, and unit journal configuration. It is configuration tooling for the optional Apple provider family."
+    "rationale": "Loads Shell validation-runtime documents through requested root-owned or operator-owned pinning, decodes closed Apple/OCI shapes and requests Shell Config validation to return tagged provider configuration or a kind result. Nested validation temporarily replaces and restores selected application-environment values."
   },
   {
     "path": "apps/arbor_shell/lib/arbor/shell/sandbox.ex",
