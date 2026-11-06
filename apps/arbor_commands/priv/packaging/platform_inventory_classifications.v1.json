@@ -1948,5 +1948,17 @@
     "class": "system_extension",
     "path": "packages/arbor_trust/lib/arbor/trust/contracts/approval_evidence_provider.ex",
     "rationale": "Declares answered_approval/2 for the configured provider that supplies request-scoped approval records. The interface documents owner-origin and optional verified-human vocabulary; Tracker checks and validates returned maps before use. This is evidence-provider contract vocabulary, not an implementation of owner verification, responder authentication or receipt issuance."
+  },
+  {
+    "path": "packages/arbor_capabilities_signals/lib/arbor/capabilities/signals.ex",
+    "blob_oid": "5241d3e6dca76a1d3ce9327008b7c5454ff21cf5",
+    "class": "system_extension",
+    "rationale": "Implements Signals Authorization, Crypto and IdentityKeys ports by directly forwarding eight callbacks to the public Arbor.Security facade. This first-party integration contains no local authorization-decision, key-storage or cryptographic implementation and adds no process or absence fallback; delegated effects and availability depend on the facade and host configuration."
+  },
+  {
+    "path": "packages/arbor_capabilities_signals/lib/arbor/security/adapters/signals_transport.ex",
+    "blob_oid": "356b37058a57e31e41828e90bfa1f8716e358311",
+    "class": "system_extension",
+    "rationale": "Implements Security SignalTransport by directly forwarding six callbacks to the public Signals facade: configuration checks, subscriptions, remote-mutation admission and emission. The wrapper adds no intermediary process or local owner-provenance, custody or durability implementation; those semantics depend on the delegated surfaces and host configuration."
   }
 ]

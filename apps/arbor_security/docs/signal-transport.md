@@ -1,6 +1,6 @@
 # Security synchronization transport
 
-Arbor configures `:arbor_security, :signal_transport` as
+Arbor configures `:arbor_capabilities, :signal_transport` as
 `Arbor.Security.Adapters.SignalsTransport`. The adapter delegates to the public
 Signals facade in the actual security-store process, preserving supervised-owner
 checks, subscription provenance and publication admission.
