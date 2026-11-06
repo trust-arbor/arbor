@@ -470,6 +470,7 @@ defmodule Arbor.Agent.IntentDispatcherPrincipalSecurityRegressionTest do
       end
     end
 
+    :ok = Arbor.Signals.ensure_supervised_local_runtime!()
     unless Process.whereis(Arbor.Trust.Store), do: start_supervised!(Arbor.Trust.Store)
 
     unless Process.whereis(Arbor.Common.ActionRegistry) do

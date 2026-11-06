@@ -9,6 +9,7 @@ defmodule Arbor.Agent.Test.TrustTopology do
   ]
 
   def ensure_owned! do
+    :ok = Arbor.Signals.ensure_supervised_local_runtime!()
     :ok = Arbor.Trust.restore_runtime_fixture()
 
     supervisor =
