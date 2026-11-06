@@ -672,76 +672,10 @@
     "rationale": "Adapts JidoSandbox as an in-memory preview VFS with snapshots and Lua evaluation. Preview and dry-run VFS behavior is a first-party feature not required by a normal profile or recovery."
   },
   {
-    "path": "apps/arbor_security/lib/arbor/security.ex",
-    "blob_oid": "5ae2543809dfeb5e1ae21083cb0f9602b0ac3161",
-    "class": "trusted_host",
-    "rationale": "This facade owns the authoritative capability, identity, revocation, egress, and signing-authority entrypoints. Its OIDC, role, keychain, and event-query conveniences must split to extensions, but the file is currently governed by its non-bypassable reference-monitor API."
-  },
-  {
-    "path": "apps/arbor_security/lib/arbor/security/application.ex",
-    "blob_oid": "4851dd323f47abd7fb94065284def9f8e2fbe64d",
-    "class": "trusted_host",
-    "rationale": "This application callback statically assembles the identity, issuer, nonce, authority, capability, URI, and receipt services that currently form the reference monitor. The BufferedStore-backed children must later split from the fixed host bootstrap so recovery does not require a persistence provider."
-  },
-  {
-    "path": "apps/arbor_security/lib/arbor/security/auth_decision.ex",
-    "blob_oid": "fa3b453303b4843584f44b218dfb2cfe6e0c7ec8",
-    "class": "trusted_host",
-    "rationale": "This pure evaluator orders canonical URI, identity, capability, signature, delegation, constraint, file, egress, and approval checks and returns the reference-monitor decision. It is the mandatory fail-closed authorization mechanism, not a policy provider."
-  },
-  {
-    "path": "apps/arbor_security/lib/arbor/security/capability/signer.ex",
-    "blob_oid": "d38e54d12d116b795ea1c86925011b2c1c20e508",
-    "class": "trusted_host",
-    "rationale": "This module signs and verifies canonical capability and delegation payloads. Those proofs define Platform authority, so the mechanism belongs with the capability reference monitor even though it is pure and delegates raw Ed25519 operations to the lower cryptographic primitive."
-  },
-  {
-    "path": "apps/arbor_security/lib/arbor/security/capability_store.ex",
-    "blob_oid": "67563169b81e77ee004846ca84b9cd8d69d6f705",
-    "class": "trusted_host",
-    "rationale": "This service is the authoritative live capability index and owns replacement, expiration, usage, cascading revocation, acknowledged mutation, and peer invalidation. Its configurable durable backend must split, but capability and revocation state must remain available to safe recovery."
-  },
-  {
-    "path": "apps/arbor_security/lib/arbor/security/capability_store/serializer.ex",
-    "blob_oid": "347b7700658935c9f417655bfc85742cf88aec7c",
-    "class": "trusted_host",
-    "rationale": "This serializer preserves signed capability fields, constraints, and delegation records across authority-state recovery. It is part of the host-owned capability state format; a replaceable storage provider may carry the bytes but cannot redefine this authorization record."
-  },
-  {
-    "path": "apps/arbor_security/lib/arbor/security/config.ex",
-    "blob_oid": "6bbeb544373775b31439812ffc4427f84ac49b44",
-    "class": "trusted_host",
-    "rationale": "This module supplies identity, signing, replay, quota, constraint, authority, and distributed-security controls consumed by the reference monitor. OIDC and approval-delivery settings need a provider split, and weakening host controls must become boot-bound rather than mutable application configuration."
-  },
-  {
     "path": "packages/arbor_capabilities/lib/arbor/security/constraint.ex",
     "blob_oid": "8b973e2c3d8b37e53310af813cc4b1a435127602",
     "class": "trusted_host",
     "rationale": "This evaluator participates in the host gate for capability constraints. When configured checking is enabled, applicable time, path, and rate checks must pass before the inspected ordinary authorization and approval graduation paths finalize authorized effects. Non-test startup code invokes the Application's snapshot protocol for the configured enforcement setting."
-  },
-  {
-    "path": "apps/arbor_security/lib/arbor/security/constraint/rate_limiter.ex",
-    "blob_oid": "e5e5c4aaf38a247160ac91e7f0fe688399a0967e",
-    "class": "trusted_host",
-    "rationale": "This GenServer owns per-principal and resource token buckets used by capability constraint enforcement. Because authorization depends on consuming this state and must fail closed when it is unavailable, it is reference-monitor state rather than an optional metrics limiter."
-  },
-  {
-    "path": "apps/arbor_security/lib/arbor/security/crypto.ex",
-    "blob_oid": "2ac651a5972c919d822d60fbd36e36efbf2f3476",
-    "class": "trusted_host",
-    "rationale": "This mixed stateless facade exposes signing and verification alongside X25519, HKDF, AES-GCM, sealing, hashing, and identity derivation. The current physical file is broader than a minimal pre-Platform verifier; a verification-only signature and hash subset must be extracted before any file can be classified as k_primitive."
-  },
-  {
-    "path": "apps/arbor_security/lib/arbor/security/delivery_receipt_broker.ex",
-    "blob_oid": "253c4683aa3849aa9a60daef3d6846ffca219c19",
-    "class": "trusted_host",
-    "rationale": "This private broker mints, binds, expires, consumes, and discards one-use receipts that transfer an authorization decision to an exact resource and action. Its anti-replay state is part of the host invocation boundary and intentionally cannot be supplied by an extension."
-  },
-  {
-    "path": "apps/arbor_security/lib/arbor/security/disclosure_capability.ex",
-    "blob_oid": "bc3251fd6cd90eeab444f98c25c1e02d2fbae0d4",
-    "class": "optional_extension",
-    "rationale": "This module defines the specialized first-party grant convention for an authenticated human to disclose one bounded turn to an external model route. Interactive disclosure is a future Voice/ingress feature, not required for boot or recovery; actual grant signing and enforcement remain host services."
   },
   {
     "path": "packages/arbor_capabilities/lib/arbor/security/double_ratchet.ex",
@@ -750,208 +684,16 @@
     "rationale": "This module implements per-message forward secrecy and out-of-order key handling for two-party encrypted communications. Secure peer messaging is a first-party feature above the recovery boundary, while the underlying generic cryptography remains available independently."
   },
   {
-    "path": "apps/arbor_security/lib/arbor/security/egress_gate.ex",
-    "blob_oid": "71dc3d06adf339e7ba27c0f75a231dce74ac9bab",
-    "class": "trusted_host",
-    "rationale": "This module combines destination tier, taint classification, capability constraints, and resolved policy mode into the final egress allow, ask, or block decision. Extensions cannot authenticate or constrain their own outbound data flow, so this gate belongs to the fixed host."
-  },
-  {
-    "path": "apps/arbor_security/lib/arbor/security/escalation.ex",
-    "blob_oid": "ef412f8aebc64258242c57d406130c85067b2ce8",
-    "class": "system_extension",
-    "rationale": "This adapter packages pending approvals and delivers them through first-party Comms or Consensus integrations. A normal interactive profile needs an approval provider, but safe recovery only needs the host to fail closed when none is available; the upward runtime bridges must leave Security."
-  },
-  {
-    "path": "apps/arbor_security/lib/arbor/security/events.ex",
-    "blob_oid": "d6d902d4a5834c6a00ebf292d7435085dd373756",
-    "class": "system_extension",
-    "rationale": "This file owns best-effort persistence and query helpers for normal security history through configurable Historian/Persistence modules. The future mandatory pre-effect audit intent and spool must split into the host because this implementation deliberately swallows backend failure."
-  },
-  {
-    "path": "apps/arbor_security/lib/arbor/security/file_guard.ex",
-    "blob_oid": "68c7de7397e2a0d502643f333f6d00551bda874a",
-    "class": "trusted_host",
-    "rationale": "This module resolves requested paths against path-scoped filesystem capabilities and enforces roots, patterns, exclusions, depth, and expiry. It is the mandatory filesystem reference monitor beneath any replaceable file or execution provider."
-  },
-  {
-    "path": "apps/arbor_security/lib/arbor/security/identity/nonce_cache.ex",
-    "blob_oid": "a6d70b1de520f9cec5b8b67d37782e02195abdbc",
-    "class": "trusted_host",
-    "rationale": "This service performs check-and-record replay prevention for signed requests and propagates observed nonces across nodes. Replay state is mandatory verification state; the current Signals transport may be replaced, but an extension cannot own or bypass the check."
-  },
-  {
-    "path": "apps/arbor_security/lib/arbor/security/identity/registry.ex",
-    "blob_oid": "39844d34c9607f7622b12285174d0f13cacf9468",
-    "class": "trusted_host",
-    "rationale": "This registry is the authoritative source of active public keys and identity lifecycle status used by request and issuer verification. Its OIDC registration path and BufferedStore persistence are mixed provider concerns that must split from the host-owned lookup, suspension, revocation, and cache coherence."
-  },
-  {
-    "path": "apps/arbor_security/lib/arbor/security/identity/verifier.ex",
-    "blob_oid": "96e89617bda60f8a55f6c0b126a60b29b3e7a753",
-    "class": "trusted_host",
-    "rationale": "This pipeline canonicalizes signed requests, checks timestamp freshness and active identity keys, verifies signatures, and atomically admits nonces. It is the mandatory principal-authentication path for host authorization."
-  },
-  {
-    "path": "apps/arbor_security/lib/arbor/security/issuer_registry.ex",
-    "blob_oid": "8b0c84ef94f70691260c7b8d65f1f9f39fb6e6d3",
-    "class": "trusted_host",
-    "rationale": "This registry decides which active identities may sign capability declarations and bounds each issuer by enrolled authority envelopes. Its persistence backend is replaceable, but issuer enrollment, revocation, and envelope admission are reference-monitor authority state."
-  },
-  {
-    "path": "apps/arbor_security/lib/arbor/security/kernel.ex",
-    "blob_oid": "749bf984ca9b9b0a168b6086b887f81605a0c5e1",
-    "class": "trusted_host",
-    "rationale": "Despite its name, this module is a Platform capability command helper that asks SystemAuthority to sign grants and CapabilityStore to commit or revoke them. It mutates security authority and therefore belongs to the trusted host, not the pre-Platform Kernel primitive set."
-  },
-  {
-    "path": "apps/arbor_security/lib/arbor/security/key_file.ex",
-    "blob_oid": "2332de78d64e2ff27331f4ca40d63d73de346c08",
-    "class": "optional_extension",
-    "rationale": "This parser and disk-reading convenience supports operator, scheduler, and registration tooling for the optional .arbor.key format. Safe boot verification must use boot-protected key material and does not depend on this user-file adapter."
-  },
-  {
-    "path": "apps/arbor_security/lib/arbor/security/keychain.ex",
-    "blob_oid": "a066499c11035d61aebfee5b46b2ac702361ce53",
-    "class": "optional_extension",
-    "rationale": "This value object manages peer keys, channel keys, ratchet sessions, and encrypted checkpoint serialization for agent communications. Those peer-messaging facilities are optional and do not own Platform principal or capability verification."
-  },
-  {
-    "path": "apps/arbor_security/lib/arbor/security/oidc.ex",
-    "blob_oid": "cfd148f97560afc14200befa5065b31a11eb385b",
-    "class": "optional_extension",
-    "rationale": "This facade orchestrates external OIDC login, human key binding, token caching, role grants, and operator signing-authority acquisition. OIDC is a first-party authentication method that can be absent in safe mode; resulting identities and grants must still pass host registration and authority checks."
-  },
-  {
-    "path": "apps/arbor_security/lib/arbor/security/oidc/auth_code_flow.ex",
-    "blob_oid": "a18ff3aa7998684a2167d9ed8eefc6ef827ea67f",
-    "class": "optional_extension",
-    "rationale": "This module implements the browser Authorization Code and PKCE transport, including bounded provider input and token exchange. It is one optional external authentication flow and does not define the fixed principal-verification boundary."
-  },
-  {
-    "path": "apps/arbor_security/lib/arbor/security/oidc/config.ex",
-    "blob_oid": "16a6f5976b709f4479320b55bd7b629c696d6093",
-    "class": "optional_extension",
-    "rationale": "This reader owns configured OIDC providers, device-flow settings, and the token-cache path. Those are configuration inputs for an optional authentication adapter, not boot-bound host security policy."
-  },
-  {
-    "path": "apps/arbor_security/lib/arbor/security/oidc/device_flow.ex",
-    "blob_oid": "904e28b0ef309d5219c274deb807c820dfee5994",
-    "class": "optional_extension",
-    "rationale": "This module composes RFC 8628 device authorization, polling, refresh, and trusted endpoint discovery for CLI login. It is an optional first-party OIDC transport whose absence cannot prevent host recovery."
-  },
-  {
-    "path": "apps/arbor_security/lib/arbor/security/oidc/discovery.ex",
-    "blob_oid": "f0d7ff711f67f6a04b5260aaa7c6e48e673a8660",
-    "class": "optional_extension",
-    "rationale": "This module validates OIDC issuers and discovers operation-specific endpoints with origin, scheme, size, and timeout controls. Those strong checks secure a replaceable external identity method; they do not make that method part of the recovery host."
-  },
-  {
-    "path": "apps/arbor_security/lib/arbor/security/oidc/identity_store.ex",
-    "blob_oid": "d9ec2431ad434fa564d53f00a7fa6d37e5825c78",
-    "class": "optional_extension",
-    "rationale": "This adapter maps OIDC issuer and subject claims to persistent human keypairs and human principal IDs. It is explicitly an identity-store implementation for the optional OIDC method; host identity admission and status remain separate."
-  },
-  {
-    "path": "apps/arbor_security/lib/arbor/security/oidc/token_verifier.ex",
-    "blob_oid": "f29a45f3a2906ef89a95e014d7cc13fbb54b74dc",
-    "class": "optional_extension",
-    "rationale": "This implementation fetches and caches external JWKS data and verifies OIDC JWT signatures, issuer, audience, expiry, and subject claims. It secures one independently replaceable authentication method rather than the host's native signed-request verifier."
-  },
-  {
-    "path": "apps/arbor_security/lib/arbor/security/reflex.ex",
-    "blob_oid": "5489ada5c7e6ccd1676e12ce00c33d5c88fd4a62",
-    "class": "system_extension",
-    "rationale": "This module evaluates and administers first-party pattern and path reflex policies before capability authorization. Reflex advice is a normal-profile defense layer, but policy definitions are replaceable inputs and cannot replace the capability reference monitor; registration controls must be narrowed."
-  },
-  {
-    "path": "apps/arbor_security/lib/arbor/security/reflex/builtin.ex",
-    "blob_oid": "3fdeb4e81e4331f68eb956940c9a117b6b34d906",
-    "class": "system_extension",
-    "rationale": "This file owns Arbor's bundled shell, filesystem, network, and infrastructure danger patterns. They are first-party normal-profile policy content, not generic pre-Platform mechanism or the final authorization authority."
-  },
-  {
-    "path": "apps/arbor_security/lib/arbor/security/reflex/registry.ex",
-    "blob_oid": "c6c46fec0803ffde04fe64936d923d4594330843",
-    "class": "system_extension",
-    "rationale": "This public ETS registry stores mutable reflex policy definitions and loads the bundled set. It is currently the source for a normal-profile policy provider; future activation must make built-ins immutable and admit signed generations without allowing registry mutation to replace the host monitor."
-  },
-  {
     "path": "packages/arbor_capabilities/lib/arbor/security/revocation_fence.ex",
     "blob_oid": "59554fdcfee625d1aabb2584b4f8e01de7a0fe0c",
     "class": "trusted_host",
     "rationale": "This pure module defines the closed acknowledged-revoke fence, capability digest, bounds, and exact observed-record matching used around authoritative deletion. It is host revocation and recovery protocol, not a storage-provider schema."
   },
   {
-    "path": "apps/arbor_security/lib/arbor/security/role.ex",
-    "blob_oid": "ff323991c1973faa33c105ca3534f66156ee4b3a",
-    "class": "system_extension",
-    "rationale": "This module supplies bundled and operator-configured role-to-capability policy, including the default OIDC human role and opt-in development role. Roles are first-party policy input for a normal profile; every resulting grant remains subject to host issuance and authorization."
-  },
-  {
-    "path": "apps/arbor_security/lib/arbor/security/session_token.ex",
-    "blob_oid": "29243da9b1dc4b2f226be25e6f19e4641766c759",
-    "class": "optional_extension",
-    "rationale": "This module issues and verifies short-lived HMAC session tokens so OIDC-authenticated humans can use UI and API sessions without per-call Ed25519 signatures. That convenience authentication method is optional; safe recovery can use native signed principals."
-  },
-  {
-    "path": "apps/arbor_security/lib/arbor/security/signal_sync.ex",
-    "blob_oid": "c801b5e42b1adcc651afa72cc87132d3ecd33fc6",
-    "class": "system_extension",
-    "rationale": "This helper only establishes, monitors, retries, and releases subscriptions over the current Signals transport. Authenticated admission, freshness, replay rejection, ordering, and fail-closed coherence semantics must remain in trusted-host state owners while this replaceable delivery adapter stays outside the reference monitor."
-  },
-  {
-    "path": "apps/arbor_security/lib/arbor/security/signing_authority_broker.ex",
-    "blob_oid": "dc1c4cb11ecd8dabeab3e6fc81396391385ed2b2",
-    "class": "trusted_host",
-    "rationale": "The broker and one-shot KeyHolder own proof-bound acquisition, wrapping, lease ownership, restart grace, signing, secret derivation, expiry, and revocation of private signing authority. Key custody and authority lifetime are mandatory host responsibilities."
-  },
-  {
-    "path": "apps/arbor_security/lib/arbor/security/signing_authority_state_owner.ex",
-    "blob_oid": "23cd41f7f1753c3fd8c770ea120bc419dc86515e",
-    "class": "trusted_host",
-    "rationale": "This protected GenServer retains finalized persistent signing-authority metadata across broker-only restarts and restricts replacement to the live broker. It is a recovery component for host key authority, not provider state."
-  },
-  {
-    "path": "apps/arbor_security/lib/arbor/security/signing_key_store.ex",
-    "blob_oid": "f875d3ca50a32402b3d5a5fb2bb8c48ac1177dc8",
-    "class": "trusted_host",
-    "rationale": "This module encrypts, retrieves, reports, and deletes agent and system private key material under a purpose-derived master key. Key custody is fixed-host authority; the current BufferedStore and filesystem persistence mechanisms must be separated behind sealed host state or an admitted backend."
-  },
-  {
-    "path": "apps/arbor_security/lib/arbor/security/store/json_file.ex",
-    "blob_oid": "3c7dae5c08b88a441b76d72d83f05cad57b2c844",
-    "class": "system_extension",
-    "rationale": "This is a generic first-party JSON file Persistence.Store backend with local locking, CAS, migration, fsync, and node-restart durability. It is the normal local authority-state provider today, but safe recovery must not make this replaceable filesystem implementation its only state mechanism."
-  },
-  {
-    "path": "apps/arbor_security/lib/arbor/security/subagent_isolation.ex",
-    "blob_oid": "528c34a93b0ad0625461b9fcfbdb02c7c7af6425",
-    "class": "optional_extension",
-    "rationale": "This helper creates and cleans up task-scoped attenuated capability sets for Cognition worker subagents. Delegated-work orchestration is an optional first-party feature; the host still owns capability validation, signing, storage, and revocation."
-  },
-  {
-    "path": "apps/arbor_security/lib/arbor/security/system_authority.ex",
-    "blob_oid": "ace627e3f126e289d30a71177a139896221b2de2",
-    "class": "trusted_host",
-    "rationale": "This service holds the local root signing identity and signs or verifies capabilities, receipts, and agent endorsements. Its current persistence through SigningKeyStore and BufferedStore must split from the authority mechanism, but no extension may supply its own root of trust."
-  },
-  {
-    "path": "apps/arbor_security/lib/arbor/security/telemetry.ex",
-    "blob_oid": "6f051b0ca864f3046d70104dabba03ad81c53250",
-    "class": "system_extension",
-    "rationale": "This best-effort helper projects security events into telemetry metadata for the normal Signals observability bridge and intentionally rescues emission failures. It is instrumentation, not the future mandatory audit-intent boundary required for safe recovery."
-  },
-  {
     "path": "packages/arbor_capabilities/lib/arbor/security/test_bootstrap.ex",
     "blob_oid": "96b328015378254379e0a18416dfdb46a4389d26",
     "class": "optional_extension",
     "rationale": "This first-party development-support helper compiles its operational implementation only for test builds. It reconciles or rebuilds the test authority supervision tree, completes store and authority startup, and provides audit-consumer/report support. Non-test builds expose a start!/1 stub returning :skipped; within test builds, the activation-only profile also skips this helper. These test-support responsibilities support optional_extension classification."
-  },
-  {
-    "path": "apps/arbor_security/lib/arbor/security/uri_registry.ex",
-    "blob_oid": "155802244f3464ad45dca5a5192b5aa1f8602810",
-    "class": "trusted_host",
-    "rationale": "This registry enforces the canonical capability namespace and denies authorization for unregistered URIs. Core prefixes and overlap policy are host-owned; public runtime mutation must become an authenticated generation-bound activation transaction rather than an extension-controlled registry call."
   },
   {
     "path": "apps/arbor_shell/lib/arbor/shell.ex",
@@ -1332,28 +1074,10 @@
     "rationale": "Canonicalizes paths and pins root-owned regular files or directories to stable metadata and content identity before privileged launch. This is generic launch-verification machinery required to constrain provider executable and configuration artifacts."
   },
   {
-    "path": "apps/arbor_trust/lib/arbor/trust.ex",
-    "blob_oid": "9ff6885bf095007423d9607292d207971fce0c86",
-    "class": "trusted_host",
-    "rationale": "This facade owns the current end-to-end authorization integration: policy preflight, Security authorization, and approval gating. Profile lifecycle, event history, enumeration, and graduation APIs are mixed provider or optional concerns that must split from the fixed host authorization surface."
-  },
-  {
     "path": "packages/arbor_trust/lib/arbor/trust/application.ex",
     "blob_oid": "4735817020cb2884cf2a3418919dc638275dff25",
     "class": "system_extension",
     "rationale": "This Trust application callback calls Runtime startup preparation and handles full or activation-only profiles, returned profile errors and invalid profile values. It selects child-list composition and supervision calls from the profile and start_children flag, requesting a ProviderGate specification on the full consumer path and composing or delegating calls with the selected PolicyHost, gate and Trust.Supervisor entries."
-  },
-  {
-    "path": "apps/arbor_trust/lib/arbor/trust/approval_guard.ex",
-    "blob_oid": "0d6ef569329bfcdd7c4027ee8197f75c2f0b5457",
-    "class": "trusted_host",
-    "rationale": "This gate turns an already-held capability plus resolved trust policy into proceed, human approval, or denial and applies the signed-capability exemption rules. The escalation delivery adapter should split, but the final approval decision must be non-bypassable."
-  },
-  {
-    "path": "apps/arbor_trust/lib/arbor/trust/authority.ex",
-    "blob_oid": "fb35633ab6cfbc8053b5940d71de124389e04e66",
-    "class": "trusted_host",
-    "rationale": "This CRC core currently computes the effective authorization mode by combining operator rules with mandatory security ceilings, model constraints, and the taint conjunct using most-restrictive resolution. Profile construction and persistence conversion should split, but the implemented authorization-time conjunction is trusted-host logic today."
   },
   {
     "path": "packages/arbor_trust/lib/arbor/trust/authority_enumeration.ex",
@@ -1378,18 +1102,6 @@
     "blob_oid": "f918684951460299da394e04c8c1e8c6a1d65390",
     "class": "system_extension",
     "rationale": "This module returns capability profiles from a matching PolicyHost snapshot reply and projects Trust risk profiles without action provider contributions on other replies. Its explicit projection API can include a configured action provider. It selects profiles by URI prefix and builds registered URI coverage and owner/reason rows from fixed owners and a snapshot owner fallback."
-  },
-  {
-    "path": "apps/arbor_trust/lib/arbor/trust/capability_risk_profiles.ex",
-    "blob_oid": "d39984f2cdd07f32f3be1bc445d107b63c37eaf2",
-    "class": "trusted_host",
-    "rationale": "This module owns the source risk metadata from which high-risk ceilings and graduation prohibitions are derived. The mandatory ceiling projection constrains extensions and must be host-controlled; operator overrides need boot-bound tightening rules and must not relax the fixed maximum."
-  },
-  {
-    "path": "apps/arbor_trust/lib/arbor/trust/capability_sync.ex",
-    "blob_oid": "bb13de44345f4996256276f60cb081346dc02172",
-    "class": "trusted_host",
-    "rationale": "This listener currently translates profile creation, freeze, and unfreeze events into direct Security grant, list, and revoke effects. Those authority mutations make the present file part of the trusted host; the target split must leave event strategy outside and move all mutations behind a bounded host command."
   },
   {
     "path": "packages/arbor_trust/lib/arbor/trust/circuit_breaker.ex",
@@ -1426,12 +1138,6 @@
     "blob_oid": "19d3fda9ff3e65f71e28ffc933d589af9a84aa7e",
     "class": "optional_extension",
     "rationale": "This GenServer caches and indexes trust events for queries, timelines, progression and statistics, and requests EventLog appends and Observation notifications. Cache processing continues when the event log is nil or an append returns an error; returned append errors are logged."
-  },
-  {
-    "path": "apps/arbor_trust/lib/arbor/trust/manager.ex",
-    "blob_oid": "fb5b86f90ab70e9857794c887ee8828bffda0096",
-    "class": "trusted_host",
-    "rationale": "This GenServer currently couples profile creation and freeze lifecycle to baseline capability grants and grant or revoke synchronization triggers. Because it initiates authority mutations, the current mixed file is trusted-host code; profile state, history, and lifecycle orchestration must split from an authenticated host mutation boundary."
   },
   {
     "path": "packages/arbor_trust/lib/arbor/trust/policy.ex",
@@ -1474,12 +1180,6 @@
     "blob_oid": "12b0dca062641bbc459dfe835c40708c73e86395",
     "class": "system_extension",
     "rationale": "This Trust supervisor requests ProfileStore child specifications on enabled startup paths. It combines the profile children returned during init with EventStore, Manager, ConfirmationTracker and CapabilityGrantOwner entries, conditionally appending CircuitBreaker, EventHandler and CapabilitySync from local options. Disabled init selects an empty child list."
-  },
-  {
-    "path": "apps/arbor_trust/lib/arbor/trust/taint_conjunct.ex",
-    "blob_oid": "5e62b6bfc799e2a112b66f39d616a68bb89d88f2",
-    "class": "trusted_host",
-    "rationale": "This conjunct prevents static standing from yielding automatic high-risk effects when current inputs are untrusted or hostile. Because provider-supplied policy cannot waive taint-based egress, process, financial, or identity restrictions, the decision belongs to the fixed host."
   },
   {
     "path": "apps/arbor_commands/lib/mix/tasks/arbor.trust.audit_profiles.ex",
