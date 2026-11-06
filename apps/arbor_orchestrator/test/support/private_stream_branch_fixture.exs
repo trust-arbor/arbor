@@ -103,6 +103,12 @@ defmodule Arbor.Orchestrator.TestSupport.PrivateStreamBranchFixture do
       start_runtime_application!(:arbor_orchestrator)
       assert :ok = Arbor.Memory.TestBootstrap.start!()
 
+      # Publication and subscribe accept only the application-supervised bus.
+      # A bus started under this fixture's supervisor is registered and healthy,
+      # then every subscribe returns :unauthorized.
+      assert :ok = Arbor.Signals.ensure_supervised_local_runtime!()
+      assert Arbor.Signals.healthy?()
+
       start!(
         Arbor.Trust.Store,
         {Arbor.Trust.Store,
@@ -132,12 +138,6 @@ defmodule Arbor.Orchestrator.TestSupport.PrivateStreamBranchFixture do
           ] do
         if Process.whereis(name) == nil, do: start!(name, spec)
       end
-
-      # Publication and subscribe accept only the application-supervised bus.
-      # A bus started under this fixture's supervisor is registered and healthy,
-      # then every subscribe returns :unauthorized.
-      assert :ok = Arbor.Signals.ensure_supervised_local_runtime!()
-      assert Arbor.Signals.healthy?()
 
       assert :ok =
                Arbor.LLM.configure_provider_client(
