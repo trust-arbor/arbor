@@ -2230,5 +2230,23 @@
     "class": "system_extension",
     "path": "apps/arbor_trust_host/lib/arbor/trust/host/runtime.ex",
     "rationale": "Implements RuntimeHost by ensuring KernelRuntime is started, requiring a boot-profile map, forwarding profile/supervisor operations and supplying the fixed PersistenceHost/Phoenix.PubSub provider roots. This is concrete Trust product startup and provider composition; the called KernelRuntime owns the delegated gate mechanics, which this adapter body does not establish."
+  },
+  {
+    "blob_oid": "b4218e0dd36eb7c3eb16ebc0306f1c2fb88cc47a",
+    "class": "optional_extension",
+    "path": "packages/arbor_trust/lib/arbor/trust/approval_context.ex",
+    "rationale": "Assembles trust explanation and capability-profile summary fields for escalation metadata. ApprovalGuard chooses the local policy branch before lazily adding the result as trust_context, and an existing trust_context avoids this lookup. This is explanatory approval context rather than the local approval decision or receipt-admission check. Inline delegated work remains possible; this role does not establish JSON safety, total failure isolation or safe omission throughout downstream approval handling."
+  },
+  {
+    "blob_oid": "d4aa301b586893802a9e55575dab56e01726f78e",
+    "class": "trusted_host",
+    "path": "packages/arbor_trust/lib/arbor/trust/approval_evidence_core.ex",
+    "rationale": "Validates closed approval scope and exact provider-record agreement before ConfirmationTracker records answer evidence or requests a Security approval receipt. It also implements request-keyed duplicate/conflict handling and refuses new evidence at the finite answer-map capacity on the recording route. These checks participate in local approval-receipt admission; human authentication, owner provenance and receipt anti-replay remain delegated and are not established by this core."
+  },
+  {
+    "blob_oid": "913eb9096cbc70cb65babe6b3dc16da8fc3bf3e6",
+    "class": "system_extension",
+    "path": "packages/arbor_trust/lib/arbor/trust/contracts/approval_evidence_provider.ex",
+    "rationale": "Declares answered_approval/2 for the configured provider that supplies request-scoped approval records. The interface documents owner-origin and optional verified-human vocabulary; Tracker checks and validates returned maps before use. This is evidence-provider contract vocabulary, not an implementation of owner verification, responder authentication or receipt issuance."
   }
 ]
