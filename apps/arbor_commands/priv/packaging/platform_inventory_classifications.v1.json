@@ -625,7 +625,7 @@
   },
   {
     "path": "apps/arbor_sandbox/lib/arbor/sandbox.ex",
-    "blob_oid": "517851ba2ac6ef5aa76cae474f7574ecd5542ee1",
+    "blob_oid": "bc27587534d37331417e67c532f1757264e070d9",
     "class": "trusted_host",
     "rationale": "Owns the public sandbox admission facade and capability checks for lifecycle effects. The direct create, destroy, VFS, and eval provider calls are mixed lower-level surfaces that must split behind the future host invocation proxy."
   },
@@ -637,7 +637,7 @@
   },
   {
     "path": "apps/arbor_sandbox/lib/arbor/sandbox/code.ex",
-    "blob_oid": "28edf1b58b10b8187e71620ad176ba44fd31b7f6",
+    "blob_oid": "2d034c6cef116164d7e22959cbfc78c7c49fa979",
     "class": "system_extension",
     "rationale": "Implements the current AST allowlist and dangerous-call filter for the in-VM code sandbox. It is policy inside a replaceable execution implementation, not the non-bypassable isolation admission point."
   },
@@ -697,7 +697,7 @@
   },
   {
     "path": "apps/arbor_shell/lib/arbor/shell.ex",
-    "blob_oid": "d28e2e024c5a9d839412a025ac8c21406fefc708",
+    "blob_oid": "de0463fe15035a1a8187bb50d168c2908be3195f",
     "class": "trusted_host",
     "rationale": "Owns the public Shell facade, agent authorization, command disclosure boundary, and effect lifecycle entry points. Its trusted-system bypasses and native or Apple provider dispatch are mixed responsibilities that must split into narrow host bootstrap and authorized provider proxies."
   },
@@ -721,25 +721,25 @@
   },
   {
     "path": "apps/arbor_shell/lib/arbor/shell/apple_container_execution_core.ex",
-    "blob_oid": "dc228a1d5c08225c21a770e5bbdaea9b9599248b",
+    "blob_oid": "0ff3eb442ecfa4211dda3b53d195395bee2e9543",
     "class": "optional_extension",
     "rationale": "Converts spawn-capable Mix requests and Apple admission receipts into Apple Container plans and bounded settings. Its request vocabulary and planning are specific to the optional provider."
   },
   {
     "path": "apps/arbor_shell/lib/arbor/shell/apple_container_executor.ex",
-    "blob_oid": "0ed1316b3c764a1642c195dfd86075145ff6f41b",
+    "blob_oid": "467e4e1dfe16804394681efa9f1fb7857c8fe465",
     "class": "optional_extension",
     "rationale": "Composes Apple probing, unit creation, worker ownership, registry publication, and settlement for the spawn-capable backend. Generic invocation authorization and cleanup receipts must be split into the host before this provider is replaceable."
   },
   {
     "path": "apps/arbor_shell/lib/arbor/shell/apple_container_image_policy_authority.ex",
-    "blob_oid": "0cc6f12c30f460b634c2e835afc2d8db133ca454",
+    "blob_oid": "d59c0db27f158b739a67e2ccf02a5a87c3b76406",
     "class": "optional_extension",
     "rationale": "Owns startup-pinned Apple workload and init image policy bound to the Linux dependency receipt. This is provider-specific image evidence, not Platform's generic activation or invocation authority."
   },
   {
     "path": "apps/arbor_shell/lib/arbor/shell/apple_container_plan_core.ex",
-    "blob_oid": "d271aa9a23c8569dd3d46a0421251eb8e712afae",
+    "blob_oid": "207d90b9e1f505734d72143178cb452fd8347842",
     "class": "optional_extension",
     "rationale": "Builds immutable Apple Container create, start, mount, resource, and cleanup argv from a closed request. Those plans encode one optional macOS launcher and are not a generic host primitive."
   },
@@ -763,15 +763,15 @@
   },
   {
     "path": "apps/arbor_shell/lib/arbor/shell/apple_container_unit_core.ex",
-    "blob_oid": "5831e65ac1dd9c344e100c51a9619e336f1c6a8e",
+    "blob_oid": "2caa29730026e252629a3b6b7dd0507e23ece07a",
     "class": "optional_extension",
     "rationale": "Defines the Apple unit create, start, force-stop, delete, and absence-verification lifecycle reducer. Its cleanup rigor is provider-specific; generic receipt-driven recovery must be host-owned separately."
   },
   {
     "path": "apps/arbor_shell/lib/arbor/shell/apple_container_unit_drain_coordinator.ex",
-    "blob_oid": "9ae99e69a88c06409f37bb8f6a2b3c535047d538",
+    "blob_oid": "b91e2d82b382b16fbba90c1f7ff5ba81df549731",
     "class": "optional_extension",
-    "rationale": "Coordinates Apple unit admission, planned drain, journal convergence, orphan recovery, and settlement. It mixes provider operation with recovery guarantees, so generic shutdown and receipt recovery must move to the host while Apple reconciliation remains optional."
+    "rationale": "Coordinates unit admission, journal reconstruction, drain requests and settlement. Production starts select the Apple worker by default and the OCI worker for /usr/bin/podman. Generic shutdown and receipt recovery must be separated into the host."
   },
   {
     "path": "apps/arbor_shell/lib/arbor/shell/apple_container_unit_drain_coordinator_core.ex",
@@ -781,9 +781,9 @@
   },
   {
     "path": "apps/arbor_shell/lib/arbor/shell/apple_container_unit_journal.ex",
-    "blob_oid": "6dda3032947c5584a01bd3ad80e86e3724f57587",
+    "blob_oid": "3db7f9c0c36a0ba0cf850892f90f21743ad1322d",
     "class": "optional_extension",
-    "rationale": "Persists Apple unit-name intents and completion state before provider create effects. The current provider-specific journal is not the future generic host audit or activation receipt store and must be mediated by that host boundary."
+    "rationale": "Publishes reservations before successful reserve replies and matching completion removal before successful completion replies. Coordinator reservation precedes worker start. These provider-support records do not establish generic host audit or activation receipts; host mediation remains required."
   },
   {
     "path": "apps/arbor_shell/lib/arbor/shell/apple_container_unit_journal_core.ex",
@@ -841,7 +841,7 @@
   },
   {
     "path": "apps/arbor_shell/lib/arbor/shell/apple_container_unit_worker.ex",
-    "blob_oid": "e3ee7f0b9b439a619e0f35186c3556376ace3f88",
+    "blob_oid": "f7cac607de221f7f7f07dbeef597d30d517facdd",
     "class": "optional_extension",
     "rationale": "Owns one Apple unit lifecycle from admitted plan through cleanup, durable journal completion, and result publication. Host-owned process and receipt authority must be split from this provider-specific worker before extraction."
   },
@@ -865,19 +865,19 @@
   },
   {
     "path": "apps/arbor_shell/lib/arbor/shell/config.ex",
-    "blob_oid": "5c65b66ab292334d9fce94adbb5778f2b9a45bfa",
+    "blob_oid": "42dc23f801f8ab88f3af98afcf4e451576ef89c0",
     "class": "optional_extension",
-    "rationale": "Validates Apple Container locators, Linux baseline locators, Apple image policy, Apple journal path, and the optional trusted-build Hex cache and archive locators. The provider-family configuration surface still belongs to that optional family and must split from the first-party build locators."
+    "rationale": "Validates provider-support configuration, including Apple and OCI image policy, validation-runtime locators and pin-family settings, Linux baseline and Apple journal locators, and trusted-build Hex cache. Provider-family configuration must be separated from first-party build locators."
   },
   {
     "path": "apps/arbor_shell/lib/arbor/shell/executable_policy.ex",
-    "blob_oid": "7f4564b27590039ac2471d5571adfe3ed9cda6f6",
+    "blob_oid": "3dcc0326250c5b0e039e9c8fb751a7f218c27658",
     "class": "trusted_host",
     "rationale": "Pins startup executable identities, constrains PATH-derived commands, verifies exact name and file identity, and fails closed when unavailable. Apple fixed paths are mixed provider entries that should move to provider admission without weakening the generic launch verifier."
   },
   {
     "path": "apps/arbor_shell/lib/arbor/shell/execution_registry.ex",
-    "blob_oid": "2fc17296e614f5fa338f710fb5f8ddeaa6893aac",
+    "blob_oid": "5243a0d10f9b28010f6b28348bb46f82c075545f",
     "class": "trusted_host",
     "rationale": "Owns process-derived execution registration, adoption, cancellation, terminal publication, and redacted inventory. These owner-only transitions are the fixed lifecycle authority that provider processes must not replace."
   },
@@ -895,9 +895,9 @@
   },
   {
     "path": "apps/arbor_shell/lib/arbor/shell/linux_dependency_baseline_authority.ex",
-    "blob_oid": "79a32ac2aacea8be0b37ff24199b06fb808191f5",
+    "blob_oid": "e5c6195782780d3e3f14f31c908ec8f8e973393a",
     "class": "optional_extension",
-    "rationale": "Pins the operator-configured Linux dependency source and returns evidence-only materialization plans for Apple workloads. It is support authority internal to the optional Apple provider family."
+    "rationale": "Owns configured Linux dependency bindings and provider-support checkout, including OCI-selected ownership-family handling. Materialization-plan checkout re-verifies the binding; compiled-build checkout returns a derived sibling directory locator after an lstat directory check. These replies are evidence or locators, not generic host activation authority."
   },
   {
     "path": "apps/arbor_shell/lib/arbor/shell/linux_dependency_baseline_builder.ex",
@@ -907,7 +907,7 @@
   },
   {
     "path": "apps/arbor_shell/lib/arbor/shell/linux_dependency_baseline_core.ex",
-    "blob_oid": "26c457f1751286b6ab1883acdb98d82cb6d21701",
+    "blob_oid": "57dbfdf6a5a83b84746d195a512179fc0dd3020a",
     "class": "optional_extension",
     "rationale": "Validates and fingerprints the Linux dependency manifest consumed by Apple Container materialization. The receipt is provider evidence rather than generic Platform activation authority."
   },
@@ -919,19 +919,19 @@
   },
   {
     "path": "apps/arbor_shell/lib/arbor/shell/linux_dependency_baseline_materializer.ex",
-    "blob_oid": "a5b127835df6deecaa8fbe7fa1f53037254d8ebc",
+    "blob_oid": "b1e3f9ec411d43ce3b44d18c74260450ac76cf93",
     "class": "optional_extension",
     "rationale": "Creates process-bound private copies of verified Linux dependencies and cleans them on release or owner loss. Generic lease cleanup must be host-mediated, but this materialized payload and workflow are Apple provider support."
   },
   {
     "path": "apps/arbor_shell/lib/arbor/shell/linux_dependency_baseline_source.ex",
-    "blob_oid": "cd6bac746e36c01d186c258f4218113a0cd6e7e9",
+    "blob_oid": "7803ea6a79d45f5d0b0686fa72a1fb4d3f6060dd",
     "class": "optional_extension",
-    "rationale": "Pins and re-verifies the Linux dependency source root and manifest before producing a materialization plan. The binding is specific to optional Apple Container dependency supply."
+    "rationale": "Verifies Linux dependency sources and manifests and retains inventory identities for provider support, with root-owned or operator-owned pinning APIs. Re-verification is explicit; plan projection shape-checks and encodes retained evidence without fresh filesystem verification or a provisioning or host activation claim."
   },
   {
     "path": "apps/arbor_shell/lib/arbor/shell/owned_tree.ex",
-    "blob_oid": "15437c62db77f0d947550291c5ce43d55a1c3b6e",
+    "blob_oid": "5f31935510e5257c59d442a7586610d173d2b69b",
     "class": "system_extension",
     "rationale": "Creates, identity-checks, and budgetedly cleans up private temporary trees with absence proofs, consumed by both provider materialization and the trusted-build source and workspace lifecycle. It is a first-party tree primitive; purpose binding and ownership authority stay with the owned-tree registry."
   },
@@ -943,13 +943,13 @@
   },
   {
     "path": "apps/arbor_shell/lib/arbor/shell/port_session.ex",
-    "blob_oid": "c54f27d28577ec9812708ecda6d918ad4f1d335e",
+    "blob_oid": "d041e1cb958648c319b46e9abd512aefc63a15dc",
     "class": "system_extension",
     "rationale": "Implements supervised streaming sessions over the native ProcessGroup backend, including stdin, subscribers, output limits, and cleanup. It mixes provider transport with owner-loss termination, so backend-independent ownership enforcement must split into the host."
   },
   {
     "path": "apps/arbor_shell/lib/arbor/shell/process_group.ex",
-    "blob_oid": "35e35f289db82d886b3a6229ee6b1514f93611e6",
+    "blob_oid": "fc5f53c655af4be44fffc72eb6e77114ae1cece4",
     "class": "system_extension",
     "rationale": "Owns the native port protocol and process-group launcher used by the host OS executor, including input framing and group termination. This is a normal-profile native backend; independent host verification must constrain its launch and terminal receipts."
   },
@@ -991,7 +991,7 @@
   },
   {
     "path": "apps/arbor_shell/lib/arbor/shell/trusted_build.ex",
-    "blob_oid": "14fa74b026074a8eba5129dcbdcf69b2d6a183fd",
+    "blob_oid": "72427708f012a0915d4f9c0d4e624fa89d84c9bd",
     "class": "trusted_host",
     "rationale": "Owns the trusted-build admission facade: closed request admission, fixed project-root preflight pinning, Darwin-only availability, generation-checked authority and registry checkout, and lease-token phase execution. Any build provider must pass this policy; it is not a replaceable mechanism."
   },
@@ -1021,7 +1021,7 @@
   },
   {
     "path": "apps/arbor_shell/lib/arbor/shell/trusted_build/lease.ex",
-    "blob_oid": "8fdf086d3793f83bcf453b4c5c221328f046e2cf",
+    "blob_oid": "e5b32d7a0878e2fd546c182ab4246568dd490cae",
     "class": "trusted_host",
     "rationale": "Owns the unforgeable lease token, owner binding, phase admission and terminal commit, permit-gated fallback, bounded retrying cleanup with kill helper, and staged overlay and cookie operations. These owner-only transitions are the fixed ownership authority over build trees and workspaces."
   },
@@ -1051,7 +1051,7 @@
   },
   {
     "path": "apps/arbor_shell/lib/arbor/shell/trusted_build/post_phase.ex",
-    "blob_oid": "7d5545722f46adb145cfd7e2c455c3e6d390ffb7",
+    "blob_oid": "8ec1b04336dfffd382f2737ae81644bc22c7720e",
     "class": "trusted_host",
     "rationale": "Verifies after every phase that pinned source, project, wrapper, and overlay identities are unchanged, that overlay hardlinks appear only after admission, and that the release COOKIE is unlinked and not recreated. This post-effect drift verification is non-replaceable host enforcement."
   },
@@ -1069,7 +1069,7 @@
   },
   {
     "path": "apps/arbor_shell/lib/arbor/shell/trusted_path.ex",
-    "blob_oid": "17ec99949ca22067e22d3be3246a6d1629048694",
+    "blob_oid": "2d904662c569c5185434ca84aa0c5cf90543b03f",
     "class": "trusted_host",
     "rationale": "Canonicalizes paths and pins root-owned regular files or directories to stable metadata and content identity before privileged launch. This is generic launch-verification machinery required to constrain provider executable and configuration artifacts."
   },
