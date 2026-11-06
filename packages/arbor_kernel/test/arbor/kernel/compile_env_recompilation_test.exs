@@ -44,6 +44,7 @@ defmodule Arbor.Kernel.CompileEnvRecompilationTest do
     File.mkdir_p!(deps_path)
 
     env = mix_env(root, build_path, deps_path, "prod")
+    prepare_temp_dependencies!(tmp, deps_path, kernel_abs)
 
     first = mix!(tmp, env, ["compile", "--warnings-as-errors"])
     refute_probe_warnings(first)
@@ -58,6 +59,76 @@ defmodule Arbor.Kernel.CompileEnvRecompilationTest do
     third = mix!(tmp, env, ["compile", "--warnings-as-errors"])
     refute_probe_warnings(third)
     assert mix_eval!(tmp, env) == ":missing"
+  end
+
+  defp prepare_temp_dependencies!(tmp, deps_path, kernel_abs) do
+    resolved = Mix.Dep.load_and_cache()
+
+    dependencies =
+      if Mix.Project.config()[:app] == :arbor_kernel do
+        resolved
+      else
+        kernel = Enum.find(resolved, &(&1.app == :arbor_kernel))
+        assert kernel, "The parent Mix project must resolve the genuine Kernel dependency"
+        assert Path.expand(Keyword.fetch!(kernel.opts, :dest)) == kernel_abs
+
+        Mix.Dep.filter_by_name([:arbor_kernel], resolved, include_children: true)
+        |> Enum.reject(&(&1.app == :arbor_kernel))
+      end
+
+    assert dependencies != []
+    assert length(dependencies) == length(Enum.uniq_by(dependencies, & &1.app))
+    parent_deps = Mix.Project.deps_path()
+
+    for dependency <- dependencies do
+      assert dependency.scm == Hex.SCM,
+             "The compile-env fixture copies only resolved public Hex dependency sources"
+
+      name = Atom.to_string(dependency.app)
+      source = Path.expand(Keyword.fetch!(dependency.opts, :dest))
+      assert source == Path.join(parent_deps, name)
+      assert File.lstat!(source).type == :directory
+      copy_dependency_source!(source, Path.join(deps_path, name))
+    end
+
+    lockfile = Mix.Project.config() |> Keyword.fetch!(:lockfile) |> Path.expand()
+    assert File.lstat!(lockfile).type == :regular
+    assert {:error, :enoent} = File.lstat(Path.join(tmp, "mix.lock"))
+    File.cp!(lockfile, Path.join(tmp, "mix.lock"))
+  end
+
+  defp copy_dependency_source!(source, destination) do
+    refute Path.basename(source) in [".git", ".mix", "_build"],
+           "Compiled or checkout metadata is not a public source seed"
+
+    case File.lstat!(source).type do
+      :directory ->
+        File.mkdir!(destination)
+
+        for name <- File.ls!(source) |> Enum.sort() do
+          copy_dependency_source!(Path.join(source, name), Path.join(destination, name))
+        end
+
+      :regular ->
+        refute Path.extname(source) in [
+                 ".beam",
+                 ".app",
+                 ".so",
+                 ".dylib",
+                 ".dll",
+                 ".o",
+                 ".a",
+                 ".ez"
+               ],
+               "Compiled artifacts are not a public source seed"
+
+        File.cp!(source, destination)
+
+      kind ->
+        flunk(
+          "Public dependency source must be a regular file or directory, got #{inspect(kind)}"
+        )
+    end
   end
 
   defp write_temp_project(tmp, kernel_abs, value) do
