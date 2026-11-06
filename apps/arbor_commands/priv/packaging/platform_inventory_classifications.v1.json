@@ -2188,5 +2188,47 @@
     "blob_oid": "5d0dd2486b7a309a9d4e54a3d70ff15a5b11aedd",
     "class": "optional_extension",
     "rationale": "Implements Trust diagnostics by forwarding to the public Signals facade. The :stream_id key's presence, including nil, selects durable_emit/4; otherwise emit/4. It implements no authority admission or durable acknowledgement of its own: the facade's durable branch ignores the sink result, and the Core port normalizes provider outcomes. Inline effects and delays remain possible."
+  },
+  {
+    "blob_oid": "2d48657133522677541b16da72f7ab33783a166f",
+    "class": "system_extension",
+    "path": "packages/arbor_trust/lib/arbor/trust/contracts/profile_sync.ex",
+    "rationale": "Declares subscription and broadcast callbacks for Trust profile-cache invalidation. Its documented configured-failure and explicit single-node modes define the synchronization interface used by Store; this declaration does not implement cache mutation, policy resolution or transport delivery."
+  },
+  {
+    "blob_oid": "c4b93527bf625f496aae905fda47531f5e5e9a04",
+    "class": "system_extension",
+    "path": "packages/arbor_trust/lib/arbor/trust/profile_sync.ex",
+    "rationale": "Selects the configured ProfileSync transport and invokes it inline after loadability and both-callback checks. Nil returns :ok; configured explicit errors are wrapped, malformed replies fail, and unavailable or exceptional providers return errors without selecting the nil path. This is Trust synchronization dispatch and response handling, used by Store startup and mutation broadcasts."
+  },
+  {
+    "blob_oid": "9075f1634da5300d8680dd3d34448b9d75d187b7",
+    "class": "system_extension",
+    "path": "packages/arbor_trust/lib/arbor/trust/contracts/runtime_host.ex",
+    "rationale": "Declares the Trust runtime adapter callbacks for startup preparation, profile selection, provider-gate child specification and supervisor startup. It supplies the configured product-composition interface used by the active Trust application; the callback declarations do not themselves enforce provider roots or authority."
+  },
+  {
+    "blob_oid": "c67b1dca22cbc4451197a165c949cefe296f387b",
+    "class": "system_extension",
+    "path": "packages/arbor_trust/lib/arbor/trust/runtime.ex",
+    "rationale": "Resolves RuntimeHost and validates required callbacks, preparation/profile replies, gate-spec shape and a returned local live pid. Nil selects package configuration; a configured invalid or failed provider returns errors without falling back to nil. This is Trust startup-composition selection and validation; concrete gate behavior and supervisor identity remain delegated."
+  },
+  {
+    "blob_oid": "94da57c2fdcfaf732d1fb68dea7dedc0bc805c26",
+    "class": "system_extension",
+    "path": "packages/arbor_trust/lib/arbor/trust/provider_gate.ex",
+    "rationale": "Provides the stable package gate name to Runtime.provider_gate_child_spec/2 with an empty root list. It unwraps {:ok,spec} and passes :none or errors through to the application composition branch. This is the Trust child-spec bridge; concrete provider roots and supervised readiness mechanics are supplied through RuntimeHost."
+  },
+  {
+    "blob_oid": "d9d6bbf73802d6f8ddea6248696cda5ea7ba656f",
+    "class": "system_extension",
+    "path": "apps/arbor_trust_host/lib/arbor/trust/host/profile_sync.ex",
+    "rationale": "Implements ProfileSync through public Signals subscriptions for three fixed profile-update/deletion/disable topics, forwards received signals to the calling subscriber PID, and attempts earlier-handle cleanup on subscription error. Broadcast delegates to durable_emit/4 with trust:events. This is product cache-invalidation transport binding, not an acknowledgement or authenticated-coherence implementation."
+  },
+  {
+    "blob_oid": "e6e9b20eb3a045a548af5c7ab7acc23db7f5bafe",
+    "class": "system_extension",
+    "path": "apps/arbor_trust_host/lib/arbor/trust/host/runtime.ex",
+    "rationale": "Implements RuntimeHost by ensuring KernelRuntime is started, requiring a boot-profile map, forwarding profile/supervisor operations and supplying the fixed PersistenceHost/Phoenix.PubSub provider roots. This is concrete Trust product startup and provider composition; the called KernelRuntime owns the delegated gate mechanics, which this adapter body does not establish."
   }
 ]
