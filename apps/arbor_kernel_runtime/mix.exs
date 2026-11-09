@@ -81,7 +81,7 @@ defmodule Arbor.KernelRuntime.MixProject do
             },
             gate_declaration: %{
               path: "apps/arbor_kernel_runtime/lib/arbor/kernel_runtime/provider_gate.ex",
-              sha256: "bcb0c827dfa4aadf76036d7ce3c3d2e38936d9abb8508a8fa7ba5167724d9be9"
+              sha256: "46bfd8ba88739f26756fd7004b2d2f5ab20db85e44f66b6e8f5f456a138d66f7"
             },
             direct_global_action_catalog: :no_additional_contribution_declared_here,
             direct_global_uri_provider: :no_additional_contribution_declared_here,

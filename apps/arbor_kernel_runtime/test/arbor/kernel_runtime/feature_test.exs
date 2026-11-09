@@ -145,7 +145,7 @@ defmodule Arbor.KernelRuntime.FeatureTest do
 
     assert_source_pin(
       "../../../lib/arbor/kernel_runtime/provider_gate.ex",
-      "bcb0c827dfa4aadf76036d7ce3c3d2e38936d9abb8508a8fa7ba5167724d9be9"
+      "46bfd8ba88739f26756fd7004b2d2f5ab20db85e44f66b6e8f5f456a138d66f7"
     )
   end
 
