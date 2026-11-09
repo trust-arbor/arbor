@@ -14,7 +14,14 @@ defmodule Arbor.KernelRuntime do
 
   use Boundary,
     top_level?: true,
-    deps: [Arbor.Common, Arbor.Contracts, Arbor.Signals, Arbor.Monitor, Logger],
+    deps: [
+      Arbor.Common,
+      Arbor.Common.SafePath,
+      Arbor.Contracts,
+      Arbor.Signals,
+      Arbor.Monitor,
+      Logger
+    ],
     exports: [SafeManagementSurface, Adapters.SignalAuthContext]
 
   alias Arbor.Common.Extension.Activation

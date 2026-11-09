@@ -8,7 +8,14 @@ defmodule Arbor.KernelRuntime.BoundaryConfigurationTest do
     # credential adapter. Keep the list exact: extraction changes ownership,
     # without granting access to other Kernel Runtime internals.
     Arbor.KernelRuntime => %{
-      deps: [Arbor.Common, Arbor.Contracts, Arbor.Signals, Arbor.Monitor, Logger],
+      deps: [
+        Arbor.Common,
+        Arbor.Common.SafePath,
+        Arbor.Contracts,
+        Arbor.Signals,
+        Arbor.Monitor,
+        Logger
+      ],
       exports: [SafeManagementSurface, Adapters.SignalAuthContext]
     },
     Arbor.Common => %{

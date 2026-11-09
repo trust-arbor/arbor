@@ -77,7 +77,7 @@ defmodule Arbor.KernelRuntime.MixProject do
             },
             gate_builder: %{
               path: "apps/arbor_kernel_runtime/lib/arbor/kernel_runtime.ex",
-              sha256: "da089a7d574ff2b84821123093f5dc9746c117b5419f62e631b9978665e48277"
+              sha256: "c76e75f02d094cdfecd50c4bad169976185e00ba996a2cc99e14da87ab9c4210"
             },
             gate_declaration: %{
               path: "apps/arbor_kernel_runtime/lib/arbor/kernel_runtime/provider_gate.ex",
