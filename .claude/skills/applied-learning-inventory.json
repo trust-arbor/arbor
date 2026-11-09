@@ -5,10 +5,10 @@
   "source_captured_on": "2026-08-03",
   "admission_cutover": "2026-10-16",
   "archive_root": ".claude/applied-learning-archive",
-  "entry_count": 809,
+  "entry_count": 811,
   "always_loaded_count": 12,
   "original_entry_count": 461,
-  "post_migration_entry_count": 348,
+  "post_migration_entry_count": 350,
   "entries": [
     {
       "source_ordinal": 1,
@@ -16687,6 +16687,49 @@
       "confirmed_by": "codex-import-bytecode-guard-stop",
       "revisit_when": null,
       "content_sha256": "a04b8e950c2f18da7c158fdd6cb305a8212ab205a68a6c6dfae955601a7236e9",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 815,
+      "source_kind": "post-migration",
+      "slug": "generate-wire-format-golden-fixtures-from-the-source-module-not-from-a-design-doc",
+      "title": "Generate wire-format golden fixtures from the source module, not from a design doc.",
+      "topic": "testing-live-runtime",
+      "class": "process",
+      "status": "live",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime-evidence.md",
+      "anchor": "applied-learning-generate-wire-format-golden-fixtures-from-the-source-module-not-from-a-design-doc",
+      "created": "2026-11-07",
+      "source_session": "claude-code:100d2d2f-3467-47d3-8995-e0c9f0c1e861",
+      "source_incident": "found 2026-11-07 extracting Arbor.Contracts.Security.Capability into demo_agent",
+      "scope": [
+        "Arbor.Contracts.Security.Capability.signing_payload/1"
+      ],
+      "last_confirmed": "2026-11-07",
+      "confirmed_by": "session-2026-11-07",
+      "content_sha256": "ea84bcd8c1d791ecc9bf7b2358e252131370b59b079f2171e81795e9bcbb4871",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 816,
+      "source_kind": "post-migration",
+      "slug": "grep-the-pinned-regression-test-before-copying-a-crypto-derivation-from-a-doc",
+      "title": "Grep the pinned regression test before copying a crypto derivation from a doc.",
+      "topic": "testing-live-runtime",
+      "class": "process",
+      "status": "live",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime-evidence.md",
+      "anchor": "applied-learning-grep-the-pinned-regression-test-before-copying-a-crypto-derivation-from-a-doc",
+      "created": "2026-11-08",
+      "source_session": "claude-code:100d2d2f-3467-47d3-8995-e0c9f0c1e861",
+      "source_incident": "found 2026-11-08 extracting the orchestrator checkpoint HMAC into the orchestrator slice",
+      "scope": [
+        "Arbor.Orchestrator.Engine.derive_checkpoint_hmac_secret/1",
+        "docs/arbor/IDENTITY.md"
+      ],
+      "last_confirmed": "2026-11-08",
+      "confirmed_by": "session-2026-11-08",
+      "content_sha256": "271bf862ce659fd462ec29ac100d2fd97dede756a600e885559eb933d9c4299e",
       "always_loaded": false
     }
   ]
