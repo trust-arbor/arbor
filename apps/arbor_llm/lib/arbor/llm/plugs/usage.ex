@@ -4,6 +4,36 @@ defmodule Arbor.LLM.Plugs.Usage do
   non-streaming ReqLLM operation, or for a streaming operation after its final
   Arbor response has passed the response boundary.
 
+  Also enforces a configurable accumulated spend budget per agent
+  (`provider_usage_context.principal_id`) and, when an API key is present on
+  the request, per SHA-256 fingerprint of that key. Callers with neither
+  identity share one unidentified/global bucket. Exceeding an explicit budget
+  halts the call with `{:error, :budget_exceeded}` so later mutating plugs
+  (including Dispatch) do not spend more provider credits.
+
+  `@max_cost_usd` remains an observation sanitizer for a single usage payload.
+  The spend cap is separate and defaults to `$0` — money is never spent by
+  accident. With no configured cap, this plug halts with
+  `{:error, {:budget_not_configured, message}}` and the message names the
+  config key and env var that set a cap. The ledger is in-memory (ETS) and
+  resets when the VM restarts; a persistent budget is a follow-up.
+
+      config :arbor_llm, Arbor.LLM.Plugs.Usage,
+        default_max_cost_usd: 25.0,
+        unidentified_max_cost_usd: 1.0,
+        agent_max_cost_usd: %{"agent_special" => 5.0},
+        key_max_cost_usd: %{"<sha256 hex of api_key>" => 10.0}
+
+  Or set `ARBOR_LLM_USAGE_BUDGET_USD` (attributed callers, and the fallback
+  for unidentified callers) and `ARBOR_LLM_UNIDENTIFIED_USAGE_BUDGET_USD`
+  (callers with no agent id and no API key). These are distinct from
+  `ARBOR_DAILY_BUDGET` in `arbor_ai`. `nil` does not disable the cap.
+  Invalid overrides fail closed (treated as `$0`).
+
+  Place this plug **before** Dispatch to refuse over-budget calls before they
+  hit a provider. The default pipeline includes it at both ends: admit first,
+  then observe and accumulate after a successful dispatch.
+
   Only canonical evidence from `%ReqLLM.Response{}` and Arbor's bounded
   embedding result tuple is considered authoritative. The plug never emits
   prompts, responses, provider metadata, headers, errors, or arbitrary terms.
@@ -32,6 +62,7 @@ defmodule Arbor.LLM.Plugs.Usage do
   alias Arbor.Identifiers
   alias Arbor.LLM.Call
   alias Arbor.LLM.Plugs.Usage.AccountedStream
+  alias Arbor.LLM.Plugs.Usage.CostLedger
   alias Arbor.LLM.Response
 
   @max_provenance_walk_depth 8
@@ -46,22 +77,42 @@ defmodule Arbor.LLM.Plugs.Usage do
   @impl Arbor.LLM.Plug
   def call(%Call{halted: true} = call), do: call
 
-  def call(%Call{operation: operation, result: result, metadata: metadata} = call)
-      when operation in @recognized_operations do
-    if Map.get(metadata, :usage_emitted, false) do
-      call
-    else
-      event_id = bounded_event_id(Map.get(metadata, :event_id, new_event_id()))
-      {measurements, usage_status} = extract_usage(operation, result)
-      {provider, model} = model_identity(operation, call.request)
+  def call(%Call{} = call) do
+    case admit_budget(call) do
+      :ok ->
+        observe_usage(call)
 
-      provenance =
-        %{event_id: event_id, provider: provider, model: model}
-        |> Map.merge(attribution_from_metadata(metadata))
+      {:error, reason} ->
+        Call.halt(%{call | result: {:error, reason}})
+    end
+  end
 
-      emit_usage(measurements, provenance, operation, usage_status)
+  @doc false
+  @spec reset_cost_ledger() :: :ok
+  def reset_cost_ledger, do: CostLedger.reset()
 
-      Call.put_metadata(call, %{event_id: event_id, usage_emitted: true})
+  defp observe_usage(%Call{operation: operation, result: result, metadata: metadata} = call)
+       when operation in @recognized_operations do
+    cond do
+      is_nil(result) ->
+        call
+
+      Map.get(metadata, :usage_emitted, false) ->
+        call
+
+      true ->
+        event_id = bounded_event_id(Map.get(metadata, :event_id, new_event_id()))
+        {measurements, usage_status} = extract_usage(operation, result)
+        {provider, model} = model_identity(operation, call.request)
+
+        provenance =
+          %{event_id: event_id, provider: provider, model: model}
+          |> Map.merge(attribution_from_metadata(metadata))
+
+        emit_usage(measurements, provenance, operation, usage_status)
+        account_cost(budget_identities(call), measurements)
+
+        Call.put_metadata(call, %{event_id: event_id, usage_emitted: true})
     end
   rescue
     _ -> call
@@ -69,7 +120,7 @@ defmodule Arbor.LLM.Plugs.Usage do
     _, _ -> call
   end
 
-  def call(%Call{} = call), do: call
+  defp observe_usage(call), do: call
 
   @doc false
   @spec streaming_provenance(Call.t()) :: map()
@@ -88,6 +139,7 @@ defmodule Arbor.LLM.Plugs.Usage do
       finalize_gate: new_finalize_gate()
     }
     |> Map.merge(attribution_from_metadata(metadata))
+    |> maybe_put_budget_key(request)
   end
 
   @doc false
@@ -159,6 +211,7 @@ defmodule Arbor.LLM.Plugs.Usage do
             case normalize_usage(:complete, usage) do
               {measurements, :authoritative} ->
                 emit_usage(measurements, provenance, :complete)
+                account_cost(identities_from_provenance(provenance), measurements)
                 Map.put(finalized, :usage_emitted?, true)
 
               _ ->
@@ -359,6 +412,199 @@ defmodule Arbor.LLM.Plugs.Usage do
   end
 
   defp attribution_from_metadata(_metadata), do: %{}
+
+  defp admit_budget(call) do
+    Enum.reduce_while(budget_identities(call), :ok, fn identity, :ok ->
+      case budget_decision(identity) do
+        :ok -> {:cont, :ok}
+        {:error, _} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp budget_decision(identity) do
+    case budget_source(identity) do
+      :unset ->
+        {:error, {:budget_not_configured, not_configured_message(identity)}}
+
+      {:explicit, budget} ->
+        if CostLedger.micros(identity) >= CostLedger.to_micros(budget) do
+          {:error, :budget_exceeded}
+        else
+          :ok
+        end
+    end
+  end
+
+  defp account_cost(identities, measurements) do
+    case Map.get(measurements, :cost) do
+      cost when is_float(cost) and cost > 0.0 ->
+        Enum.each(identities, &CostLedger.add(&1, cost))
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp budget_identities(%Call{metadata: metadata, request: request}) do
+    []
+    |> maybe_put_agent(Map.get(metadata, :principal_id))
+    |> maybe_put_key(request_api_key(request))
+    |> or_unidentified()
+  end
+
+  defp identities_from_provenance(provenance) when is_map(provenance) do
+    []
+    |> maybe_put_agent(Map.get(provenance, :principal_id))
+    |> maybe_put_key_fingerprint(Map.get(provenance, :budget_key_fingerprint))
+    |> or_unidentified()
+  end
+
+  defp or_unidentified([]), do: [{:unidentified, :global}]
+  defp or_unidentified(identities), do: identities
+
+  defp maybe_put_agent(identities, principal_id)
+       when is_binary(principal_id) and byte_size(principal_id) > 0 and
+              byte_size(principal_id) <= 128 do
+    if String.valid?(principal_id) and String.trim(principal_id) == principal_id do
+      [{:agent, principal_id} | identities]
+    else
+      identities
+    end
+  end
+
+  defp maybe_put_agent(identities, _principal_id), do: identities
+
+  defp maybe_put_key(identities, key) do
+    maybe_put_key_fingerprint(identities, CostLedger.fingerprint(key))
+  end
+
+  defp maybe_put_key_fingerprint(identities, fingerprint)
+       when is_binary(fingerprint) and byte_size(fingerprint) == 64 do
+    [{:key, fingerprint} | identities]
+  end
+
+  defp maybe_put_key_fingerprint(identities, _fingerprint), do: identities
+
+  defp maybe_put_budget_key(provenance, request) do
+    case CostLedger.fingerprint(request_api_key(request)) do
+      fingerprint when is_binary(fingerprint) ->
+        Map.put(provenance, :budget_key_fingerprint, fingerprint)
+
+      _ ->
+        provenance
+    end
+  end
+
+  defp request_api_key({_model, _input, opts}) when is_list(opts),
+    do: find_api_key(opts, 0)
+
+  defp request_api_key(_request), do: nil
+
+  defp find_api_key(_opts, 128), do: nil
+  defp find_api_key([], _count), do: nil
+
+  defp find_api_key([{:api_key, key} | _rest], _count)
+       when is_binary(key) and byte_size(key) > 0,
+       do: key
+
+  defp find_api_key([{key, _value} | rest], count) when is_atom(key),
+    do: find_api_key(rest, count + 1)
+
+  defp find_api_key(_improper, _count), do: nil
+
+  defp budget_source({:agent, id}), do: override_or_default(:agent_max_cost_usd, id)
+  defp budget_source({:key, id}), do: override_or_default(:key_max_cost_usd, id)
+  defp budget_source({:unidentified, :global}), do: unidentified_budget_source()
+
+  defp override_or_default(key, id) do
+    case Map.fetch(config_map(key), id) do
+      {:ok, value} -> explicit_budget(value)
+      :error -> default_budget_source()
+    end
+  end
+
+  defp unidentified_budget_source do
+    case env_budget("ARBOR_LLM_UNIDENTIFIED_USAGE_BUDGET_USD") do
+      {:ok, value} ->
+        {:explicit, value}
+
+      :unset ->
+        case Keyword.fetch(plug_config(), :unidentified_max_cost_usd) do
+          {:ok, value} -> explicit_budget(value)
+          :error -> default_budget_source()
+        end
+    end
+  end
+
+  defp default_budget_source do
+    case env_budget("ARBOR_LLM_USAGE_BUDGET_USD") do
+      {:ok, value} ->
+        {:explicit, value}
+
+      :unset ->
+        case Keyword.fetch(plug_config(), :default_max_cost_usd) do
+          {:ok, value} -> explicit_budget(value)
+          :error -> :unset
+        end
+    end
+  end
+
+  defp explicit_budget(value) do
+    case normalize_budget(value) do
+      {:ok, amount} -> {:explicit, amount}
+      :invalid -> {:explicit, 0.0}
+    end
+  end
+
+  defp normalize_budget(value) when is_number(value) and value >= 0, do: {:ok, value * 1.0}
+  defp normalize_budget(_invalid), do: :invalid
+
+  defp env_budget(var) do
+    case System.get_env(var) do
+      nil ->
+        :unset
+
+      raw ->
+        trimmed = String.trim(raw)
+
+        cond do
+          trimmed == "" ->
+            :unset
+
+          true ->
+            case Float.parse(trimmed) do
+              {value, remainder} when value >= 0 ->
+                if String.trim(remainder) == "", do: {:ok, value * 1.0}, else: {:ok, 0.0}
+
+              _ ->
+                {:ok, 0.0}
+            end
+        end
+    end
+  end
+
+  defp not_configured_message({:unidentified, :global}) do
+    "LLM spend is refused until a budget is configured. Set config :arbor_llm, Arbor.LLM.Plugs.Usage, :unidentified_max_cost_usd or env ARBOR_LLM_UNIDENTIFIED_USAGE_BUDGET_USD (or the global :default_max_cost_usd / ARBOR_LLM_USAGE_BUDGET_USD)."
+  end
+
+  defp not_configured_message(_identity) do
+    "LLM spend is refused until a budget is configured. Set config :arbor_llm, Arbor.LLM.Plugs.Usage, :default_max_cost_usd or env ARBOR_LLM_USAGE_BUDGET_USD."
+  end
+
+  defp plug_config do
+    case Application.get_env(:arbor_llm, __MODULE__, []) do
+      opts when is_list(opts) -> opts
+      _ -> []
+    end
+  end
+
+  defp config_map(key) do
+    case Keyword.get(plug_config(), key, %{}) do
+      map when is_map(map) and not is_struct(map) -> map
+      _ -> %{}
+    end
+  end
 
   defp maybe_put_attr(map, _key, nil), do: map
   defp maybe_put_attr(map, key, value), do: Map.put(map, key, value)
