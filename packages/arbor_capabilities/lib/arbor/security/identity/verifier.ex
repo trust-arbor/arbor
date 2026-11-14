@@ -50,6 +50,37 @@ defmodule Arbor.Security.Identity.Verifier do
   @spec verify_local_possession_proof(term()) :: {:ok, String.t()} | {:error, atom()}
   def verify_local_possession_proof(request), do: do_verify(request, false)
 
+  @doc """
+  Verify a first-registration proof against the public key it is registering.
+
+  The principal is not registered yet, so there is no registry key to look
+  up. Otherwise this is `verify/1`: cluster replay gate, timestamp freshness,
+  Ed25519 signature and single-use nonce, in that order, so a bad signature
+  never consumes a nonce.
+
+  This only proves that the signer holds the private half of `public_key`.
+  The caller must bind `public_key` and the registration purpose into the
+  signed payload and compare them with what it is about to register.
+  Without that check, any keypair could sign for any principal.
+  """
+  @spec verify_with_public_key(term(), binary()) :: {:ok, String.t()} | {:error, atom()}
+  def verify_with_public_key(request, public_key)
+      when is_binary(public_key) and byte_size(public_key) == 32 do
+    with :ok <- maybe_admit_cluster_replay(true),
+         {:ok, request} <- canonicalize_request(request),
+         :ok <- check_timestamp_freshness(request),
+         :ok <- verify_signature(request, public_key),
+         :ok <- check_nonce_uniqueness(request.nonce) do
+      {:ok, request.agent_id}
+    end
+  rescue
+    _ -> {:error, :verification_failed}
+  catch
+    :exit, _ -> {:error, :verification_unavailable}
+  end
+
+  def verify_with_public_key(_request, _public_key), do: {:error, :invalid_public_key}
+
   defp do_verify(request, gate_cluster_replay?) do
     with :ok <- maybe_admit_cluster_replay(gate_cluster_replay?),
          {:ok, request} <- canonicalize_request(request),

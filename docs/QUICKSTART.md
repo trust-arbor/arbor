@@ -253,9 +253,11 @@ A half-started server may still be running after a failure. Stop it with
 ./bin/mix arbor.user.init
 ```
 
-Creates your **human** principal — the account agents and grants belong to —
-with a real Ed25519 + X25519 keypair, and writes `~/.arbor/operator.key` so the
-CLI can prove it is you.
+Creates your **human** principal — the account agents and grants belong to.
+The task generates an Ed25519 keypair on your machine and writes the private key
+to `~/.arbor/operator.key` (mode `0600`) so the CLI can prove it is you. Only
+the public key is registered with the server, which never holds your private
+key. Keep the file: it is the only copy.
 
 On a fresh install it also completes **genesis**: every grant needs an actor
 that already holds a matching capability, so nothing can be granted until a
@@ -266,10 +268,14 @@ nothing. Run it before configuring an identity provider — genesis is refused
 once one is configured.
 
 The id is **deterministic**: it is a hash of `arbor://local` plus
-`<os-username>@<hostname>`. Re-running the command loads the same identity
-instead of minting a second one — but that also means a different OS user, a
-renamed host, or an Arbor installation moved to another machine derives a
-*different* id. Your grants and agents belong to the old one. Keep the key file,
+`<os-username>@<hostname>`. Re-running the command with the same key file loads
+the same identity instead of minting a second one. If the identity exists but
+its key file is missing, the task stops instead of generating a second key:
+restore the file, or pass `--key-file PATH`.
+
+Because the id comes from the user and host, a different OS user, a renamed
+host, or an Arbor installation moved to another machine derives a *different*
+id. Your grants and agents belong to the old one. Keep the key file,
 and if you do move, fold the new id onto the original one:
 
 ```bash
