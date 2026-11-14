@@ -52,6 +52,26 @@ if File.exists?(dotenv_path) do
   end)
 end
 
+# Optional dev features. Tracked defaults describe a fresh single-node install
+# that has one LLM provider chosen by `mix arbor.doctor`. Homelab and multi-node
+# setups opt in from `.env` (loaded above); see `.env.example`.
+dev_switch = fn name, default ->
+  case System.get_env(name) do
+    unset when unset in [nil, ""] ->
+      default
+
+    enabled when enabled in ["1", "true"] ->
+      true
+
+    disabled when disabled in ["0", "false"] ->
+      false
+
+    other ->
+      raise ArgumentError,
+            "#{name} must be true or false (also accepts 1 or 0), got: #{inspect(other)}"
+  end
+end
+
 # Persistence — adapter selected by ARBOR_DB env var
 # Default: SQLite (zero-config). Set ARBOR_DB=postgres for PostgreSQL.
 # ARBOR_DB_NAME / ARBOR_SQLITE_PATH select an isolated development database.
@@ -89,9 +109,18 @@ else
     engine: Oban.Engines.Lite,
     notifier: Oban.Notifiers.PG
 
+  # Resolve the default from the HOME environment variable, never `~`. The dev
+  # daemon boots under a private cookie HOME, and bin/arbor-runtime-home-bootstrap.exs
+  # restores the operator HOME only in the environment: `Path.expand("~")` and
+  # `System.user_home!/0` keep returning the cookie directory. With `~`,
+  # `mix arbor.setup` migrated ~/.arbor/arbor_dev.db while the daemon opened an
+  # empty ~/.arbor/distribution/.arbor/arbor_dev.db and failed to boot
+  # ("no such table: records"; found 2026-11-13 by a fresh-install test).
+  operator_home = System.get_env("HOME") || System.user_home!()
+
   config :arbor_persistence_host, Arbor.Persistence.Repo,
     database:
-      System.get_env("ARBOR_SQLITE_PATH", Path.expand("~/.arbor/arbor_dev.db"))
+      System.get_env("ARBOR_SQLITE_PATH", Path.join([operator_home, ".arbor", "arbor_dev.db"]))
       |> Path.expand(),
     busy_timeout: 5_000,
     # Match the Postgres branch above. Without this every query is logged at
@@ -303,11 +332,11 @@ config :arbor_capabilities, allow_opencode_zen_egress: true
 # the risk (e.g. profile-less dev agents) by opting into the old fail-OPEN behavior:
 # config :arbor_actions, spawn_worker_fail_open: true
 
-# Worker default model — workers run bounded sub-tasks and must not sit on the rate-limited
-# gpt-oss-120b:free tier (429 → empty worker report). Point them at a reliable subscription
-# model, independent of the global agent default.
-config :arbor_actions, worker_default_provider: :ollama
-config :arbor_actions, worker_default_model: "kimi-k2.7-code:cloud"
+# Worker default model: unset, so spawned workers use the system default
+# (ARBOR_DEFAULT_PROVIDER / ARBOR_DEFAULT_MODEL from `mix arbor.doctor`). Workers
+# run bounded sub-tasks, so a rate-limited free tier can return empty reports;
+# pin a reliable worker model with ARBOR_WORKER_PROVIDER + ARBOR_WORKER_MODEL
+# (read in runtime.exs).
 
 # Slow LOCAL coordinators orchestrating nested workers exceed the 5-min default turn timeout
 # (gemma-4-31b timed out). 15 min gives agentic local turns room; still a safety net.
@@ -327,13 +356,44 @@ config :arbor_orchestrator, coding_repo_roots: [arbor_source_root]
 # `metadata.project_context: "enabled"`. The skill catalog is on by default
 # in config.exs.
 
-# Pre-turn preprocessor ON in dev (consolidated 2026-06-25 onto LM Studio +
+# Pre-turn preprocessor (consolidated 2026-06-25 onto LM Studio +
 # gemma-4-e4b-it-qat for the whole pipeline). Requires the model loaded in LM
-# Studio at localhost:1234. Fails open if unreachable. prod stays off (config.exs)
-# until a deliberate enable; test stays off to keep the suite fast. Per-stage
+# Studio at localhost:1234 and fails open if unreachable. Opt in with
+# ARBOR_PREPROCESSOR=true. The boot-time model preflight follows the same
+# switch: it probes every configured local preprocessor model, so without LM
+# Studio it only logs "unreachable" warnings. prod stays off (config.exs) until
+# a deliberate enable; test stays off to keep the suite fast. Per-stage
 # model/provider lives in Arbor.Orchestrator.Config.@default_preprocessor — don't
 # restate it here, only override specific keys if dev needs to differ.
-config :arbor_orchestrator, preprocessor_enabled: true
+preprocessor_enabled = dev_switch.("ARBOR_PREPROCESSOR", false)
+
+config :arbor_orchestrator,
+  preprocessor_enabled: preprocessor_enabled,
+  preflight_models_on_start: preprocessor_enabled
+
+# Multi-node / homelab cluster. Off by default for a single machine:
+# - the Signals relay only forwards to peer nodes;
+# - Cartographer's Scout re-detects hardware every 5 min (shelling out to
+#   sysctl, system_profiler, nvidia-smi, ...) and ClusterKeeper redials known
+#   nodes every 30 s. Its passive CapabilityRegistry still starts, and
+#   hardware lookups fall back to on-demand detection.
+# Opt in with ARBOR_CLUSTER=true.
+cluster_enabled = dev_switch.("ARBOR_CLUSTER", false)
+
+config :arbor_signals, relay_enabled: cluster_enabled
+
+config :arbor_cartographer,
+  scout_enabled: cluster_enabled,
+  cluster_keeper_enabled: cluster_enabled
+
+# The owner's daily scheduler pipelines (upstream dependency check + morning
+# digest, 06:00–06:45 UTC; crontab in config.exs). Their reviewed `.caps.json`
+# manifests are signed by the owner's issuer, so on any other install they
+# fail closed every morning once the scheduler is provisioned. Opt in with
+# ARBOR_DAILY_PIPELINES=true; otherwise keep only the job pruner.
+unless dev_switch.("ARBOR_DAILY_PIPELINES", false) do
+  config :arbor_scheduler, Oban, plugins: [Oban.Plugins.Pruner]
+end
 
 # Development installer substitute for P1A-2. Production samples the clock
 # and receives these bytes from installer sys.config, not from this file.

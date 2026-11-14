@@ -47,8 +47,8 @@ defmodule Mix.Tasks.Arbor.Setup do
   """
   use Mix.Task
 
-  @min_elixir_version "1.17.0"
-  @min_otp_version 26
+  @min_elixir_version "1.19.0"
+  @min_otp_version 28
 
   @impl Mix.Task
   def run(args) do

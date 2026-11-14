@@ -520,7 +520,7 @@ defmodule Mix.Tasks.Arbor.Doctor do
           Mix.shell().info("  Default LLM: #{current_provider} / #{current_model || "(not set)"}")
           Mix.shell().info("  #{label}: #{provider_str} / #{model}")
 
-          if current_provider != to_string(provider_atom) and not opts[:configure] do
+          if suggest_reconfigure?(current_provider, provider_atom, opts) do
             Mix.shell().info("  Run: mix arbor.doctor --configure  to update")
           end
         else
@@ -806,6 +806,15 @@ defmodule Mix.Tasks.Arbor.Doctor do
     else
       _ -> fallback_model(config_provider, runtime_fallback_deps())
     end
+  end
+
+  @doc false
+  # Plain `mix arbor.doctor` leaves `:configure` unset (nil). `not nil` raises,
+  # which crashed the doctor on every install that already had a default
+  # provider (found 2026-11-13 by a fresh-install test).
+  @spec suggest_reconfigure?(String.t(), atom(), keyword()) :: boolean()
+  def suggest_reconfigure?(current_provider, provider_atom, opts) do
+    current_provider != to_string(provider_atom) and opts[:configure] != true
   end
 
   # Resolve a model when LLMDB can't answer, WITHOUT hard-coding model ids (which go

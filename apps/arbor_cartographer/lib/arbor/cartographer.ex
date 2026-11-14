@@ -374,7 +374,8 @@ defmodule Arbor.Cartographer do
   """
   @impl true
   def healthy? do
-    supervisor_running?() && registry_running?() && scout_running?()
+    supervisor_running?() && registry_running?() &&
+      (scout_running?() or Application.get_env(:arbor_cartographer, :scout_enabled, true) == false)
   end
 
   @doc """

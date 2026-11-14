@@ -2,7 +2,27 @@ import Config
 
 # Reviewed Phase E routing profile. Both routes passed the heartbeat eval suite
 # on the immutable clean revision recorded by the scoreboard evidence below.
-provider_route_profile_enabled = true
+#
+# Both routes need subscription OAuth logins (`openai_oauth`, `xai_oauth`) that a
+# fresh install does not have. Dev therefore defaults to off and LLM nodes use
+# the provider chosen by `mix arbor.doctor`. Set ARBOR_PROVIDER_ROUTE_PROFILE=true
+# (for example in `.env`) to opt in. Prod keeps the reviewed default (on).
+provider_route_profile_enabled =
+  case System.get_env("ARBOR_PROVIDER_ROUTE_PROFILE") do
+    unset when unset in [nil, ""] ->
+      config_env() == :prod
+
+    enabled when enabled in ["1", "true"] ->
+      true
+
+    disabled when disabled in ["0", "false"] ->
+      false
+
+    other ->
+      raise ArgumentError,
+            "ARBOR_PROVIDER_ROUTE_PROFILE must be true or false (also accepts 1 or 0), " <>
+              "got: #{inspect(other)}"
+  end
 
 config :arbor_ai, :provider_route_profile, %{
   enabled: provider_route_profile_enabled,

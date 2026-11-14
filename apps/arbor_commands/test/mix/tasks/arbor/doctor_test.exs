@@ -343,4 +343,20 @@ defmodule Mix.Tasks.Arbor.DoctorTest do
       assert content =~ "\nARBOR_DEFAULT_PROVIDER=opencode_zen"
     end
   end
+
+  # Plain `mix arbor.doctor` (no --configure) crashed with `:erlang.not(nil)` on
+  # every install that already had ARBOR_DEFAULT_PROVIDER set (2026-11-13).
+  describe "suggest_reconfigure?/3 — plain doctor with a configured default" do
+    test "suggests --configure when the recommendation differs and the flag is absent" do
+      assert Doctor.suggest_reconfigure?("openrouter", :opencode_zen, [])
+    end
+
+    test "does not suggest it when the recommendation matches" do
+      refute Doctor.suggest_reconfigure?("opencode_zen", :opencode_zen, [])
+    end
+
+    test "does not suggest it while configuring" do
+      refute Doctor.suggest_reconfigure?("openrouter", :opencode_zen, configure: true)
+    end
+  end
 end

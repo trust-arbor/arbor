@@ -1044,6 +1044,49 @@ if provider =
   config :arbor_agent, summarizer_provider: provider
 end
 
+# --- Spawned worker model (bounded sub-tasks) ---
+# Unset: workers use the system default above. Both must be set to pin one;
+# SpawnWorker ignores a model without a provider.
+worker_model = System.get_env("ARBOR_WORKER_MODEL")
+worker_provider_raw = System.get_env("ARBOR_WORKER_PROVIDER")
+
+if worker_model || worker_provider_raw do
+  worker_provider = worker_provider_raw && parse_provider.(worker_provider_raw)
+
+  unless is_binary(worker_model) and worker_model != "" and worker_provider do
+    raise "ARBOR_WORKER_MODEL and ARBOR_WORKER_PROVIDER must be set together, " <>
+            "and ARBOR_WORKER_PROVIDER must be a known provider, got: " <>
+            inspect(%{model: worker_model, provider: worker_provider_raw})
+  end
+
+  config :arbor_actions,
+    worker_default_provider: worker_provider,
+    worker_default_model: worker_model
+end
+
+# --- Claude Code over ACP: model pin ---
+# Unset: the built-in claude entry in Arbor.AI.AcpSession.Config (sonnet).
+# An :acp_providers entry REPLACES the built-in one, so restate the adapter and
+# keep the reviewed permission_mode :default (the CLI asks Arbor before tools).
+case System.get_env("ARBOR_ACP_CLAUDE_MODEL") do
+  unset when unset in [nil, ""] ->
+    :ok
+
+  acp_claude_model ->
+    unless Regex.match?(~r/\A[A-Za-z0-9][A-Za-z0-9._:\[\]-]{0,127}\z/, acp_claude_model) do
+      raise "ARBOR_ACP_CLAUDE_MODEL must be a Claude Code model alias or id, " <>
+              "got: #{inspect(acp_claude_model)}"
+    end
+
+    config :arbor_ai,
+           :acp_providers,
+           Map.put(Application.get_env(:arbor_ai, :acp_providers, %{}), :claude, %{
+             transport_mod: ExMCP.ACP.AdapterTransport,
+             adapter: ExMCP.ACP.Adapters.ClaudeSDK,
+             adapter_opts: [model: acp_claude_model, permission_mode: :default]
+           })
+end
+
 # --- Advisory council models (13 perspectives) ---
 # Keep these values inert in runtime config. AdvisoryLLM owns the closed
 # perspective table and validates the JSON when the consensus app uses it;

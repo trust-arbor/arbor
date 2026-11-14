@@ -21,6 +21,7 @@ defmodule Arbor.Agent.ContextSummarizer do
 
   require Logger
 
+  alias Arbor.Agent.LLMDefaults
   alias Arbor.Agent.SummaryCache
 
   @type summary_tier :: :recent | :tier_1 | :tier_2
@@ -201,8 +202,11 @@ defmodule Arbor.Agent.ContextSummarizer do
   end
 
   defp call_summarizer(prompt, sensitivity_opts) do
-    model = config(:summarizer_model, "claude-haiku")
-    provider = config(:summarizer_provider, :anthropic)
+    # Unset summarizer keys follow the system default (ARBOR_DEFAULT_PROVIDER /
+    # ARBOR_DEFAULT_MODEL), so a fresh install summarizes with the provider
+    # `mix arbor.doctor` configured instead of requiring an Anthropic key.
+    model = LLMDefaults.default_model(agent_model_key: :summarizer_model)
+    provider = LLMDefaults.default_provider(agent_provider_key: :summarizer_provider)
 
     opts =
       [model: model, provider: provider, max_tokens: 2000, runtime: :arbor]

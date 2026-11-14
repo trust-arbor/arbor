@@ -12,6 +12,12 @@ clients: [arbor/EXTERNAL_MCP_CLIENT.md](arbor/EXTERNAL_MCP_CLIENT.md).
 - macOS or Linux
 - [mise](https://mise.jdx.dev/) to install the versions in `.tool-versions`
   (currently Erlang `28.4.1`, Elixir `1.19.5-otp-28`)
+- A C compiler and `make` (Xcode Command Line Tools on macOS,
+  `build-essential` on Debian/Ubuntu). Arbor compiles a small sandbox
+  launcher in C. If mise has no prebuilt Erlang for your platform it builds
+  OTP from source, which also needs the OpenSSL and ncurses development
+  headers (`libssl-dev libncurses-dev` on Debian/Ubuntu).
+- Network access to hex.pm and github.com for `deps.get` and the first compile
 - An LLM, any one of:
   - nothing at all — the keyless OpenCode Zen free tier (see step 3)
   - an API key for any supported provider (OpenRouter, Anthropic, OpenAI,
@@ -73,6 +79,25 @@ will fail during `deps.get`; leave `ARBOR_VOICE` unset (or set it to `false`)
 to run core Arbor. Restart your own Arbor node after changing the build selector.
 Existing microphone permissions, provider credentials, and voice capability
 requirements still apply.
+
+### Optional features (off by default)
+
+A fresh install runs single-node and sends every model call through the one
+provider `mix arbor.doctor --configure` sets up (step 3), including context
+summaries and spawned workers. These extras are off until you switch them on
+in `.env`. They are read when Arbor boots, so restart after changing them:
+
+| Variable | Turns on | Needs |
+|---|---|---|
+| `ARBOR_PROVIDER_ROUTE_PROFILE=true` | The reviewed OAuth routing profile | `arbor.login openai` and `arbor.login xai` |
+| `ARBOR_PREPROCESSOR=true` | The pre-turn preprocessor and the boot-time local-model check | LM Studio on `localhost:1234` with the configured models loaded |
+| `ARBOR_CLUSTER=true` | Signals relay to peers, hardware scouting, cluster redials | More than one node (see the tip on staying single-node below) |
+| `ARBOR_DAILY_PIPELINES=true` | The maintainer's daily scheduler pipelines | Their signing issuer; they fail closed elsewhere |
+
+To pin a different model for one job, set `ARBOR_SUMMARIZER_MODEL` +
+`ARBOR_SUMMARIZER_PROVIDER`, `ARBOR_WORKER_MODEL` + `ARBOR_WORKER_PROVIDER`, or
+`ARBOR_ACP_CLAUDE_MODEL` (Claude Code over ACP uses Claude Code's `sonnet`
+alias unless you set it). `.env.example` lists them all.
 
 ## 2. Setup
 
@@ -275,7 +300,9 @@ administrator, grant it its capabilities with your key file:
 ```
 
 `./bin/mix arbor.scheduler.provision --status` shows whether it is still
-dormant and which capabilities it lacks.
+dormant and which capabilities it lacks. A provisioned scheduler runs your own
+jobs; the maintainer's daily pipelines stay off unless
+`ARBOR_DAILY_PIPELINES=true`.
 
 ## 6. First reply (conversationalist)
 
@@ -325,6 +352,7 @@ one back with `mix arbor.agent resume river`, or run
   node-local and a captured request could be replayed against that peer. If
   `mix arbor.signer` returns 401, the response names the reason
   (`cluster_replay_protection_unavailable`); disconnect with
-  `mix arbor.cluster disconnect <node>`. Both ends redial every 30s, and a
-  third non-hidden node connected to both will re-mesh them regardless — see
-  `mix help arbor.cluster`.
+  `mix arbor.cluster disconnect <node>`. With `ARBOR_CLUSTER=true` both ends
+  redial every 30s, and a third non-hidden node connected to both will re-mesh
+  them regardless — see `mix help arbor.cluster`. When you do go multi-node,
+  set `ARBOR_CLUSTER=true` on every node so signals reach peers.

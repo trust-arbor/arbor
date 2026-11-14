@@ -338,26 +338,20 @@ config :ex_mcp, protocol_mode: :legacy_only
 # Built-in defaults (Arbor.AI.AcpSession.Config) cover native providers, including the
 # security-sensitive Grok command. Overrides REPLACE the per-provider default rather than
 # deep-merging, so keep policy-owned native launch commands out of this map.
-config :arbor_ai, :acp_providers, %{
-  # claude → run Opus (built-in default is sonnet)
-  # Adapter pinned to ClaudeSDK (the SDK-protocol-based adapter that talks
-  # to Claude Code via the same stream-json control protocol as
-  # @anthropic-ai/claude-agent-sdk). See
-  # apps/arbor_ai/lib/arbor/ai/acp_session/config.ex for adapter docs.
-  claude: %{
-    transport_mod: ExMCP.ACP.AdapterTransport,
-    adapter: ExMCP.ACP.Adapters.ClaudeSDK,
-    adapter_opts: [model: "opus"]
-  }
-
-  # antigravity is a built-in native ACP provider using the dedicated
-  # `antigravity-acp` executable. RuntimeHome replaces HOME and GEMINI_HOME and
-  # projects only an Arbor-owned oauth-personal token. Do not override its
-  # policy-owned command here. Optionally select the source outside this map:
-  #
-  # config :arbor_ai,
-  #   antigravity_acp_token_file: "/private/operator/antigravity-acp.json"
-}
+#
+# claude uses the built-in default (ClaudeSDK adapter, sonnet, permission_mode
+# :default), so a newcomer's Claude Code subscription is not spent on Opus. Set
+# ARBOR_ACP_CLAUDE_MODEL (e.g. opus) to pin another model; runtime.exs applies it.
+# prod.exs keeps its Opus pin.
+#
+# antigravity is a built-in native ACP provider using the dedicated
+# `antigravity-acp` executable. RuntimeHome replaces HOME and GEMINI_HOME and
+# projects only an Arbor-owned oauth-personal token. Do not override its
+# policy-owned command here. Optionally select the source outside this map:
+#
+#   config :arbor_ai,
+#     antigravity_acp_token_file: "/private/operator/antigravity-acp.json"
+config :arbor_ai, :acp_providers, %{}
 
 # AI routing defaults
 config :arbor_ai,
@@ -496,10 +490,10 @@ config :arbor_agent,
   checkpoint_interval_ms: 300_000,
   checkpoint_query_threshold: 5,
   checkpoint_store: Arbor.Persistence.Checkpoint.Store.ETS,
-  # Context summarization — dual-model approach (Phase 3)
+  # Context summarization — dual-model approach (Phase 3). The summarizer model
+  # follows the system default unless ARBOR_SUMMARIZER_MODEL/_PROVIDER pin one
+  # (runtime.exs).
   context_summarization_enabled: true,
-  summarizer_model: "claude-haiku",
-  summarizer_provider: :anthropic,
   context_max_tokens: 180_000,
   context_min_tokens: 20_000,
   context_recent_ratio: 0.7,

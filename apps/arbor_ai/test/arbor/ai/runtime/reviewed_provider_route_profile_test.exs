@@ -1,5 +1,6 @@
 defmodule Arbor.AI.Runtime.ReviewedProviderRouteProfileTest do
-  use ExUnit.Case, async: true
+  # Not async: these tests set ARBOR_PROVIDER_ROUTE_PROFILE in the OS environment.
+  use ExUnit.Case, async: false
 
   alias Arbor.AI.Runtime.{ProviderRouter, RouteCatalog}
 
@@ -7,9 +8,28 @@ defmodule Arbor.AI.Runtime.ReviewedProviderRouteProfileTest do
   @config_path Path.expand("../../../../../..", __DIR__)
                |> Path.join("config/provider_route_profile.exs")
 
+  @switch "ARBOR_PROVIDER_ROUTE_PROFILE"
+
+  test "dev keeps the profile off unless opted in; prod keeps the reviewed default" do
+    # Both routes need subscription OAuth logins a fresh install does not have.
+    refute profile_enabled?(:dev, nil)
+    refute profile_enabled?(:dev, "false")
+    assert profile_enabled?(:dev, "true")
+    assert profile_enabled?(:dev, "1")
+
+    assert profile_enabled?(:prod, nil)
+    refute profile_enabled?(:prod, "0")
+  end
+
+  test "an unrecognized switch value fails loudly" do
+    assert_raise ArgumentError, ~r/ARBOR_PROVIDER_ROUTE_PROFILE must be true or false/, fn ->
+      read_ai_config(:dev, "yes")
+    end
+  end
+
   test "reviewed profile keeps deployment policy and eval provenance coherent" do
-    dev = read_ai_config(:dev)
-    prod = read_ai_config(:prod)
+    dev = read_ai_config(:dev, "true")
+    prod = read_ai_config(:prod, nil)
     dev_profile = Keyword.fetch!(dev, :provider_route_profile)
     prod_profile = Keyword.fetch!(prod, :provider_route_profile)
 
@@ -55,9 +75,21 @@ defmodule Arbor.AI.Runtime.ReviewedProviderRouteProfileTest do
              expected_routes
   end
 
-  defp read_ai_config(env) do
-    @config_path
-    |> Config.Reader.read!(env: env)
-    |> Keyword.fetch!(:arbor_ai)
+  defp profile_enabled?(env, switch) do
+    read_ai_config(env, switch) |> Keyword.fetch!(:provider_route_profile) |> Map.fetch!(:enabled)
+  end
+
+  defp read_ai_config(env, switch) do
+    prior = System.get_env(@switch)
+
+    try do
+      if switch, do: System.put_env(@switch, switch), else: System.delete_env(@switch)
+
+      @config_path
+      |> Config.Reader.read!(env: env)
+      |> Keyword.fetch!(:arbor_ai)
+    after
+      if prior, do: System.put_env(@switch, prior), else: System.delete_env(@switch)
+    end
   end
 end

@@ -3,8 +3,9 @@ defmodule Arbor.Cartographer.Supervisor do
   Main supervisor for Arbor.Cartographer.
 
   Supervises the core components:
-  - CapabilityRegistry - ETS-backed capability storage
+  - CapabilityRegistry - ETS-backed capability storage (always started)
   - Scout - Hardware introspection and capability registration
+  - ClusterKeeper - Auto-reconnection of known cluster nodes
 
   ## Supervision Strategy
 
@@ -17,6 +18,10 @@ defmodule Arbor.Cartographer.Supervisor do
   - `:introspection_interval` - Passed to Scout
   - `:load_update_interval` - Passed to Scout
   - `:custom_tags` - Passed to Scout
+  - `:scout_enabled` - Start Scout (default: `config :arbor_cartographer,
+    scout_enabled:`, else `true`)
+  - `:cluster_keeper_enabled` - Start ClusterKeeper (default:
+    `config :arbor_cartographer, cluster_keeper_enabled:`, else `true`)
   """
 
   use Supervisor
@@ -46,18 +51,33 @@ defmodule Arbor.Cartographer.Supervisor do
       opts
       |> Keyword.take([:reconnect_interval])
 
-    children = [
-      # Registry must start first - Scout depends on it
-      {Arbor.Cartographer.CapabilityRegistry, []},
-
-      # Scout for hardware introspection
-      {Arbor.Cartographer.Scout, scout_opts},
-
-      # ClusterKeeper for auto-reconnection of known nodes
-      {Arbor.Cartographer.ClusterKeeper, cluster_keeper_opts}
-    ]
+    # Scout and ClusterKeeper do periodic work (hardware scans, node redials)
+    # that only matters on a cluster, so a single-node install can switch them
+    # off. The facade's Scout-backed calls fall back to on-demand detection.
+    children =
+      [
+        # Registry must start first - Scout depends on it
+        {Arbor.Cartographer.CapabilityRegistry, []}
+      ] ++
+        if(enabled?(opts, :scout_enabled),
+          # Scout for hardware introspection
+          do: [{Arbor.Cartographer.Scout, scout_opts}],
+          else: []
+        ) ++
+        if(enabled?(opts, :cluster_keeper_enabled),
+          # ClusterKeeper for auto-reconnection of known nodes
+          do: [{Arbor.Cartographer.ClusterKeeper, cluster_keeper_opts}],
+          else: []
+        )
 
     # rest_for_one: if Registry crashes, restart Scout too
     Supervisor.init(children, strategy: :rest_for_one)
+  end
+
+  defp enabled?(opts, key) do
+    case Keyword.fetch(opts, key) do
+      {:ok, value} -> value != false
+      :error -> Application.get_env(:arbor_cartographer, key, true) != false
+    end
   end
 end

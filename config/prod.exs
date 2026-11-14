@@ -80,3 +80,19 @@ config :arbor_orchestrator, :engine_checkpoints,
   durability_class: :node_restart
 
 import_config "provider_route_profile.exs"
+
+# Prod keeps the model pins that config.exs carried before dev switched to
+# newcomer defaults (2026-11-13): the context summarizer on Anthropic Haiku and
+# Claude Code over ACP on Opus. Dev follows the doctor's provider instead; the
+# ARBOR_SUMMARIZER_* and ARBOR_ACP_CLAUDE_MODEL runtime variables override both.
+config :arbor_agent,
+  summarizer_model: "claude-haiku",
+  summarizer_provider: :anthropic
+
+config :arbor_ai, :acp_providers, %{
+  claude: %{
+    transport_mod: ExMCP.ACP.AdapterTransport,
+    adapter: ExMCP.ACP.Adapters.ClaudeSDK,
+    adapter_opts: [model: "opus", permission_mode: :default]
+  }
+}
