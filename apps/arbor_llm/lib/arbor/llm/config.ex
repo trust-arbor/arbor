@@ -9,6 +9,15 @@ defmodule Arbor.LLM.Config do
   def tool_invocation_auditor,
     do: Application.get_env(:arbor_llm, :tool_invocation_auditor, @default_auditor)
 
+  @doc """
+  Whether send-capable tools are refused after untrusted/external tool results.
+
+  **DEFAULT CHANGE (2026-10-29):** on. Opt out with
+  `config :arbor_llm, :strict_taint_send_gate, false`.
+  """
+  def strict_taint_send_gate?,
+    do: Application.get_env(:arbor_llm, :strict_taint_send_gate, true) == true
+
   def sensitivity_policy,
     do: Application.get_env(:arbor_llm, :sensitivity_policy, Module.concat(["Arbor", "AI"]))
 
