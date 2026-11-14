@@ -5,10 +5,10 @@
   "source_captured_on": "2026-08-03",
   "admission_cutover": "2026-10-16",
   "archive_root": ".claude/applied-learning-archive",
-  "entry_count": 811,
+  "entry_count": 813,
   "always_loaded_count": 12,
   "original_entry_count": 461,
-  "post_migration_entry_count": 350,
+  "post_migration_entry_count": 352,
   "entries": [
     {
       "source_ordinal": 1,
@@ -16730,6 +16730,50 @@
       "last_confirmed": "2026-11-08",
       "confirmed_by": "session-2026-11-08",
       "content_sha256": "271bf862ce659fd462ec29ac100d2fd97dede756a600e885559eb933d9c4299e",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 817,
+      "source_kind": "post-migration",
+      "slug": "security-fixtures-must-hold-only-what-production-grants",
+      "title": "Security fixtures must hold only the authority production actually grants.",
+      "topic": "testing-live-runtime",
+      "class": "process",
+      "status": "live",
+      "destination": ".claude/skills/applied-learning-testing-live-runtime-evidence.md",
+      "anchor": "applied-learning-security-fixtures-must-hold-only-what-production-grants",
+      "created": "2026-11-14",
+      "source_session": "claude-code:0a9fe369-6be1-4874-8522-894b53716d5c",
+      "source_incident": "found 2026-11-14: the P5 turn-egress suite granted security/grant/<agent>, hiding that production never granted the right to mint the per-turn disclosure capability",
+      "scope": [
+        "apps/arbor_orchestrator/test/arbor/orchestrator/session_turn_egress_p5_security_regression_test.exs",
+        "Arbor.Agent.Lifecycle.create/2"
+      ],
+      "last_confirmed": "2026-11-14",
+      "confirmed_by": "session-2026-11-14",
+      "content_sha256": "bf3465e75e940bcaddd85b1a32b60890292d1bafdc1dd2ffb474607b8cf4feac",
+      "always_loaded": false
+    },
+    {
+      "source_ordinal": 818,
+      "source_kind": "post-migration",
+      "slug": "a-probe-that-never-reached-the-model-is-not-a-model-verdict",
+      "title": "A probe that never reached the model is not a model verdict.",
+      "topic": "providers-oauth",
+      "class": "correctness",
+      "status": "live",
+      "destination": ".claude/skills/applied-learning-providers-oauth.md",
+      "anchor": "applied-learning-a-probe-that-never-reached-the-model-is-not-a-model-verdict",
+      "created": "2026-11-14",
+      "source_session": "claude-code:0a9fe369-6be1-4874-8522-894b53716d5c",
+      "source_incident": "found 2026-11-14: the OpenCode Zen admission probe recorded 429 FreeUsageLimitError as a failed tool call, permanently rejecting models",
+      "scope": [
+        "Arbor.Agent.Eval.OpencodeZenLive",
+        "apps/arbor_llm/priv/opencode_zen/admission.json"
+      ],
+      "last_confirmed": "2026-11-14",
+      "confirmed_by": "session-2026-11-14",
+      "content_sha256": "2981af64c86a7652f608f79c6e2993fa283a6984804f90a9c1ed7398fa77c589",
       "always_loaded": false
     }
   ]
