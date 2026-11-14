@@ -1127,10 +1127,16 @@ defmodule Arbor.Security.SigningAuthorityBroker do
 
   # Decision 2026-10-08 D2. The checks that need no proof run first (the
   # request covers exactly the expected payload, a human principal, an active
-  # identity, a server-held key), so an ineligible request is refused without
-  # consuming its nonce. Then the inbound verifier (cluster replay gate,
-  # freshness, registered key, signature, single-use nonce) runs exactly once,
-  # here, and the authority is bound to the calling process.
+  # identity, a usable key source), so an ineligible request is refused
+  # without consuming its nonce. Then the inbound verifier (cluster replay
+  # gate, freshness, registered key, signature, single-use nonce) runs exactly
+  # once, here, and the authority is bound to the calling process.
+  #
+  # A human whose key only the caller holds (the local operator from
+  # `mix arbor.user.init`) gets a `:caller_held` authority. It is opened by the
+  # same verified request against the same registered key, but it carries no
+  # private key: it can stand as an owner-bound actor for one lifecycle
+  # operation and refuses every signing operation.
   defp handle_authenticated_call(
          {:open_agent_lifecycle_request, request, expected_payload},
          caller_pid,
@@ -1141,7 +1147,7 @@ defmodule Arbor.Security.SigningAuthorityBroker do
          :ok <- require_human_principal(request.agent_id),
          :ok <- ensure_owner_alive(caller_pid),
          :ok <- ensure_identity_active(request.agent_id),
-         :ok <- ensure_signing_key_present(request.agent_id),
+         {:ok, key_source} <- lifecycle_key_source(request.agent_id),
          {:ok, verified_principal_id} <- verify_inbound_request(request),
          :ok <- match_claimed_principal(verified_principal_id, request.agent_id),
          :ok <- ensure_identity_active(verified_principal_id),
@@ -1152,9 +1158,11 @@ defmodule Arbor.Security.SigningAuthorityBroker do
         owner_pid: caller_pid
       }
 
-      state
-      |> create_authority(bound, caller_pid, :persistent, nil)
-      |> commit_persistent_result()
+      result = create_authority(state, bound, caller_pid, key_source, nil)
+
+      # Only persistent authorities survive a broker restart; a caller-held
+      # one is lost with it and the operation fails closed.
+      if key_source == :persistent, do: commit_persistent_result(result), else: result
     else
       {:error, _} = error -> {:reply, error, state}
       _ -> {:reply, {:error, :invalid_signed_request}, state}
@@ -2049,6 +2057,10 @@ defmodule Arbor.Security.SigningAuthorityBroker do
     load_validated_persistent_key(principal_id)
   end
 
+  # The principal's key exists only in its holder's key file.
+  defp private_key_for(%{key_source: :caller_held}, _token, _state),
+    do: {:error, :caller_held_authority}
+
   defp private_key_for(%{key_source: key_source} = entry, token, state) do
     if ephemeral_key_source?(key_source) do
       aad = ephemeral_aad(entry.principal_id, entry.purpose, token)
@@ -2728,6 +2740,17 @@ defmodule Arbor.Security.SigningAuthorityBroker do
     end
   end
 
+  # A server-held key that is present must also be valid; only its absence
+  # selects a caller-held authority. A mismatched or unreadable key fails
+  # closed rather than silently dropping to a keyless authority.
+  defp lifecycle_key_source(principal_id) do
+    case load_validated_persistent_key(principal_id) do
+      {:ok, _private_key} -> {:ok, :persistent}
+      {:error, :no_signing_key} -> {:ok, :caller_held}
+      {:error, _} = error -> error
+    end
+  end
+
   defp load_private_key(principal_id) do
     try do
       case SigningKeyStore.get(principal_id) do
@@ -3153,6 +3176,7 @@ defmodule Arbor.Security.SigningAuthorityBroker do
   end
 
   defp key_source_name(:persistent), do: :persistent
+  defp key_source_name(:caller_held), do: :caller_held
   defp key_source_name(key_source) when is_map(key_source), do: Map.get(key_source, :kind)
 
   defp ephemeral_key_source?(%{

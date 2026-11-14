@@ -1160,15 +1160,41 @@ Read this when changing capabilities, trust, authorization, identity, URI matchi
   {:active_run_lease_lookup_failed, :recovery_in_progress}}}`. The helper now
   binds a starting app's root through `Arbor.Common.starting_application_root/3`
   (the spawn-parent chain from §34).
-- **Genesis cannot write the operator key file (OPEN, 2026-10-10):**
+- **Genesis cannot write the operator key file (fixed 2026-11-13):**
   since `ddf05e470`, `IdentityStore.create_new/2` returns
-  `Identity.public_only/1`. `mix arbor.user.init` creates the human identity
-  but fails with `Failed to write operator key file ...: identity did not
-  include a private key` (or `:missing_private_key`). Without a key file there
-  is no genesis, so no administrator, so nothing can be provisioned (scheduler,
-  Trust grant owner). Genesis tests use fixtures and never ran the CLI path.
-  **Action:** pending a decision on how a locally created operator obtains its
-  key (e.g. CLI-generated keypair with only the public part registered).
+  `Identity.public_only/1`, so `mix arbor.user.init` failed with `Failed to
+  write operator key file ...: identity did not include a private key`, and
+  without a key file there was no genesis. `mix arbor.user.init` now generates
+  the Ed25519 keypair in the CLI process, writes `operator.key` itself, and
+  registers only the public key with a possession proof
+  (`Arbor.Security.register_local_human_identity/3`). The server holds no
+  private key for this identity. **Symptoms now:** `already exists, but its
+  key file is missing` means the identity was registered by a build that kept
+  the key server-side (2026-10-07 to 2026-11-13), or the file was lost. The
+  task never mints a second key. **Action:** restore the file or pass
+  `--key-file`; on a disposable dev store, move `.arbor/security` aside (see
+  the `:offline_migration_required` entry above) and re-run.
+  `does not match the registered identity` means the file holds a different
+  key than the one registered; identities are never re-keyed here.
+- **Caller-held local operators have no server-held key (2026-11-13):**
+  the `mix arbor.user.init` identity's key lives only in its key file.
+  Lifecycle authorities for such a human are *caller-held*:
+  `verify_request_and_open_agent_lifecycle_authority/2` verifies the request
+  against the registered key and opens an owner-bound authority with no key.
+  It works as the actor of security mutations and of `ProfileAuthorityOwner`
+  key operations (authorized by owner binding, not by a signature), but every
+  `sign*` call returns `{:error, :caller_held_authority}`. So `mix arbor.agent
+  start`/`resume` work (the CLI signs `Arbor.Agent.lifecycle_request_payload/2`
+  and the server runs `submit_signed_lifecycle_request/4`), and so does the
+  gateway's signed `POST /api/chat/agents/:id/start`. **Still fails closed:**
+  gateway `POST /api/chat/agents` (create runs in `Chat.LifecycleAuthority`
+  from the stored key → 403 `:capability_mutation_unauthorized`); channel
+  membership via `ChannelAuthorityBroker` (no X25519 key registered); the
+  dashboard conversation page (local-dev session has no `session_token`).
+  `create_local_human_identity/1` refuses this identity with
+  `:local_human_key_held_by_caller` rather than minting a second keypair.
+  **Action:** sign client-side from the key file and submit the proof; do not
+  add a path that copies the operator's private key into the server.
 - **Local genesis is refused while OIDC is configured:** with `OIDC_ISSUER`
   and `OIDC_CLIENT_ID` set (for example in `.env`), `mix arbor.user.init`
   stops with "An OIDC provider is configured". This is by design (D1); OIDC

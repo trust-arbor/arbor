@@ -130,7 +130,7 @@ defmodule Arbor.Security.AgentLifecycleRequestAuthoritySecurityRegressionTest do
     assert agent_id == agent.agent_id
   end
 
-  test "security regression: suspended, revoked, unknown or keyless humans open nothing" do
+  test "security regression: suspended, revoked or unknown humans open nothing; a keyless one cannot sign" do
     suspended = registered_human_with_key!()
     assert :ok = Security.suspend_identity_fixture(suspended.agent_id, "lifecycle probe")
     request = sign!(suspended, @payload)
@@ -156,13 +156,24 @@ defmodule Arbor.Security.AgentLifecycleRequestAuthoritySecurityRegressionTest do
                @payload
              )
 
+    # A human whose key the server does not hold (the local operator from
+    # `mix arbor.user.init` keeps it in its key file) used to open nothing. It
+    # now opens a caller-held authority: same verification, owner-bound, and
+    # unable to sign as the human.
     keyless = registered_human!()
 
-    assert {:error, _no_key} =
+    assert {:ok, principal, authority} =
              Security.verify_request_and_open_agent_lifecycle_authority(
                sign!(keyless, @payload),
                @payload
              )
+
+    assert principal == keyless.agent_id
+
+    assert {:error, :caller_held_authority} =
+             Security.sign_with_authority(authority, "arbor://fs/read/keyless")
+
+    assert :ok = Security.close_signing_authority(authority)
   end
 
   test "security regression: malformed proofs and payloads are refused", %{human: human} do

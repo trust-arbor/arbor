@@ -118,6 +118,8 @@ defmodule Arbor.Security do
   alias Arbor.Security.IssuerRegistry
   alias Arbor.Security.Keychain
   alias Arbor.Security.KeyFile
+  alias Arbor.Security.LocalHumanRegistration
+  alias Arbor.Security.OIDC.IdentityStore
   alias Arbor.Security.Reflex
   alias Arbor.Security.RevocationFence
   alias Arbor.Security.SigningAuthorityBroker
@@ -3545,7 +3547,7 @@ defmodule Arbor.Security do
   """
   @spec local_human_principal_id(keyword()) :: String.t()
   def local_human_principal_id(opts \\ []) do
-    Arbor.Security.OIDC.IdentityStore.derive_agent_id(local_human_claims(opts))
+    IdentityStore.derive_agent_id(local_human_claims(opts))
   end
 
   @doc """
@@ -3575,32 +3577,146 @@ defmodule Arbor.Security do
   grants under; later OIDC logins derive their own id and are folded onto it
   with `mix arbor.user.link`.
 
+  The returned identity is public-only: the server-held private key is never
+  returned (security review F-002). `mix arbor.user.init` therefore does not
+  use this function; it generates the operator's key itself and calls
+  `register_local_human_identity/3`. An identity registered that way has no
+  server-held key, so this function refuses it with
+  `:local_human_key_held_by_caller` instead of minting a second keypair
+  under the same id.
+
   Returns `{:ok, identity, :created | :existing}`.
   """
   @spec create_local_human_identity(keyword()) ::
           {:ok, Identity.t(), :created | :existing} | {:error, atom()}
   def create_local_human_identity(opts \\ []) do
+    claims = local_human_claims(opts)
+
     with :ok <- admit_local_human_identity(),
+         :ok <- refuse_caller_held_local_human(claims),
          {:ok, identity, status} <-
-           Arbor.Security.OIDC.IdentityStore.load_or_create_local(local_human_claims(opts)),
+           IdentityStore.load_or_create_local(claims),
          :ok <- ensure_local_human_registered(identity) do
       {:ok, identity, status}
     end
   end
 
+  # A registered local human without a server-held key was registered from a
+  # caller-held key. Loading would find no keypair and mint a new one under
+  # the same id, which would not match the registered public key.
+  defp refuse_caller_held_local_human(claims) do
+    principal_id = IdentityStore.derive_agent_id(claims)
+
+    if Registry.registered?(principal_id) do
+      case SigningKeyStore.status(principal_id) do
+        {:ok, :available} -> :ok
+        {:error, :no_signing_key} -> {:error, :local_human_key_held_by_caller}
+        {:error, reason} -> {:error, reason}
+      end
+    else
+      :ok
+    end
+  catch
+    :exit, _ -> {:error, :registry_unavailable}
+  end
+
   # `load_or_create/1` stores the keypair but never registers the identity —
   # `AuthDecision` resolves every principal through `identity_status/1`, so an
   # unregistered identity holds capabilities it can never exercise. Registering
-  # is idempotent here: an already-registered identity is success, not an error.
+  # is idempotent here: an already-registered identity with the same key is
+  # success, not an error. A different registered key is never accepted.
   defp ensure_local_human_registered(identity) do
-    case Registry.register_local_human(Identity.public_only(identity)) do
-      :ok -> :ok
-      {:error, {:already_registered, _id}} -> :ok
+    case LocalHumanRegistration.register(Identity.public_only(identity)) do
+      {:ok, _identity, _status} -> :ok
       {:error, reason} -> {:error, reason}
     end
   end
 
   defp admit_local_human_identity, do: Config.admit_local_human_identity()
+
+  @doc """
+  Where the local operator stands, for `mix arbor.user.init`.
+
+  Gated like `create_local_human_identity/1`. Returns the derived
+  `principal_id` and its registered Ed25519 `public_key`, or `nil` when it is
+  not registered yet. Both values are public. The CLI uses this to decide
+  whether to generate a key, and to refuse a key file that does not match
+  before it sends anything.
+  """
+  @spec local_human_identity_status(keyword()) ::
+          {:ok, %{principal_id: String.t(), public_key: binary() | nil}} | {:error, term()}
+  def local_human_identity_status(opts \\ []) when is_list(opts) do
+    principal_id = local_human_principal_id(opts)
+
+    with :ok <- admit_local_human_identity(),
+         {:ok, public_key} <- LocalHumanRegistration.registered_public_key(principal_id) do
+      {:ok, %{principal_id: principal_id, public_key: public_key}}
+    end
+  end
+
+  @doc """
+  Register the local operator from a key the caller generated and holds.
+
+  This is how `mix arbor.user.init` creates the local human identity. The CLI
+  generates the Ed25519 keypair in its own process and writes the private key
+  to its key file. It sends only `public_key` and a `SignedRequest` over
+  `local_human_registration_request_payload/2`, built with
+  `prepare_key_file_local_human_registration/1`. The private key never
+  reaches the server, so the server holds no key for this principal.
+
+  Gated exactly like `create_local_human_identity/1`
+  (`allow_local_human_identity: true`, no OIDC provider configured); the
+  gate is checked before the proof, so a disabled install never consumes the
+  caller's nonce. The principal is derived on the server from the same local
+  claims (`opts` may name `:user`, `:host` and `:name`), and the proof must:
+
+    * claim that principal, in the envelope and in the payload;
+    * sign the fixed local-human registration purpose and exactly
+      `public_key`;
+    * verify with `public_key`, carry a fresh timestamp and an unused
+      nonce, and pass the cluster replay gate.
+
+  Every proof failure returns `{:error, :local_human_registration_unauthorized}`.
+
+  The identity is registered with no encryption key: none could be held for
+  it. Re-registering the same public key is idempotent and returns
+  `:existing`. A registered principal with a different key is refused with
+  `:local_human_key_mismatch`; this never re-keys an identity.
+
+  Returns `{:ok, public_identity, :created | :existing}`.
+  """
+  @spec register_local_human_identity(binary(), SignedRequest.t(), keyword()) ::
+          {:ok, Identity.t(), :created | :existing} | {:error, term()}
+  def register_local_human_identity(public_key, proof, opts \\ [])
+
+  def register_local_human_identity(public_key, %SignedRequest{} = proof, opts)
+      when is_binary(public_key) and is_list(opts) do
+    claims = local_human_claims(opts)
+    principal_id = IdentityStore.derive_agent_id(claims)
+
+    with :ok <- admit_local_human_identity(),
+         :ok <- LocalHumanRegistration.verify(principal_id, public_key, proof),
+         {:ok, identity} <-
+           IdentityStore.caller_held_identity(claims, public_key) do
+      LocalHumanRegistration.register(identity)
+    end
+  end
+
+  def register_local_human_identity(_public_key, _proof, _opts),
+    do: {:error, :local_human_registration_unauthorized}
+
+  @doc """
+  Exact payload the local operator signs for `register_local_human_identity/3`.
+
+  Pure; safe to call in an offline CLI process. Length-prefixed version tag,
+  the fixed local-human registration resource, the principal and the raw
+  32-byte Ed25519 public key.
+  """
+  @spec local_human_registration_request_payload(String.t(), binary()) ::
+          {:ok, binary()} | {:error, :local_human_registration_unauthorized}
+  defdelegate local_human_registration_request_payload(principal_id, public_key),
+    to: LocalHumanRegistration,
+    as: :request_payload
 
   @doc """
   Complete first-run local genesis: give the local operator the install's
@@ -5476,6 +5592,32 @@ defmodule Arbor.Security do
 
   def prepare_key_file_local_genesis(_io_device), do: {:error, :genesis_unauthorized}
 
+  @doc """
+  Build the local operator's registration proof in an offline CLI process.
+
+  The caller opens its key file and passes the handle; this facade never
+  opens a caller-nominated path. Returns the principal recorded in the key
+  file, the Ed25519 public key derived from its private key, and a
+  `SignedRequest` over `local_human_registration_request_payload/2`. Submit
+  the public key and the proof with `register_local_human_identity/3`. The
+  private key is not returned.
+  """
+  @spec prepare_key_file_local_human_registration(term()) ::
+          {:ok, String.t(), binary(), SignedRequest.t()} | {:error, term()}
+  def prepare_key_file_local_human_registration(io_device) when not is_binary(io_device) do
+    with {:ok, %{agent_id: principal_id, private_key: private_key}} <-
+           KeyFile.read_device(io_device),
+         {:ok, public_key} <- LocalHumanRegistration.public_key(private_key),
+         {:ok, payload} <-
+           LocalHumanRegistration.request_payload(principal_id, public_key),
+         {:ok, proof} <- SignedRequest.sign(payload, principal_id, private_key) do
+      {:ok, principal_id, public_key, proof}
+    end
+  end
+
+  def prepare_key_file_local_human_registration(_io_device),
+    do: {:error, :local_human_registration_unauthorized}
+
   @doc "Submit a capability and its exact one-use actor proof to the authority boundary."
   @spec submit_signed_capability_grant(Capability.t(), SignedRequest.t()) ::
           {:ok, Capability.t()} | {:error, term()}
@@ -5962,8 +6104,9 @@ defmodule Arbor.Security do
     * the request must sign exactly `expected_payload`, the bytes of the one
       lifecycle request the caller is about to perform (for the Gateway, the
       `method\\npath\\nbody` it serves), and its claimed principal must be a
-      `human_` principal whose identity is `:active` and whose signing key the
-      server holds. These are checked before the nonce is consumed;
+      `human_` principal whose identity is `:active`. A server-held signing
+      key, if present, must be valid. These are checked before the nonce is
+      consumed;
     * the request is verified by the inbound verifier (cluster replay gate,
       timestamp freshness, registered key, Ed25519 signature, single-use
       nonce), and the verified principal must equal the claimed one;
@@ -5976,9 +6119,16 @@ defmodule Arbor.Security do
   lifecycle resource and action stays with the operation's facade (e.g.
   `Arbor.Agent.authorize_create/3`, `Arbor.Agent.authorize_start/3`).
 
+  When the server holds no key for the principal (the local operator from
+  `mix arbor.user.init` keeps its key in its own key file), the authority is
+  *caller-held*: verified the same way against the registered key, bound to
+  the calling process, accepted wherever an owner-bound actor authority is
+  checked, but it carries no key. Every signing operation on it returns
+  `{:error, :caller_held_authority}`.
+
   Returns `{:ok, principal_id, authority}`. Errors include
   `:payload_mismatch`, `:human_principal_required`, `:identity_suspended`,
-  `:identity_revoked`, `:identity_not_found`, `:no_signing_key`,
+  `:identity_revoked`, `:identity_not_found`, `:signing_key_mismatch`,
   `:replayed_nonce`, `:invalid_signature`, `:expired_timestamp`,
   `:principal_mismatch`, `:cluster_replay_protection_unavailable` and
   `:broker_unavailable`.
@@ -6402,7 +6552,7 @@ defmodule Arbor.Security do
     @doc false
     @spec derive_oidc_principal_id_fixture(map()) :: String.t()
     def derive_oidc_principal_id_fixture(claims),
-      do: Arbor.Security.OIDC.IdentityStore.derive_agent_id(claims)
+      do: IdentityStore.derive_agent_id(claims)
 
     @doc false
     @spec restore_runtime_fixture() :: :ok | :skipped
@@ -6439,7 +6589,7 @@ defmodule Arbor.Security do
     @spec load_or_create_oidc_identity_fixture(map()) ::
             {:ok, Identity.t(), :existing | :created} | {:error, term()}
     def load_or_create_oidc_identity_fixture(claims),
-      do: Arbor.Security.OIDC.IdentityStore.load_or_create_fixture(claims)
+      do: IdentityStore.load_or_create_fixture(claims)
   end
 
   @doc """

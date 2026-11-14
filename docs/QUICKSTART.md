@@ -292,9 +292,11 @@ A half-started server may still be running after a failure. Stop it with
 ./bin/mix arbor.user.init
 ```
 
-Creates your **human** principal — the account agents and grants belong to —
-with a real Ed25519 + X25519 keypair, and writes `~/.arbor/operator.key` so the
-CLI can prove it is you.
+Creates your **human** principal — the account agents and grants belong to.
+The task generates an Ed25519 keypair on your machine and writes the private key
+to `~/.arbor/operator.key` (mode `0600`) so the CLI can prove it is you. Only
+the public key is registered with the server, which never holds your private
+key. Keep the file: it is the only copy.
 
 On a fresh install it also completes **genesis**: every grant needs an actor
 that already holds a matching capability, so nothing can be granted until a
@@ -305,10 +307,14 @@ nothing. Run it before configuring an identity provider — genesis is refused
 once one is configured.
 
 The id is **deterministic**: it is a hash of `arbor://local` plus
-`<os-username>@<hostname>`. Re-running the command loads the same identity
-instead of minting a second one — but that also means a different OS user, a
-renamed host, or an Arbor installation moved to another machine derives a
-*different* id. Your grants and agents belong to the old one. Keep the key file,
+`<os-username>@<hostname>`. Re-running the command with the same key file loads
+the same identity instead of minting a second one. If the identity exists but
+its key file is missing, the task stops instead of generating a second key:
+restore the file, or pass `--key-file PATH`.
+
+Because the id comes from the user and host, a different OS user, a renamed
+host, or an Arbor installation moved to another machine derives a *different*
+id. Your grants and agents belong to the old one. Keep the key file,
 and if you do move, fold the new id onto the original one:
 
 ```bash
@@ -350,7 +356,13 @@ jobs; the maintainer's daily pipelines stay off unless
 ./bin/mix arbor.agent chat river "Hello — what should we talk about?"
 ```
 
-Or open `http://localhost:4001/chat` and talk to the agent there.
+`start` and `chat` sign with `~/.arbor/operator.key` from §5 (pass
+`--key-file PATH` if yours is elsewhere). Only the signed request reaches the
+server; the private key stays in the file.
+
+The dashboard's conversation page (`http://localhost:4001`) needs a signed-in
+session, which the local operator from §5 does not have yet, so talk to the
+agent through the CLI.
 
 On the free tier the first reply can take 20–60 s, because it is a shared free
 service. Through an ACP agent such as Claude Code it took 15–30 s in our runs.

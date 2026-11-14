@@ -239,11 +239,17 @@ defmodule Arbor.Gateway.Chat.LifecycleAuthoritySecurityRegressionTest do
       # runs. A non-human therefore never reaches authorize_create.
       refute_received {:lifecycle_authority, :create, _}
 
+      # A human whose key the server does not hold now authenticates: the
+      # verified request opens a caller-held authority. Create still runs in
+      # Chat.LifecycleAuthority from the stored key, so it refuses with 403
+      # (it used to be an unauthenticated 401) and creates nothing.
       keyless = registered_human!()
 
       grant_all!(keyless.agent_id, ["arbor://agent/lifecycle/create" | @create_mutation_resources])
 
-      assert request(keyless, "POST", "/api/chat/agents", body).status == 401
+      refused = request(keyless, "POST", "/api/chat/agents", body)
+      assert refused.status == 403
+      assert Jason.decode!(refused.resp_body)["error"] =~ "capability_mutation_unauthorized"
 
       assert agent_ids() == before
     end
@@ -293,6 +299,23 @@ defmodule Arbor.Gateway.Chat.LifecycleAuthoritySecurityRegressionTest do
       assert :ok = Agents.stop(agent_id)
       assert raw_request("POST", path, "{}", header).status == 401
       assert BranchSupervisor.whereis(agent_id) == nil
+    end
+
+    test "a human whose key the server does not hold starts the agent with a caller-held authority",
+         ctx do
+      agent_id = create_stopped!(ctx.actor, ctx.principal)
+      keyless = registered_human!()
+      grant_all!(keyless.agent_id, ["arbor://agent/lifecycle/start/" <> agent_id])
+      assert {:error, :no_signing_key} = Security.signing_key_status(keyless.agent_id)
+
+      conn = request(keyless, "POST", start_path(agent_id), %{})
+
+      assert conn.status == 200, conn.resp_body
+      assert is_pid(BranchSupervisor.whereis(agent_id))
+      assert_received {:lifecycle_authority, :start, authority}
+      assert authority.principal_id == keyless.agent_id
+      # Closed once the request completed.
+      assert {:error, _} = Security.signing_authority_principal(authority)
     end
 
     test "security regression: a non-human signer starts nothing", ctx do

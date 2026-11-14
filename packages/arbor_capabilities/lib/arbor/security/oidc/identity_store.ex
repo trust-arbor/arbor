@@ -92,6 +92,29 @@ defmodule Arbor.Security.OIDC.IdentityStore do
 
   def load_or_create_verified(_claims), do: {:error, :invalid_oidc_identity_request}
 
+  @doc false
+  # Public-only identity for a key the caller generated and holds. Same id
+  # derivation, name and metadata as `create_new/2`, so the registry's
+  # derivation check accepts it; there is no private key to store.
+  @spec caller_held_identity(map(), binary()) :: {:ok, Identity.t()} | {:error, term()}
+  def caller_held_identity(claims, public_key)
+      when is_map(claims) and is_binary(public_key) and byte_size(public_key) == 32 do
+    agent_id = derive_agent_id(claims)
+
+    case Identity.new(
+           public_key: public_key,
+           name: extract_name(claims),
+           metadata: build_metadata(claims)
+         ) do
+      {:ok, identity} -> {:ok, identity |> Map.put(:agent_id, agent_id) |> Identity.public_only()}
+      {:error, reason} -> {:error, reason}
+    end
+  rescue
+    _ -> {:error, :invalid_identity}
+  end
+
+  def caller_held_identity(_claims, _public_key), do: {:error, :invalid_identity}
+
   if Mix.env() == :test do
     @doc false
     def load_or_create_fixture(claims) when is_map(claims),
