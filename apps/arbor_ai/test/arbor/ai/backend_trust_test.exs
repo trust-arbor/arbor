@@ -173,6 +173,18 @@ defmodule Arbor.AI.BackendTrustTest do
       refute BackendTrust.can_see?(:openai, :restricted)
     end
 
+    # The OpenCode Zen disclosure a user acknowledges covers prompts, file
+    # contents and command output and excludes sensitive data. Without
+    # :internal, a chat turn naming the working directory could never use the
+    # keyless default (found 2026-11-14); above :internal stays refused.
+    test "opencode_zen free tier sees up to internal and never confidential data" do
+      assert BackendTrust.can_see?(:opencode_zen, :public)
+      assert BackendTrust.can_see?(:opencode_zen, :internal)
+      refute BackendTrust.can_see?(:opencode_zen, :confidential)
+      refute BackendTrust.can_see?(:opencode_zen, :restricted)
+      assert BackendTrust.data_capabilities(:opencode_zen) == [:public, :internal]
+    end
+
     test "qwen can only see public" do
       assert BackendTrust.can_see?(:qwen, :public)
       refute BackendTrust.can_see?(:qwen, :internal)

@@ -368,6 +368,17 @@ On the free tier the first reply can take 20–60 s, because it is a shared free
 service. Through an ACP agent such as Claude Code it took 15–30 s in our runs.
 `chat` exits non-zero and prints the server log path if the turn fails.
 
+If `chat` prints `Chat failed: :delivery_failed`, search that log for
+`[LlmHandler]` and `[Session] turn refused`:
+
+- `HTTP 429: Free usage limit reached` — OpenCode refused the request. It limits
+  the free tier, and in our tests from one network on 2026-11-14 every free model
+  answered 429. Arbor cannot raise that limit. Wait and retry, or rerun
+  `./bin/mix arbor.doctor --configure` with an API key or a local model (§3).
+- `cannot handle internal data; rerouted` — the prompt held something the
+  chosen provider may not see (for example a path or an IP address), and
+  Arbor refused to send it. Pick a provider that may (§3).
+
 If a turn through an ACP agent fails and the server log shows
 `OAuth session expired and could not be refreshed`, the CLI's login has
 lapsed — open the CLI and `/login` again. Arbor never stores or refreshes those

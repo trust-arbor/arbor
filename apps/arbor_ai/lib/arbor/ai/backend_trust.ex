@@ -239,6 +239,12 @@ defmodule Arbor.AI.BackendTrust do
     ollama: [:public, :internal, :confidential, :restricted],
     anthropic: [:public, :internal, :confidential],
     opencode: [:public, :internal, :confidential],
+    # The keyless free tier. Its data-disclosure acknowledgement (arbor.doctor)
+    # says prompts, file contents and command output are sent to OpenCode and
+    # rules out sensitive, confidential or regulated data — so :internal, no
+    # more. Without :internal, any turn whose system prompt names the working
+    # directory (/Users/<you>/..., /home/<you>/...) could never use it.
+    opencode_zen: [:public, :internal],
     openai: [:public, :internal],
     gemini: [:public, :internal],
     qwen: [:public],

@@ -394,6 +394,9 @@ config :arbor_ai,
     lmstudio: %{default: [:public, :internal, :confidential, :restricted], models: %{}},
     anthropic: %{default: [:public, :internal, :confidential], models: %{}},
     opencode: %{default: [:public, :internal, :confidential], models: %{}},
+    # Keyless free tier: its acknowledged disclosure covers prompts, file
+    # contents and command output, and excludes sensitive data (BackendTrust).
+    opencode_zen: %{default: [:public, :internal], models: %{}},
     openai: %{default: [:public, :internal], models: %{}},
     gemini: %{default: [:public, :internal], models: %{}},
     openrouter: %{
