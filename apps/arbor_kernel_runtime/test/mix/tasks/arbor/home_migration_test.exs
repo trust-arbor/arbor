@@ -12,6 +12,7 @@ defmodule Mix.Tasks.Arbor.HomeMigrationTest do
   alias Mix.Tasks.Arbor.Home.Migrate
   alias Mix.Tasks.Arbor.HomeMigration
   alias Mix.Tasks.Arbor.HomeMigrationCore, as: Core
+  alias Mix.Tasks.Arbor.Start
 
   # Noon UTC keeps the local calendar date on 2026-02-14 in any common zone.
   @feb_utc {{2026, 2, 14}, {12, 0, 0}}
@@ -183,5 +184,13 @@ defmodule Mix.Tasks.Arbor.HomeMigrationTest do
   test "no legacy tree means nothing to do", %{home: home} do
     Migrate.run(["--arbor-home", home])
     assert shell_output() =~ "Nothing to do"
+  end
+
+  test "mix arbor.start refuses to launch over unmigrated state", %{home: home} do
+    assert :ok = Start.refuse_on_legacy_home_state!(home)
+
+    owner_fixture(home)
+    assert catch_exit(Start.refuse_on_legacy_home_state!(home)) == {:shutdown, 1}
+    assert shell_output() =~ "mix arbor.home.migrate --apply"
   end
 end

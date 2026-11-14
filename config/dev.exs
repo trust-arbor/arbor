@@ -109,18 +109,9 @@ else
     engine: Oban.Engines.Lite,
     notifier: Oban.Notifiers.PG
 
-  # Resolve the default from the HOME environment variable, never `~`. The dev
-  # daemon boots under a private cookie HOME, and bin/arbor-runtime-home-bootstrap.exs
-  # restores the operator HOME only in the environment: `Path.expand("~")` and
-  # `System.user_home!/0` keep returning the cookie directory. With `~`,
-  # `mix arbor.setup` migrated ~/.arbor/arbor_dev.db while the daemon opened an
-  # empty ~/.arbor/distribution/.arbor/arbor_dev.db and failed to boot
-  # ("no such table: records"; found 2026-11-13 by a fresh-install test).
-  operator_home = System.get_env("HOME") || System.user_home!()
-
   config :arbor_persistence_host, Arbor.Persistence.Repo,
     database:
-      System.get_env("ARBOR_SQLITE_PATH", Path.join([operator_home, ".arbor", "arbor_dev.db"]))
+      System.get_env("ARBOR_SQLITE_PATH", Path.expand("~/.arbor/arbor_dev.db"))
       |> Path.expand(),
     busy_timeout: 5_000,
     # Match the Postgres branch above. Without this every query is logged at

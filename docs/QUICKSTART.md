@@ -110,6 +110,14 @@ SQLite database at `~/.arbor/arbor_dev.db`, runs migrations, and generates your
 operator key at `~/.arbor/identity.key` (mode `0600`, never overwritten if one
 already exists).
 
+`ARBOR_COOKIE` is the Erlang distribution cookie. `mix arbor.start` copies it
+to `~/.arbor/distribution/.erlang.cookie` (directory `0700`, file `0600`); the
+daemon reads it from there, so the value never appears in the daemon's
+command line or environment. The daemon accepts no node connections until
+that cookie is in place. All other daemon state, including the security
+store (`~/.arbor/security/master.key` and the revocation ledger), lives
+directly under `~/.arbor`.
+
 That key is your **agent** identity — `agent_<hex>` — used by
 `mix arbor.signer` for signed MCP, by the software factory, and by the
 checkpoint HMAC that makes `mix arbor.pipeline.resume` work. It is not an
@@ -220,6 +228,35 @@ the caveats at the end.
 Useful afterwards: `./bin/mix arbor.status`, `./bin/mix arbor.restart`,
 `./bin/mix arbor.stop`.
 
+### Upgrading an install that ran Arbor between 2026-10-07 and 2026-11-13
+
+Daemons in that window ran with `HOME` set to the cookie directory, so they
+kept their security store and other state under
+`~/.arbor/distribution/.arbor/` instead of `~/.arbor/`. `arbor.start` refuses
+to launch while that directory exists. Move it back once:
+
+```bash
+./bin/mix arbor.stop
+```
+
+```bash
+./bin/mix arbor.home.migrate
+```
+
+The dry run prints the plan and changes nothing. Files only in the old
+location move; identical copies are dropped. When both locations hold
+different versions of a file, the old-location copy wins, because it is the
+one the daemon was using, and the current copy is kept beside it as
+`<name>.pre-home-migration-<YYYYMMDD>`. Symlinks, a file facing a directory,
+or a SQLite database present in both places block the migration until you
+resolve them by hand. When the plan looks right:
+
+```bash
+./bin/mix arbor.home.migrate --apply
+```
+
+Then start Arbor again. The cookie file stays in `~/.arbor/distribution/`.
+
 ### If the server does not start
 
 When startup fails, `arbor.start` prints the first failure from
@@ -228,6 +265,8 @@ waiting out the full timeout. Common first-run causes:
 
 - **`:session_token_secret_missing`**: set `ARBOR_SESSION_TOKEN_SECRET` in
   `.env` to at least 32 random bytes (for example `openssl rand -base64 48`).
+- **Older daemon state under `~/.arbor/distribution/.arbor`**: run
+  `mix arbor.home.migrate` (see the previous section).
 - **`:offline_migration_required`**: the security store in `.arbor/security`
   was written by an older Arbor (before 2026-10-07), and there is no migration
   tool yet. The error names the directory. To start fresh, stop Arbor, move the

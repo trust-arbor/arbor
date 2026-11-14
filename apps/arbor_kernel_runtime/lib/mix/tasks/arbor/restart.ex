@@ -44,6 +44,9 @@ defmodule Mix.Tasks.Arbor.Restart do
   end
 
   defp do_restart(args) do
+    # Refuse before stopping anything: Start would refuse after the stop and
+    # leave the operator with no daemon at all.
+    Start.refuse_on_legacy_home_state!()
     captured_host = capture_persisted_host()
 
     Mix.shell().info("Restarting Arbor server...")

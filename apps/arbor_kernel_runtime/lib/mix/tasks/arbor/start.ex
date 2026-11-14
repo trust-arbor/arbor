@@ -8,7 +8,9 @@ defmodule Mix.Tasks.Arbor.Start do
 
   The server runs in the background with:
   - Node name: `arbor_dev@localhost` (or `arbor_dev@<ip>` with ARBOR_NODE_HOST)
-  - Cookie: loaded from a private `~/.arbor/distribution/.erlang.cookie`
+  - Cookie: written from `ARBOR_COOKIE` to a private
+    `~/.arbor/distribution/.erlang.cookie`, which the daemon's bootstrap reads
+    before it opens distribution (see "Gated distribution" below)
   - Logs: `~/.arbor/logs/arbor-dev.log`
   - PID file: `~/.arbor/arbor-dev.pid`
   - Metadata: `~/.arbor/arbor-dev.meta.json` (persisted node/host/pid identity)
@@ -26,6 +28,21 @@ defmodule Mix.Tasks.Arbor.Start do
   currently detected host), start refuses rather than spawning a duplicate.
   Admission is serialized through an exclusive lifecycle lock shared with
   `mix arbor.stop` / `mix arbor.restart`.
+
+  ## Gated distribution
+
+  The daemon VM boots with the operator's real HOME, `-nocookie` and no node
+  name, so `~` paths (security keys, `.env`, workspaces) resolve under the
+  real `~/.arbor`. `bin/arbor-gated-dist-bootstrap.exs` (run with `-r` before
+  Mix) compiles the gated carrier `bin/arbor_gated_tcp_dist.erl`, validates
+  the cookie file, starts distribution, sets the cookie, and only then opens
+  the gate. Until then the carrier refuses every inbound handshake at the
+  name stage. The cookie never appears in the VM's argv or environment.
+
+  Daemons started by the 2026-10-07 launcher ran with HOME pointed at
+  `~/.arbor/distribution` and wrote their state under
+  `~/.arbor/distribution/.arbor`. Start refuses to launch while that tree
+  exists; `mix arbor.home.migrate` moves it back.
 
   ## Readiness
 
@@ -65,6 +82,7 @@ defmodule Mix.Tasks.Arbor.Start do
   import Bitwise
 
   alias Mix.Tasks.Arbor.Helpers, as: Config
+  alias Mix.Tasks.Arbor.HomeMigration
   alias Mix.Tasks.Arbor.LifecycleIdentity
   alias Mix.Tasks.Arbor.Readiness
 
@@ -102,6 +120,7 @@ defmodule Mix.Tasks.Arbor.Start do
   # ARBOR_NODE_HOST operator override.
   def launch_locked(args, internal_launch_host) do
     Config.ensure_distribution()
+    refuse_on_legacy_home_state!()
 
     facts = gather_start_facts(internal_launch_host)
 
@@ -155,6 +174,30 @@ defmodule Mix.Tasks.Arbor.Start do
       internal_launch_host -> {:internal_continuity, internal_launch_host}
       true -> {:auto, Config.node_hostname()}
     end
+  end
+
+  @doc false
+  # The daemon now resolves `~` to the real HOME. Launching over unmigrated
+  # state would silently fork it: a fresh security store and revocation
+  # ledger here, the old ones stranded under the cookie directory.
+  def refuse_on_legacy_home_state!(home \\ Config.arbor_home()) do
+    if HomeMigration.legacy_state_present?(home) do
+      Mix.shell().error("""
+
+      Found state from an older Arbor daemon under #{Config.legacy_home_root(home)}.
+      Until 2026-11 the daemon ran with HOME set to its cookie directory, so its
+      security keys, revocation ledger and other `~/.arbor` files landed there.
+
+      Refusing to start until it is moved back. Review the plan, then apply it:
+
+          ./bin/mix arbor.home.migrate
+          ./bin/mix arbor.home.migrate --apply
+      """)
+
+      exit({:shutdown, 1})
+    end
+
+    :ok
   end
 
   defp report_refusal(:malformed_metadata, _detail) do
@@ -235,15 +278,15 @@ defmodule Mix.Tasks.Arbor.Start do
     # the binary as Elixir source).
     {elixir_path, mix_path} = resolve_real_paths()
 
-    name_flag = if Config.longnames?(), do: "--name", else: "--sname"
+    name_type = if Config.longnames?(), do: "longnames", else: "shortnames"
     node_string = node_string_for(host)
     node = Config.node_atom(node_string)
     cookie_string = Config.cookie() |> Atom.to_string()
 
-    cookie_home =
+    cookie_file =
       case Config.prepare_distribution_cookie(cookie_string) do
-        {:ok, path} ->
-          path
+        {:ok, _cookie_home} ->
+          Config.distribution_cookie_file()
 
         {:error, reason} ->
           Mix.shell().error(
@@ -256,23 +299,22 @@ defmodule Mix.Tasks.Arbor.Start do
     bootstrap_path = Config.runtime_bootstrap_file(project_dir)
 
     unless File.regular?(bootstrap_path) do
-      Mix.shell().error("Runtime HOME bootstrap is missing at #{bootstrap_path}")
+      Mix.shell().error("Distribution bootstrap is missing at #{bootstrap_path}")
       exit({:shutdown, 1})
     end
 
     # Preserve provider/application settings while removing every Erlang flag
-    # injection channel. Prepend the real Erlang bin because the launcher uses
-    # a private HOME during VM boot and version-manager shims can otherwise
-    # resolve a different toolchain from that temporary HOME.
+    # injection channel and the cookie value. Prepend the real Erlang bin so a
+    # version-manager shim on PATH cannot pick a different toolchain.
     env = daemon_env(System.get_env(), Mix.env(), Config.erlang_bin_dir())
 
     case spawn_daemon_process(%{
            project_dir: project_dir,
            elixir_path: elixir_path,
            mix_path: mix_path,
-           name_flag: name_flag,
            node_string: node_string,
-           cookie_home: cookie_home,
+           name_type: name_type,
+           cookie_file: cookie_file,
            bind_mode: Config.distribution_bind_mode(host),
            bootstrap_path: bootstrap_path,
            log_file: log_file,
@@ -363,25 +405,27 @@ defmodule Mix.Tasks.Arbor.Start do
   defp indent(text), do: text |> String.split("\n") |> Enum.map_join("\n", &("    " <> &1))
 
   @doc false
+  # Mirrors the launcher's own checks so a bad value fails here with a
+  # specific reason instead of as an opaque launcher exit status.
   @spec daemon_launch_argv(map()) :: {:ok, [String.t()]} | {:error, term()}
   def daemon_launch_argv(%{
         elixir_path: elixir_path,
-        name_flag: name_flag,
         node_string: node_string,
-        cookie_home: cookie_home,
+        name_type: name_type,
+        cookie_file: cookie_file,
         bind_mode: bind_mode,
         bootstrap_path: bootstrap_path,
         mix_path: mix_path,
         log_file: log_file
       })
-      when is_binary(elixir_path) and is_binary(name_flag) and is_binary(node_string) and
-             is_binary(cookie_home) and is_binary(bind_mode) and is_binary(bootstrap_path) and
+      when is_binary(elixir_path) and is_binary(node_string) and is_binary(name_type) and
+             is_binary(cookie_file) and is_binary(bind_mode) and is_binary(bootstrap_path) and
              is_binary(mix_path) and is_binary(log_file) do
     values = [
       elixir_path,
-      name_flag,
       node_string,
-      cookie_home,
+      name_type,
+      cookie_file,
       bind_mode,
       bootstrap_path,
       mix_path,
@@ -392,6 +436,15 @@ defmodule Mix.Tasks.Arbor.Start do
       Enum.any?(values, &(&1 == "")) ->
         {:error, :empty_launch_argument}
 
+      not Regex.match?(~r/\A[A-Za-z0-9_][A-Za-z0-9_.:@-]*\z/, node_string) ->
+        {:error, :invalid_node_name}
+
+      name_type not in ["longnames", "shortnames"] ->
+        {:error, :invalid_name_type}
+
+      Path.type(cookie_file) != :absolute ->
+        {:error, :relative_cookie_file}
+
       bind_mode not in ["default", "loopback_v4", "loopback_v6"] ->
         {:error, :invalid_distribution_bind_mode}
 
@@ -401,6 +454,11 @@ defmodule Mix.Tasks.Arbor.Start do
   end
 
   def daemon_launch_argv(_), do: {:error, :invalid_launch_spec}
+
+  # The daemon reads its cookie from the private cookie file, so the value
+  # never needs to reach the VM's environment (readable via `ps -E`).
+  # ARBOR_RUNTIME_ORIGINAL_HOME belonged to the retired HOME redirect.
+  @daemon_scrubbed_env ~w(ARBOR_COOKIE ARBOR_RUNTIME_ORIGINAL_HOME)
 
   @doc false
   @spec daemon_env(map(), atom() | String.t(), String.t()) ::
@@ -414,7 +472,7 @@ defmodule Mix.Tasks.Arbor.Start do
       |> Map.put("MIX_ENV", to_string(mix_env))
       |> Map.put("PATH", prepend_path(erlang_bin_dir, current_path))
 
-    Config.blocked_vm_flag_env()
+    (Config.blocked_vm_flag_env() ++ @daemon_scrubbed_env)
     |> Enum.reduce(environment, fn key, acc -> Map.put(acc, key, nil) end)
     |> Enum.to_list()
   end
