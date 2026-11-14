@@ -82,4 +82,94 @@ defmodule Mix.Tasks.Arbor.HandsPathSecurityRegressionTest do
     assert catch_exit(Cleanup.run(["linked"])) == {:shutdown, 1}
     assert File.read!(sentinel) == "must survive"
   end
+
+  @tag spec: "KSEC-015,KSEC-020"
+  test "security regression: quote-and-semicolon workspace folder is a literal spawn argv", %{
+    root: root
+  } do
+    marker = Path.join(root, "pwned-sentinel")
+    folder = "x'; touch #{marker}; '"
+    run_script = Path.join([root, folder, "run.sh"])
+
+    assert {:ok, argv} = Spawn.local_tmux_argv("arbor-hand-sec", run_script)
+    assert_literal_spawn_path(argv, run_script)
+    refute_shell_command_executes(argv, marker)
+  end
+
+  @tag spec: "KSEC-015,KSEC-020"
+  test "security regression: command-substitution workspace folder is a literal spawn argv", %{
+    root: root
+  } do
+    folder = "$(id)"
+    run_script = Path.join([root, folder, "run.sh"])
+
+    assert {:ok, argv} = Spawn.local_tmux_argv("arbor-hand-sec", run_script)
+    assert_literal_spawn_path(argv, run_script)
+
+    {output, _status} = eval_tmux_shell_command(argv)
+    refute output =~ "uid="
+    assert Enum.any?(argv, &String.contains?(&1, "$(id)"))
+  end
+
+  @tag spec: "KSEC-015,KSEC-020"
+  test "security regression: hands spawn path rejects NUL bytes and newlines" do
+    assert {:error, :invalid_spawn_path} = Spawn.validate_spawn_path("foo\nbar")
+    assert {:error, :invalid_spawn_path} = Spawn.validate_spawn_path("foo\rbar")
+    assert {:error, :invalid_spawn_path} = Spawn.validate_spawn_path("foo" <> <<0>> <> "bar")
+    assert {:error, :invalid_spawn_path} = Spawn.local_tmux_argv("arbor-hand-sec", "foo\nbar")
+    assert {:ok, "/tmp/ok/run.sh"} = Spawn.validate_spawn_path("/tmp/ok/run.sh")
+  end
+
+  defp assert_literal_spawn_path(argv, path) when is_list(argv) and is_binary(path) do
+    assert path in argv or ("ARBOR_HAND_RUN=" <> path) in argv,
+           "spawn argv must carry the literal path as its own element, got: #{inspect(argv)}"
+
+    refute Enum.any?(argv, fn arg ->
+             arg != path and arg != "ARBOR_HAND_RUN=" <> path and String.contains?(arg, path)
+           end),
+           "path must not be interpolated into a shell command string, got: #{inspect(argv)}"
+  end
+
+  defp refute_shell_command_executes(argv, marker) do
+    File.rm(marker)
+    {_output, _status} = eval_tmux_shell_command(argv)
+    refute File.exists?(marker), "hostile workspace path executed a side effect at #{marker}"
+  end
+
+  defp eval_tmux_shell_command(argv) do
+    shell_command = List.last(argv)
+    env = spawn_env_from_argv(argv)
+    parent = self()
+
+    {pid, ref} =
+      spawn_monitor(fn ->
+        send(
+          parent,
+          {:cmd,
+           System.cmd("bash", ["--noprofile", "--norc", "-c", shell_command],
+             stderr_to_stdout: true,
+             env: env
+           )}
+        )
+      end)
+
+    receive do
+      {:cmd, result} ->
+        result
+
+      {:DOWN, ^ref, :process, ^pid, _reason} ->
+        {"", 1}
+    after
+      400 ->
+        Process.exit(pid, :kill)
+        {"", 1}
+    end
+  end
+
+  defp spawn_env_from_argv(argv) do
+    Enum.flat_map(argv, fn
+      "ARBOR_HAND_RUN=" <> path -> [{"ARBOR_HAND_RUN", path}]
+      _ -> []
+    end)
+  end
 end
