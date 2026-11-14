@@ -5647,6 +5647,86 @@ defmodule Arbor.Security do
   def submit_signed_capability_grant(_cap, _actor_proof),
     do: {:error, :capability_mutation_unauthorized}
 
+  @doc """
+  Build, in an offline CLI process, the key holder's signed grant of the
+  narrow disclosure-issue right for one agent.
+
+  The right is `disclosure_issue_right_uri(agent_id, key_principal)`: the
+  human it names is always the key file's own principal, never a caller
+  argument, so this cannot bind another human's turns. It is granted with
+  delegation depth 0. Submit the result with
+  `submit_signed_disclosure_right_grant/2`. The caller opens the key file and
+  passes its handle; private key bytes never leave it.
+
+  Returns the key principal so the caller can report whom the right serves.
+  """
+  @spec prepare_key_file_disclosure_right_grant(term(), String.t()) ::
+          {:ok, String.t(), Capability.t(), SignedRequest.t()} | {:error, term()}
+  def prepare_key_file_disclosure_right_grant(io_device, agent_id)
+      when not is_binary(io_device) and is_binary(agent_id) do
+    with {:ok, %{agent_id: human_id, private_key: private_key}} <-
+           KeyFile.read_device(io_device),
+         {:ok, resource} <- DisclosureCapability.issue_right_uri(agent_id, human_id),
+         {:ok, cap} <-
+           build_grant_capability(
+             [
+               principal: agent_id,
+               resource: resource,
+               delegation_depth: 0,
+               metadata: %{source: :owner_disclosure_right_backfill}
+             ],
+             human_id
+           ),
+         {:ok, payload} <- SystemAuthority.capability_mutation_request_payload(:grant, cap),
+         {:ok, proof} <- SignedRequest.sign(payload, human_id, private_key) do
+      {:ok, human_id, cap, proof}
+    else
+      {:error, :invalid_binding_field} -> {:error, :invalid_binding_field}
+      _ -> {:error, :capability_mutation_unauthorized}
+    end
+  end
+
+  def prepare_key_file_disclosure_right_grant(_io_device, _agent_id),
+    do: {:error, :capability_mutation_unauthorized}
+
+  @doc """
+  Submit a signed grant of the narrow disclosure-issue right, admitting only
+  the right bound to the human who signed it.
+
+  Refused with `:disclosure_right_not_bound_to_signer` unless the capability
+  is exactly `disclosure_issue_right_uri(capability.principal_id,
+  proof.agent_id)`, undelegated and unscoped. The signer's ordinary grant
+  authority is then checked by `submit_signed_capability_grant/2`, so this
+  path never admits a grant the signer could not make directly. Whether the
+  signer owns the agent is the agent library's question
+  (`Arbor.Agent.submit_signed_owner_disclosure_grant/2`).
+  """
+  @spec submit_signed_disclosure_right_grant(Capability.t(), SignedRequest.t()) ::
+          {:ok, Capability.t()} | {:error, term()}
+  def submit_signed_disclosure_right_grant(
+        %Capability{} = cap,
+        %SignedRequest{agent_id: signer} = actor_proof
+      ) do
+    case disclosure_right_bound_to_signer(cap, signer) do
+      :ok -> submit_signed_capability_grant(cap, actor_proof)
+      {:error, _} = error -> error
+    end
+  end
+
+  def submit_signed_disclosure_right_grant(_cap, _actor_proof),
+    do: {:error, :disclosure_right_not_bound_to_signer}
+
+  defp disclosure_right_bound_to_signer(%Capability{} = cap, signer) do
+    with {:ok, expected} <- DisclosureCapability.issue_right_uri(cap.principal_id, signer),
+         true <- cap.resource_uri == expected,
+         true <- is_nil(cap.parent_capability_id) and cap.delegation_chain in [nil, []],
+         true <- is_nil(cap.principal_scope) and is_nil(cap.session_id) and is_nil(cap.task_id) do
+      :ok
+    else
+      _ -> {:error, :disclosure_right_not_bound_to_signer}
+    end
+  end
+
   @doc "Sign an exact issuer-mutation digest in an offline CLI process."
   @spec prepare_key_file_issuer_mutation(term(), atom(), String.t()) ::
           {:ok, String.t(), SignedRequest.t()} | {:error, term()}
