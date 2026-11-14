@@ -75,6 +75,24 @@ private key stays in that subprocess and signs each upstream HTTP request.
   (and for per-agent detail under `agents`); the agents list summary without
   `agent_id` remains open.
 
+## Arbor as an MCP client (outbound)
+
+This guide is about connecting an external host *to* Arbor. Arbor also
+connects *out* to third-party MCP servers. Those tool descriptions are pinned
+after first discovery (or later re-approval) so a refresh cannot silently
+replace the text shown to the model.
+
+Pins are SHA-256 of `name` / `description` / `inputSchema`, keyed by
+`Arbor.Security.mcp_server_approval_uri/2` and the tool name, and stored in
+`~/.arbor/mcp_tool_pins` (`config :arbor_gateway, :mcp_tool_pin_dir`). A
+mismatch quarantines the tool and emits `:mcp_tool_fingerprint_changed`.
+Re-approve today with `Arbor.Gateway.approve_mcp_tool_fingerprint/2`. Revoking
+or changing a server's config approval drops that identity's pins. A dashboard
+re-approval UI is planned
+([roadmap](./roadmap/mcp-tool-reapproval-ui.md)).
+
+See [Security architecture — MCP client tool-fingerprint pins](./SECURITY_ARCHITECTURE.md#mcp-client-tool-fingerprint-pins).
+
 ## Related
 
 - `mix arbor.signer` — `apps/arbor_gateway/lib/mix/tasks/arbor.signer.ex`

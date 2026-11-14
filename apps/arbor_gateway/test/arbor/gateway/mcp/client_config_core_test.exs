@@ -57,6 +57,14 @@ defmodule Arbor.Gateway.MCP.ClientConfigCoreTest do
     end
   end
 
+  test "pin_store_dir is a known key in either atom or string form" do
+    assert {:ok, %{pin_store_dir: "/tmp/pins", command: ["x"]}} =
+             ClientConfigCore.normalize("s", %{
+               "command" => ["x"],
+               "pin_store_dir" => "/tmp/pins"
+             })
+  end
+
   test "unknown string keys are dropped rather than atomized; unknown atom keys survive" do
     {:ok, config} =
       ClientConfigCore.normalize("s", %{

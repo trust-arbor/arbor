@@ -50,7 +50,8 @@ defmodule Arbor.Gateway do
 
       config :arbor_gateway,
         port: 4000,
-        mcp_workspace: "~/.arbor/workspace"
+        mcp_workspace: "~/.arbor/workspace",
+        mcp_tool_pin_dir: "~/.arbor/mcp_tool_pins"
   """
 
   alias Arbor.Gateway.Bridge.ClaudeSession
@@ -60,6 +61,7 @@ defmodule Arbor.Gateway do
   alias Arbor.Gateway.MCP.EndpointRegistry
   alias Arbor.Gateway.MCP.ResourceBridge
   alias Arbor.Gateway.MCP.ToolBridge
+  alias Arbor.Gateway.MCP.ToolPinStore
 
   # -- Bridge --
 
@@ -121,6 +123,36 @@ defmodule Arbor.Gateway do
   @spec disconnect_mcp_server(String.t()) :: :ok | {:error, :not_found}
   def disconnect_mcp_server(server_name) do
     ClientSupervisor.stop_connection(server_name)
+  end
+
+  @doc """
+  Re-approve a quarantined MCP tool's currently observed description/schema.
+
+  Updates the in-memory pin and the durable `ToolPinStore` entry for this
+  server's approved config identity. Server-connect approval and tool-call
+  capabilities are unchanged.
+  """
+  @spec approve_mcp_tool_fingerprint(String.t(), String.t()) :: {:ok, map()} | {:error, term()}
+  def approve_mcp_tool_fingerprint(server_name, tool_name)
+      when is_binary(server_name) and is_binary(tool_name) do
+    case ClientSupervisor.find_connection(server_name) do
+      {:ok, pid} -> ClientConnection.approve_tool_fingerprint(pid, tool_name)
+      :error -> {:error, :not_found}
+    end
+  end
+
+  @doc """
+  Drop persisted tool-fingerprint pins for an approved MCP server identity.
+
+  `identity` is `Arbor.Security.mcp_server_approval_uri/2` (or the fallback
+  name-plus-config digest). Called when that approval is revoked or the
+  config changes. A later connect first-discovers again.
+
+  Pass `dir:` to override `config :arbor_gateway, :mcp_tool_pin_dir`.
+  """
+  @spec drop_mcp_tool_pins(String.t(), keyword()) :: :ok | {:error, term()}
+  def drop_mcp_tool_pins(identity, opts \\ []) when is_binary(identity) and is_list(opts) do
+    ToolPinStore.drop(identity, opts)
   end
 
   @doc """

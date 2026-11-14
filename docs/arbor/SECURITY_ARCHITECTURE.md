@@ -412,10 +412,56 @@ Authoritative code: [`CapabilityStore`](../../apps/arbor_security/lib/arbor/secu
 [`Arbor.Signals`](../../apps/arbor_kernel_runtime/lib/arbor/signals.ex), and
 [`Signals.Bus`](../../apps/arbor_kernel_runtime/lib/arbor/signals/bus.ex).
 
+### MCP client tool-fingerprint pins
+
+Arbor's outbound MCP client (`Arbor.Gateway.MCP.ClientConnection`) pins each
+discovered tool so a later `tools/list` or `notifications/tools/list_changed`
+cannot silently replace the text the model sees (SEAL-class description
+poisoning / rug-pulls, arXiv:2610.25372).
+
+- **What is pinned.** SHA-256 of a canonical `{name, description, inputSchema}`
+  encoding. Atom and string JSON terms hash the same way.
+- **When.** First discovery auto-pins a new name (there is no stricter
+  first-seen mode). A later mismatch quarantines that tool: it is omitted from
+  `list_tools` / `refresh_tools` and `call_tool` returns `:refused`. Unchanged
+  siblings stay listed. A rename is a new name.
+- **Where.** Accepted pins are stored per approved config identity
+  (`Arbor.Security.mcp_server_approval_uri/2`) and tool name in
+  `Arbor.Gateway.MCP.ToolPinStore`, a gateway-owned JSON file under
+  `config :arbor_gateway, :mcp_tool_pin_dir` (default `~/.arbor/mcp_tool_pins`).
+  Gateway does not depend on `arbor_persistence`; that store's ETS/Agent
+  backends are `:process_lifetime` and would re-trust after restart.
+- **Restart.** Pins reload on `ClientConnection` start. A drifted tool stays
+  quarantined. A missing file is a first run (empty pins). An unreadable file
+  is fail-closed: first-discovery is refused so a corrupt store cannot re-trust
+  the current advertisement.
+- **Signals.** `:mcp_tool_fingerprint_changed` (mismatch, with pinned vs
+  observed hashes) and `:mcp_tool_fingerprint_approved` after accept, on the
+  existing `:gateway` channel.
+- **Re-approval today.** `Arbor.Gateway.approve_mcp_tool_fingerprint/2` or
+  `ClientConnection.approve_tool_fingerprint/2` writes the observed definition
+  to the store. Revoking or changing a server's config approval drops that
+  identity's pins via `Arbor.Gateway.drop_mcp_tool_pins/1` from
+  `Arbor.Agent.Manager.set_mcp_config/3`.
+- **UI.** Listing quarantined tools with a description/schema diff is planned;
+  see [MCP tool re-approval UI](./roadmap/mcp-tool-reapproval-ui.md).
+
+Authoritative code: [`ToolFingerprintCore`](../../apps/arbor_gateway/lib/arbor/gateway/mcp/tool_fingerprint_core.ex),
+[`ToolPinStore`](../../apps/arbor_gateway/lib/arbor/gateway/mcp/tool_pin_store.ex),
+and [`ClientConnection`](../../apps/arbor_gateway/lib/arbor/gateway/mcp/client_connection.ex).
+
 ## Partial, Planned, or Unsupported Controls
 
 The following boundaries are important because their names can otherwise sound more
 complete than their current implementation.
+
+### MCP tool re-approval UI
+
+Quarantine, durable pins, and `approve_mcp_tool_fingerprint/2` are implemented.
+A dashboard that lists quarantined tools, diffs old vs new description/schema,
+and records approve/deny is planned. See
+[MCP tool re-approval UI](./roadmap/mcp-tool-reapproval-ui.md).
+
 
 ### Signing and identity boundaries
 
