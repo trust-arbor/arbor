@@ -1701,12 +1701,22 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
 
     from = {self(), make_ref()}
 
-    assert {:noreply, after_prep} =
-             Session.handle_call({:send_message, "no route"}, from, state)
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:noreply, after_prep} =
+                 Session.handle_call({:send_message, "no route"}, from, state)
 
-    refute after_prep.turn_in_flight
+        refute after_prep.turn_in_flight
+      end)
+
     {_pid, ref} = from
     assert_receive {^ref, {:error, :turn_preparation_refused}}, 1_000
+
+    # The caller stays opaque; the operator log names the cause, never content.
+    assert log =~
+             "turn refused for #{agent_id} at route_and_disclosure: :missing_configured_route"
+
+    refute log =~ "no route"
   end
 
   test "VOICE-17 security regression: public state strips authority and fence",

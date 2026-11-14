@@ -158,6 +158,13 @@ defmodule Arbor.Agent.Lifecycle do
             :ok ->
               unless Keyword.has_key?(opts, :exact_template_policy) do
                 grant_owner_chat_capability(agent_id, opts, actor_authority)
+
+                grant_owner_disclosure_right(
+                  agent_id,
+                  extract_principal_id(opts),
+                  actor_authority
+                )
+
                 grant_self_memory_capabilities(agent_id, actor_authority)
               end
 
@@ -1823,6 +1830,42 @@ defmodule Arbor.Agent.Lifecycle do
   catch
     :exit, _ -> :ok
   end
+
+  # Owner disclosure: the agent may mint the one-turn disclosure capability
+  # (`Arbor.Security.issue_disclosure_capability/1`) that lets its creator's own
+  # authenticated chat turn reach an external provider route. Without it, the
+  # Session cannot mint that capability and every such turn is refused before
+  # the LLM call (`:turn_preparation_refused`, found 2026-11-13 on a fresh
+  # install). The right is narrow on purpose: `arbor://security/disclose/
+  # <agent_id>/<creator>` admits only that disclosure grant, never the general
+  # `arbor://security/grant/<agent_id>`. Best-effort, like the owner chat grant.
+  defp grant_owner_disclosure_right(agent_id, creator, actor_authority)
+       when is_binary(creator) do
+    with {:ok, resource} <- Arbor.Security.disclosure_issue_right_uri(agent_id, creator),
+         {:ok, _} <-
+           Arbor.Security.grant(
+             principal: agent_id,
+             resource: resource,
+             actor_authority: actor_authority
+           ) do
+      :ok
+    else
+      {:error, reason} ->
+        Logger.warning(
+          "[Lifecycle] owner disclosure grant failed for #{agent_id}: #{inspect(reason)}"
+        )
+
+        :ok
+    end
+  rescue
+    e ->
+      Logger.warning("[Lifecycle] owner disclosure grant raised: #{Exception.message(e)}")
+      :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp grant_owner_disclosure_right(_agent_id, _creator, _actor_authority), do: :ok
 
   # Self-scoped memory: an agent owns its own memory. `Arbor.Memory`'s facade
   # gates every operation on `arbor://memory/<op>/<agent_id>`, which is the

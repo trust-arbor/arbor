@@ -5,10 +5,16 @@ defmodule Arbor.Agent.Eval.OpenCodeZenLive do
   Tier 1 is a mechanical well-formed tool-call check per candidate. Tier 2
   is `Arbor.Agent.Eval.TaskEval` and runs only for tier-1 passers. Outcomes
   convert through `OpenCodeZenAdmission` and replace the recorded catalog.
+
+  A probe that never reached the model (a 429 free-usage limit, a 5xx, no
+  response) is not evidence about the model. It never overwrites a recorded
+  verdict; the existing record is kept with a `last_probe` note, and a model
+  with no record is listed as unreachable, not as a measured failure.
   """
 
   alias Arbor.Agent.Eval.{OpenCodeZenAdmission, TaskEval}
   alias Arbor.LLM.OpenCodeZen
+  alias Arbor.LLM.OpenCodeZen.AdmissionCore
 
   @default_max_heartbeats 3
 
@@ -23,6 +29,9 @@ defmodule Arbor.Agent.Eval.OpenCodeZenLive do
     * `:eval_task` — `(id, max_heartbeats -> trial_map)` tier-2 function
     * `:persist` — `(payload -> :ok | {:error, term()})`
     * `:existing` — current catalog state
+    * `:served` — the relay's full served list when `:ids` came from
+      discovery; admitted records the relay no longer serves are dropped
+      (measured failures are kept)
     * `:now` — recorded_at stamp
     * `:log` — `(binary -> any())` progress callback
   """
@@ -36,10 +45,11 @@ defmodule Arbor.Agent.Eval.OpenCodeZenLive do
     existing = Keyword.get(opts, :existing, OpenCodeZen.catalog())
     now = Keyword.get(opts, :now, Date.utc_today() |> Date.to_iso8601())
     log = Keyword.get(opts, :log, fn _line -> :ok end)
+    served = Keyword.get(opts, :served)
 
     models =
-      Enum.reduce(ids, existing.models, fn id, acc ->
-        record = probe_one(id, max_heartbeats, complete, eval_task, log)
+      Enum.reduce(ids, drop_unserved(existing.models, served, log), fn id, acc ->
+        record = probe_one(id, max_heartbeats, complete, eval_task, log, acc, now)
         upsert_model(acc, record)
       end)
 
@@ -93,9 +103,65 @@ defmodule Arbor.Agent.Eval.OpenCodeZenLive do
     }
   end
 
-  defp probe_one(id, max_heartbeats, complete, eval_task, log) do
+  defp probe_one(id, max_heartbeats, complete, eval_task, log, models, now) do
     log.("  tier 1 #{id}")
     response = complete.(id)
+
+    case unreachable_reason(response) do
+      nil -> measured(id, response, max_heartbeats, eval_task, log)
+      reason -> unreachable(id, reason, models, now, log)
+    end
+  end
+
+  # The relay answered about the model: a response, or a 4xx rejecting the
+  # tool-call request itself (the model does not take tools). That is evidence.
+  defp unreachable_reason({:ok, _response}), do: nil
+
+  defp unreachable_reason({:error, %{status: 429}}), do: "unreachable_429_free_usage_limit"
+
+  defp unreachable_reason({:error, %{status: status}})
+       when is_integer(status) and status >= 400 and status < 500,
+       do: nil
+
+  defp unreachable_reason({:error, %{status: status}}) when is_integer(status),
+    do: "unreachable_http_#{status}"
+
+  defp unreachable_reason({:error, _reason}), do: "unreachable_no_response"
+  defp unreachable_reason(_response), do: nil
+
+  defp unreachable(id, reason, models, now, log) do
+    log.("  unreachable at tier 1 (#{reason}); no new evidence recorded")
+    note = %{"at" => now, "outcome" => reason}
+
+    case Enum.find(models, &(Map.get(&1, "id") == id)) do
+      %{} = existing ->
+        Map.put(existing, "last_probe", note)
+
+      nil ->
+        id
+        |> OpenCodeZenAdmission.record(
+          %{passed: false, eval: "mechanical_tool_call", reason: reason},
+          %{passed: false, skipped: true, reason: "tier1_unreachable"}
+        )
+        |> Map.put("reason", reason)
+        |> Map.put("last_probe", note)
+    end
+  end
+
+  defp drop_unserved(models, nil, _log), do: models
+
+  defp drop_unserved(models, served, log) when is_list(served) do
+    admitted = AdmissionCore.admitted_ids(AdmissionCore.new(%{"models" => models}))
+
+    Enum.reject(models, fn record ->
+      id = Map.get(record, "id")
+      gone? = id in admitted and id not in served
+      if gone?, do: log.("  dropped #{id}: admitted but no longer served by the relay")
+      gone?
+    end)
+  end
+
+  defp measured(id, response, max_heartbeats, eval_task, log) do
     tier1 = OpenCodeZenAdmission.tier1_from_response(unwrap_response(response))
 
     if tier1.passed do

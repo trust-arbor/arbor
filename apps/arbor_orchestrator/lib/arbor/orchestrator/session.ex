@@ -100,6 +100,7 @@ defmodule Arbor.Orchestrator.Session do
   alias Arbor.Orchestrator.Session.Persistence
   alias Arbor.Orchestrator.Session.Persistence.Core, as: PersistenceCore
   alias Arbor.Orchestrator.Session.PrivateMemory
+  alias Arbor.Orchestrator.Session.RefusalDiagnostic
   alias Arbor.Orchestrator.Session.TurnEgress
 
   @credential_anchor {__MODULE__, :credentials}
@@ -1263,14 +1264,36 @@ defmodule Arbor.Orchestrator.Session do
 
     {:noreply, new_state}
   rescue
-    _ ->
+    exception ->
+      log_turn_refusal(state, :launch, :error, exception, __STACKTRACE__)
       cleanup_prepared_partial(prepared)
       {:error, :turn_preparation_refused}
   catch
-    _, _ ->
+    kind, reason ->
+      log_turn_refusal(state, :launch, kind, reason, __STACKTRACE__)
       cleanup_prepared_partial(prepared)
       {:error, :turn_preparation_refused}
   end
+
+  # The caller only ever sees `:turn_preparation_refused`. The operator log
+  # names the cause, bounded and content-free (see RefusalDiagnostic), so a
+  # refused turn is never silent.
+  defp log_turn_refusal(state, stage, kind, reason, stacktrace) do
+    Logger.warning(
+      "[Session] turn refused for #{refusal_agent_id(state)} at #{stage}: " <>
+        RefusalDiagnostic.describe(kind, reason, stacktrace)
+    )
+  end
+
+  defp log_turn_refusal(state, stage, reason) do
+    Logger.warning(
+      "[Session] turn refused for #{refusal_agent_id(state)} at #{stage}: " <>
+        RefusalDiagnostic.describe_reason(reason)
+    )
+  end
+
+  defp refusal_agent_id(%{agent_id: agent_id}) when is_binary(agent_id), do: agent_id
+  defp refusal_agent_id(_state), do: "unknown agent"
 
   # Run the pre-turn preprocessor when enabled; merge its output into turn values
   # under "session.preprocessor.*". Disabled-by-default and fail-open: any failure
@@ -2905,20 +2928,29 @@ defmodule Arbor.Orchestrator.Session do
     case conversation_binding(state, authority) do
       %{binding: binding} ->
         case Arbor.Comms.open_conversation_source(binding, self(), generation) do
-          {:ok, {pid, ref} = handle} when is_pid(pid) and is_reference(ref) -> {:ok, handle}
-          _ -> {:error, :turn_preparation_refused}
+          {:ok, {pid, ref} = handle} when is_pid(pid) and is_reference(ref) ->
+            {:ok, handle}
+
+          other ->
+            log_turn_refusal(state, :conversation_source, other)
+            {:error, :turn_preparation_refused}
         end
 
       nil ->
         {:ok, nil}
 
-      _ ->
+      other ->
+        log_turn_refusal(state, :conversation_binding, other)
         {:error, :turn_preparation_refused}
     end
   rescue
-    _ -> {:error, :turn_preparation_refused}
+    exception ->
+      log_turn_refusal(state, :conversation_source, :error, exception, __STACKTRACE__)
+      {:error, :turn_preparation_refused}
   catch
-    _, _ -> {:error, :turn_preparation_refused}
+    kind, reason ->
+      log_turn_refusal(state, :conversation_source, kind, reason, __STACKTRACE__)
+      {:error, :turn_preparation_refused}
   end
 
   defp retire_conversation_source(handle, reason) do
@@ -3359,11 +3391,13 @@ defmodule Arbor.Orchestrator.Session do
                private_memory_turn: state.private_memory_turn
              }}
           rescue
-            _ ->
+            exception ->
+              log_turn_refusal(state, :engine_options, :error, exception, __STACKTRACE__)
               cleanup_prepared_partial(prepared_cleanup)
               {:error, :turn_preparation_refused}
           catch
-            _, _ ->
+            kind, reason ->
+              log_turn_refusal(state, :engine_options, kind, reason, __STACKTRACE__)
               cleanup_prepared_partial(prepared_cleanup)
               {:error, :turn_preparation_refused}
           end
@@ -3380,12 +3414,17 @@ defmodule Arbor.Orchestrator.Session do
     else
       {:error, reason} ->
         # issue_disclosure_if_needed already revokes on bind failure.
+        log_turn_refusal(state, :route_and_disclosure, reason)
         {:error, map_prepare_error(reason)}
     end
   rescue
-    _ -> {:error, :turn_preparation_refused}
+    exception ->
+      log_turn_refusal(state, :prepare, :error, exception, __STACKTRACE__)
+      {:error, :turn_preparation_refused}
   catch
-    _, _ -> {:error, :turn_preparation_refused}
+    kind, reason ->
+      log_turn_refusal(state, :prepare, kind, reason, __STACKTRACE__)
+      {:error, :turn_preparation_refused}
   end
 
   defp cleanup_prepared_partial(prepared) when is_map(prepared) do

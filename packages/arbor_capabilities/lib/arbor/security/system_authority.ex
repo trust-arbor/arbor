@@ -44,6 +44,7 @@ defmodule Arbor.Security.SystemAuthority do
   alias Arbor.Security.Contracts.PrivateRelationshipSnapshot
   alias Arbor.Security.Contracts.PrivateMemorySource
   alias Arbor.Security.DeliveryReceiptBroker
+  alias Arbor.Security.DisclosureCapability
   alias Arbor.Security.PrivateMemory
   alias Arbor.Security.PrivateState
   alias Arbor.Security.Crypto
@@ -1877,8 +1878,10 @@ defmodule Arbor.Security.SystemAuthority do
            {:ok, %{principal_id: actor_id}} <-
              recorded_signing_identity(state, authority, owner),
            :ok <-
-             authorize_capability_revocation_actor(
+             authorize_capability_revocation(
                actor_id,
+               operation,
+               target,
                authorization_resource,
                state
              ) do
@@ -2440,6 +2443,56 @@ defmodule Arbor.Security.SystemAuthority do
     end
   end
 
+  # The general revoke right first; otherwise an agent may revoke only its own
+  # disclosure capability, under the same narrow right that let it mint one.
+  # The attestation still names the canonical revoke resource for the target.
+  defp authorize_capability_revocation(actor_id, operation, target, resource, state) do
+    case authorize_capability_revocation_actor(actor_id, resource, state) do
+      :ok ->
+        :ok
+
+      error ->
+        case authorize_self_disclosure_revocation(actor_id, operation, target, state) do
+          :ok -> :ok
+          _ -> error
+        end
+    end
+  end
+
+  defp authorize_self_disclosure_revocation(
+         actor_id,
+         :revoke,
+         %{capability_id: capability_id, principal_id: actor_id, capability_digest: digest},
+         state
+       )
+       when is_binary(capability_id) and is_binary(digest) do
+    with {:ok, %Capability{id: ^capability_id, principal_id: ^actor_id} = cap} <-
+           capability_store_get(state, capability_id),
+         true <- capability_revocation_fence_digest(cap) == digest,
+         {:ok, human_id} <- DisclosureCapability.self_revocable(cap),
+         {:ok, right} <- DisclosureCapability.issue_right_uri(actor_id, human_id),
+         :ok <- authorize_security_mutation_actor(actor_id, right, state) do
+      :ok
+    else
+      _ -> {:error, :capability_revocation_unauthorized}
+    end
+  rescue
+    _ -> {:error, :capability_revocation_unauthorized}
+  catch
+    _, _ -> {:error, :capability_revocation_unauthorized}
+  end
+
+  defp authorize_self_disclosure_revocation(_actor_id, _operation, _target, _state),
+    do: {:error, :capability_revocation_unauthorized}
+
+  # Same digest `Arbor.Security` puts in a single-capability revocation fence.
+  defp capability_revocation_fence_digest(%Capability{} = cap) do
+    cap
+    |> Capability.signing_payload()
+    |> then(&:crypto.hash(:sha256, &1))
+    |> Base.encode16(case: :lower)
+  end
+
   defp supervised_registered_child_pid(state, child_id, registered_name) do
     with supervisor when is_pid(supervisor) <- Map.get(state, :security_supervisor_pid),
          true <- Process.alive?(supervisor),
@@ -2781,7 +2834,7 @@ defmodule Arbor.Security.SystemAuthority do
            state
          ) do
       :ok -> :ok
-      _ -> {:error, :capability_mutation_unauthorized}
+      _ -> authorize_self_disclosure_grant(actor_id, operation, cap, state)
     end
   end
 
@@ -2807,6 +2860,33 @@ defmodule Arbor.Security.SystemAuthority do
   end
 
   defp authorize_capability_mutation_actor(_actor_id, _operation, _cap, _state),
+    do: {:error, :capability_mutation_unauthorized}
+
+  # The general `arbor://security/grant/<agent>` would let an agent grant itself
+  # anything (retired for the system lifecycle principal on 2026-10-08). A
+  # session's per-turn disclosure capability instead needs only the narrow
+  # `arbor://security/disclose/<agent>/<human>`: a well-formed disclosure grant,
+  # from the agent to itself, bound to the human that right names.
+  defp authorize_self_disclosure_grant(
+         actor_id,
+         :grant,
+         %Capability{principal_id: actor_id} = cap,
+         state
+       ) do
+    with {:ok, human_id} <- DisclosureCapability.self_issuable(cap),
+         {:ok, right} <- DisclosureCapability.issue_right_uri(actor_id, human_id),
+         :ok <- authorize_security_mutation_actor(actor_id, right, state) do
+      :ok
+    else
+      _ -> {:error, :capability_mutation_unauthorized}
+    end
+  rescue
+    _ -> {:error, :capability_mutation_unauthorized}
+  catch
+    _, _ -> {:error, :capability_mutation_unauthorized}
+  end
+
+  defp authorize_self_disclosure_grant(_actor_id, _operation, _cap, _state),
     do: {:error, :capability_mutation_unauthorized}
 
   defp normalize_final_delegation_record(records) when is_list(records) and records != [] do

@@ -2098,6 +2098,18 @@ defmodule Arbor.Security do
   @spec issue_disclosure_capability(keyword()) :: {:ok, Capability.t()} | {:error, atom()}
   def issue_disclosure_capability(opts), do: DisclosureCapability.issue(opts)
 
+  @doc """
+  The narrow right, `arbor://security/disclose/<agent_id>/<human_id>`, that
+  lets an agent's own authority mint (and revoke) the disclosure capability
+  for a turn `human_id` authenticated — and nothing else. Grant it instead of
+  `arbor://security/grant/<agent_id>`, which would let the agent grant itself
+  any capability.
+  """
+  @spec disclosure_issue_right_uri(term(), term()) ::
+          {:ok, String.t()} | {:error, :invalid_binding_field}
+  def disclosure_issue_right_uri(agent_id, human_id),
+    do: DisclosureCapability.issue_right_uri(agent_id, human_id)
+
   if Mix.env() == :test do
     @doc false
     @spec issue_disclosure_capability_fixture(keyword()) ::

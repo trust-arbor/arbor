@@ -66,6 +66,33 @@ defmodule Mix.Tasks.Arbor.DoctorTest do
   # the same module name shadowed each other (one file's tests silently didn't
   # run). Consolidated here under the canonical path.
 
+  # 2026-11-13: the doctor configured the first admitted OpenCode Zen id, which
+  # the relay no longer served, so every newcomer call failed upstream.
+  describe "opencode_zen_choice/2 — prefer an admitted model the relay serves" do
+    test "takes the first admitted id the relay serves, in admitted order" do
+      assert Doctor.opencode_zen_choice(
+               ["gone-free", "b-free", "c-free"],
+               {:ok, ["c-free", "b-free", "new-free"]}
+             ) == {:served, "b-free"}
+    end
+
+    test "says when no admitted id is served" do
+      assert Doctor.opencode_zen_choice(["gone-free"], {:ok, ["new-free"]}) ==
+               {:none_served, "gone-free"}
+    end
+
+    test "says when the served list cannot be read" do
+      assert Doctor.opencode_zen_choice(
+               ["a-free", "b-free"],
+               {:error, {:opencode_zen_models_unreachable, :timeout}}
+             ) == {:unverified, "a-free"}
+    end
+
+    test "has nothing to choose without an admitted id" do
+      assert Doctor.opencode_zen_choice([], {:ok, ["a-free"]}) == :none_admitted
+    end
+  end
+
   describe "configure priority" do
     test "prefers OpenRouter, local, and ACP before paid APIs" do
       keys = Enum.map(Doctor.provider_priority(), fn {catalog_key, _, _} -> catalog_key end)

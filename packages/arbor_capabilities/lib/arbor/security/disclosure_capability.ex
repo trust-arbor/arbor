@@ -52,6 +52,17 @@ defmodule Arbor.Security.DisclosureCapability do
   Out of scope for this module: issuing disclosure authority from
   message/model fields, carrying it through Engine context, or wiring
   Agent/Voice ingress — those are later VP-05D2A1/A2/B/C packets.
+
+  ## Who may mint one
+
+  Minting goes through `Arbor.Security.grant/1`, so the actor must hold either
+  the general `arbor://security/grant/<agent_id>` (which would let it grant the
+  agent anything) or the narrow `issue_right_uri/2`,
+  `arbor://security/disclose/<agent_id>/<human_id>`. The narrow right admits
+  only a disclosure capability that `self_issuable/1` accepts, granted by the
+  agent to itself and bound to that exact human; it also lets the agent revoke
+  that capability. A human grants it to the agents they create, so their own
+  authenticated turns can reach the cloud route they configured.
   """
 
   alias Arbor.Contracts.Security.{Capability, CapabilityUri}
@@ -60,6 +71,8 @@ defmodule Arbor.Security.DisclosureCapability do
   alias Arbor.Security.Config
 
   @disclosure_uri_prefix "arbor://egress/disclose"
+  @issue_right_prefix "arbor://security/disclose"
+  @issue_right_human ~r/\Ahuman_[A-Za-z0-9_.-]+\z/
   @kind :interactive_human
 
   # Arbor's source-owned runtime axis (Arbor.AI.Runtime): `:arbor` is the
@@ -139,6 +152,72 @@ defmodule Arbor.Security.DisclosureCapability do
          grant_opts <- build_grant_options(fields),
          {:ok, signed_cap} <- grant.(grant_opts) do
       {:ok, signed_cap}
+    end
+  end
+
+  @doc """
+  The narrow right that lets `agent_id` mint and revoke its own disclosure
+  capabilities for turns authenticated by `human_id`.
+
+  Both ids must be canonical (`agent_...`, `human_...`, one URI segment each),
+  so a crafted human id cannot address a different right.
+  """
+  @spec issue_right_uri(term(), term()) :: {:ok, String.t()} | {:error, :invalid_binding_field}
+  def issue_right_uri(agent_id, human_id) do
+    if canonical_field?(agent_id, @max_binding_field_bytes) and
+         Identifiers.valid_id?(agent_id, :agent) and canonical_human_principal?(human_id) and
+         Regex.match?(@issue_right_human, human_id) do
+      {:ok, "#{@issue_right_prefix}/#{agent_id}/#{human_id}"}
+    else
+      {:error, :invalid_binding_field}
+    end
+  end
+
+  @doc false
+  # SystemAuthority calls this before it admits a grant under the narrow
+  # `issue_right_uri/2`. Returns the human the capability is bound to only when
+  # the unsigned capability has exactly the shape `issue/1` produces: exact
+  # disclosure URI, no delegation, bounded expiry, closed constraints, and
+  # session, task and human bindings present.
+  @spec self_issuable(term()) :: {:ok, String.t()} | {:error, atom()}
+  def self_issuable(%Capability{} = cap) do
+    with :ok <- validate_shape(cap),
+         :ok <- validate_issued_bindings(cap) do
+      {:ok, cap.principal_scope}
+    end
+  end
+
+  def self_issuable(_cap), do: {:error, :disclosure_capability_uri_malformed}
+
+  @doc false
+  # SystemAuthority calls this before it admits a revocation under the narrow
+  # right. A stored disclosure capability may already be near expiry, so only
+  # its identity (exact URI and human binding) is checked here.
+  @spec self_revocable(term()) :: {:ok, String.t()} | {:error, atom()}
+  def self_revocable(%Capability{resource_uri: uri, principal_scope: human_id}) do
+    if exact_disclosure_uri?(uri) and canonical_human_principal?(human_id),
+      do: {:ok, human_id},
+      else: {:error, :disclosure_capability_uri_malformed}
+  end
+
+  def self_revocable(_cap), do: {:error, :disclosure_capability_uri_malformed}
+
+  defp validate_issued_bindings(%Capability{} = cap) do
+    cond do
+      not canonical_field?(cap.session_id, @max_binding_field_bytes) ->
+        {:error, :disclosure_capability_wrong_session}
+
+      not canonical_field?(cap.task_id, @max_binding_field_bytes) ->
+        {:error, :disclosure_capability_wrong_task}
+
+      not canonical_human_principal?(cap.principal_scope) ->
+        {:error, :disclosure_capability_wrong_human}
+
+      cap.allowed_delegatees not in [nil, []] ->
+        {:error, :disclosure_capability_delegated}
+
+      true ->
+        :ok
     end
   end
 

@@ -127,6 +127,14 @@ defmodule Arbor.Agent.SignedLifecycleSecurityRegressionTest do
 
     # The operator owns the conversation, so `mix arbor.agent chat` can reach it.
     assert holds?(operator.principal, "arbor://chat/agent/#{agent_id}")
+
+    # ...and the agent's Session can mint the one-turn disclosure capability
+    # for the operator's own chat turn to an external route. Without this a
+    # fresh install refused every chat as :turn_preparation_refused
+    # (2026-11-13). The right is the narrow one, never a general self-grant.
+    assert {:ok, disclose} = Security.disclosure_issue_right_uri(agent_id, operator.principal)
+    assert holds?(agent_id, disclose)
+    refute holds?(agent_id, "arbor://security/grant/#{agent_id}")
     # Still no server-held key for the operator.
     assert {:error, :no_signing_key} = Security.signing_key_status(operator.principal)
 

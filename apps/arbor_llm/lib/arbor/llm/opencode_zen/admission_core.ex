@@ -134,7 +134,7 @@ defmodule Arbor.LLM.OpenCodeZen.AdmissionCore do
     {unreachable, failed} =
       Enum.split_with(rejected, fn record ->
         reason = to_string(Map.get(record, "reason") || Map.get(record, :reason) || "")
-        String.contains?(reason, "ua_gated")
+        String.contains?(reason, "ua_gated") or String.starts_with?(reason, "unreachable")
       end)
 
     rejected_lines = Enum.map(failed, &rejection_line/1)

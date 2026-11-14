@@ -199,6 +199,8 @@ another one. It doubles as user documentation — anyone standing up agents need
   the route. Tainted→external is *meant* to gate — that's the exfil defense, not a
   misconfiguration.
 - **Both interesting branches are currently unreachable in production (2026-08-20).**
+  (Superseded for branch 2: Session turns mint one since 2026-08-04, and since
+  2026-11-14 a created agent holds the narrow right to do so — see §40.)
   Nothing outside `arbor_security` mints a disclosure capability, so branch 2 can
   never take its `:allow` path; and no ingress ever assigns `:hostile` (`web.ex`
   ingress declares `output_taint :untrusted`; `:hostile` appears only as a
@@ -1292,6 +1294,32 @@ Read this when changing capabilities, trust, authorization, identity, URI matchi
   `HOME=~/.arbor/distribution` because they boot distributed and run no Arbor
   code locally. Migrate legacy state with `mix arbor.home.migrate`.
   Regression: `gated_distribution_security_regression_test.exs`.
+
+## 40. A Session mints its turn's disclosure capability under a narrow right (2026-11-14)
+
+- **What:** an authenticated human turn on an `:external_provider` route needs a
+  one-turn disclosure capability (§5 branch 2). The Session mints it with the
+  agent's own authority, so since §33 the agent must hold either the general
+  `arbor://security/grant/<agent_id>` (lets it grant itself anything; retired for
+  the lifecycle principal 2026-10-08) or the narrow
+  `arbor://security/disclose/<agent_id>/<human_id>`
+  (`Arbor.Security.disclosure_issue_right_uri/2`). SystemAuthority admits the
+  narrow right only for a well-formed disclosure grant from the agent to itself
+  bound to that human, and for revoking it. `Lifecycle.create/2` grants it to the
+  creator's agents (not under an exact template policy).
+- **Symptom:** `mix arbor.agent chat` → `Chat failed: :delivery_failed`; log
+  `[MessageFacade] authenticated delivery failed: {:session_error,
+  :turn_preparation_refused}` right after `ToolDisclosure.profile_tools`, before
+  any LLM call. Since 2026-11-14 the Session also logs
+  `[Session] turn refused for <agent> at route_and_disclosure:
+  :capability_mutation_unauthorized`.
+- **Action:** for an agent created before this fix, have an administrator grant
+  it the narrow right for its owner (or recreate it). Never grant
+  `arbor://security/grant/<agent_id>` to clear this. Tests that build a Session
+  by hand must grant the narrow right too; the P5 fixture's general grant hid
+  the production gap. Regressions:
+  `disclosure_issue_right_security_regression_test.exs` (capabilities) and
+  `session_disclosure_issue_right_security_regression_test.exs` (orchestrator).
 
 ## 2026-10-11 cross-library review — new gates and sharpened ones
 

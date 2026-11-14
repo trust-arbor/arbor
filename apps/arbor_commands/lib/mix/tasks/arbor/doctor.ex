@@ -76,6 +76,7 @@ defmodule Mix.Tasks.Arbor.Doctor do
   """
   use Mix.Task
 
+  alias Arbor.LLM.OpenCodeZen
   alias Mix.Tasks.Arbor.Helpers, as: ArborConfig
 
   # Provider priority order for --configure: free / local / ACP before paid APIs.
@@ -534,7 +535,7 @@ defmodule Mix.Tasks.Arbor.Doctor do
         if opts[:configure] do
           case maybe_acknowledge_keyless(provider_atom) do
             :ok ->
-              configure_default(provider_atom, model)
+              configure_default(provider_atom, confirm_served_model(provider_atom, model))
 
             {:error, :disclosure_not_acknowledged} ->
               Mix.shell().error(
@@ -779,7 +780,7 @@ defmodule Mix.Tasks.Arbor.Doctor do
   end
 
   defp select_best_model(:opencode_zen, :opencode_zen) do
-    case Arbor.LLM.OpenCodeZen.admitted_ids() do
+    case OpenCodeZen.admitted_ids() do
       [id | _] -> id
       _ -> nil
     end
@@ -900,9 +901,67 @@ defmodule Mix.Tasks.Arbor.Doctor do
   end
 
   defp maybe_acknowledge_keyless(:opencode_zen),
-    do: Arbor.LLM.OpenCodeZen.prompt_acknowledgement()
+    do: OpenCodeZen.prompt_acknowledgement()
 
   defp maybe_acknowledge_keyless(_provider), do: :ok
+
+  # The admitted list is recorded evidence and goes stale when the free tier
+  # rotates: on 2026-11-13 the doctor configured its first entry,
+  # `x-preview-f-free`, which the relay no longer served, so every call failed
+  # with "Model is unavailable". After the disclosure is acknowledged, ask the
+  # relay which models it serves (a model listing; no prompt is sent) and take
+  # the first admitted one it does. Say so when that cannot be checked.
+  defp confirm_served_model(:opencode_zen, model) do
+    admitted = OpenCodeZen.admitted_ids()
+
+    case opencode_zen_choice(admitted, OpenCodeZen.discover_free_candidates()) do
+      {:served, ^model} ->
+        model
+
+      {:served, id} ->
+        Mix.shell().info("  Using #{id}: OpenCode Zen no longer serves #{model}.")
+        id
+
+      {:unverified, id} ->
+        Mix.shell().info(
+          "  Could not check which models OpenCode Zen serves right now; " <>
+            "using #{id} without that check."
+        )
+
+        id
+
+      {:none_served, id} ->
+        Mix.shell().error("""
+          None of Arbor's admitted OpenCode Zen models (#{Enum.join(admitted, ", ")})
+          is served by OpenCode Zen right now. Configuring #{id} anyway; requests
+          will fail until the admission list is refreshed with
+          `mix arbor.eval.opencode_zen --live`, or pick another provider.
+        """)
+
+        id
+
+      :none_admitted ->
+        model
+    end
+  end
+
+  defp confirm_served_model(_provider, model), do: model
+
+  @doc false
+  # Pure choice behind `confirm_served_model/2`: the first admitted id the relay
+  # currently serves, in admitted order. Public only for testing.
+  @spec opencode_zen_choice([String.t()], {:ok, [String.t()]} | {:error, term()}) ::
+          {:served | :unverified | :none_served, String.t()} | :none_admitted
+  def opencode_zen_choice([], _discovery), do: :none_admitted
+
+  def opencode_zen_choice([first | _] = admitted, {:ok, served}) when is_list(served) do
+    case Enum.find(admitted, &(&1 in served)) do
+      nil -> {:none_served, first}
+      id -> {:served, id}
+    end
+  end
+
+  def opencode_zen_choice([first | _], _discovery), do: {:unverified, first}
 
   defp configure_default(provider_atom, model) do
     env_path = Path.join(File.cwd!(), ".env")

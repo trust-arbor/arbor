@@ -1,141 +1,333 @@
 {
   "version": 1,
   "provider": "opencode_zen",
-  "recorded_at": "2026-08-23",
+  "recorded_at": "2026-11-14",
   "eval": {
-    "tier1": "mechanical_tool_call \u2014 live request through Arbor's own adapter, verdict by AdmissionCore.well_formed_tool_call?/1",
-    "tier2": "mix arbor.eval.task \u2014 real agent against a real bug; NOT YET RUN. Admission requires a passing tier 1 and the ABSENCE of a tier-2 failure, so these are admitted on tier-1 evidence only."
+    "tier1": "mechanical_tool_call",
+    "tier2": "mix arbor.eval.task --max-heartbeats 3 --bug glob_wildcard --variants bare"
   },
-  "note": "Candidates discovered live from GET /zen/v1/models filtered by the -free convention, NOT from this file. Tier 1 was measured live on 2026-08-23: a real tool-call request through Arbor's own adapter, judged by AdmissionCore.well_formed_tool_call?/1. Tier 2 has not run (the arbor.eval.task harness is blocked on provider-route policy). Admitted here means TIER-1 EVIDENCE ONLY \u2014 see evidence_level/1. A model whose tier 2 is measured and FAILS is rejected permanently; only a tier 2 that has not run is permissive. Do not mark tier2 passed without running it. No context_window is recorded: the relay's /models endpoint publishes none, and inventing one is the defect this file exists to avoid. ModelProfile.get/1 falls back to conservative defaults.",
+  "note": "Refreshed 2026-11-14 by mix arbor.eval.opencode_zen --live from relay discovery (GET /zen/v1/models, 12 free candidates). Every candidate answered tier 1 with HTTP 429 FreeUsageLimitError to Arbor's honest attribution, so the probe produced no new evidence about any model: a probe that never reaches the model keeps the recorded verdict (with a last_probe note) and lists a new candidate as unreachable, never as a measured failure. x-preview-f-free and nemotron-3-ultra-free were dropped because the relay no longer serves them. nemotron-3.5-lightning-free stays admitted on its 2026-08-23 tier-1 evidence. Tier 2 did not run. No context_window is recorded: the relay publishes none.",
   "models": [
     {
-      "id": "x-preview-f-free",
-      "status": "admitted",
       "evidence": {
         "tier1": {
-          "passed": true,
+          "at": "2026-08-23",
           "eval": "mechanical_tool_call",
-          "at": "2026-08-23"
+          "passed": true
         },
         "tier2": {
+          "at": "2026-08-23",
           "passed": false,
-          "skipped": true,
           "reason": "harness_unavailable",
-          "at": "2026-08-23"
+          "skipped": true
         }
       },
-      "evidence_level": "tier1_only"
-    },
-    {
-      "id": "nemotron-3-ultra-free",
-      "status": "admitted",
-      "evidence": {
-        "tier1": {
-          "passed": true,
-          "eval": "mechanical_tool_call",
-          "at": "2026-08-23"
-        },
-        "tier2": {
-          "passed": false,
-          "skipped": true,
-          "reason": "harness_unavailable",
-          "at": "2026-08-23"
-        }
-      },
-      "evidence_level": "tier1_only"
-    },
-    {
+      "evidence_level": "tier1_only",
       "id": "nemotron-3.5-lightning-free",
-      "status": "admitted",
+      "last_probe": {
+        "at": "2026-11-14",
+        "outcome": "unreachable_429_free_usage_limit"
+      },
+      "status": "admitted"
+    },
+    {
       "evidence": {
         "tier1": {
-          "passed": true,
+          "at": "2026-08-23",
           "eval": "mechanical_tool_call",
-          "at": "2026-08-23"
+          "passed": false
+        }
+      },
+      "id": "laguna-s-2.1-free",
+      "reason": "no_well_formed_tool_call",
+      "status": "rejected"
+    },
+    {
+      "evidence": {
+        "tier1": {
+          "at": "2026-08-23",
+          "eval": "mechanical_tool_call",
+          "note": "plain completion succeeds; 400s when tools are supplied",
+          "passed": false
+        }
+      },
+      "id": "hy3-free",
+      "reason": "tool_call_request_rejected_400",
+      "status": "rejected"
+    },
+    {
+      "evidence": {
+        "tier1": {
+          "at": "2026-08-23",
+          "eval": "mechanical_tool_call",
+          "passed": false
+        }
+      },
+      "id": "deepseek-v4-flash-free",
+      "reason": "tool_call_request_rejected_400",
+      "status": "rejected"
+    },
+    {
+      "evidence": {
+        "tier1": {
+          "at": "2026-08-23",
+          "eval": "mechanical_tool_call",
+          "passed": false
+        }
+      },
+      "id": "muse-spark-1.2-contributor-free",
+      "reason": "tool_call_request_rejected_400",
+      "status": "rejected"
+    },
+    {
+      "evidence": {
+        "tier1": {
+          "at": "2026-08-23",
+          "eval": "mechanical_tool_call",
+          "note": "relay 429s FreeUsageLimitError for honest attribution; hermes-agent delisted for the same reason. Arbor does not spoof opencode/latest.",
+          "passed": false
+        }
+      },
+      "id": "big-pickle",
+      "last_probe": {
+        "at": "2026-11-14",
+        "outcome": "unreachable_429_free_usage_limit"
+      },
+      "reason": "ua_gated_429",
+      "status": "rejected"
+    },
+    {
+      "evidence": {
+        "tier1": {
+          "at": "2026-08-23",
+          "eval": "mechanical_tool_call",
+          "note": "relay 429s FreeUsageLimitError for honest attribution; hermes-agent delisted for the same reason.",
+          "passed": false
+        }
+      },
+      "id": "mimo-v2.5-free",
+      "reason": "ua_gated_429",
+      "status": "rejected"
+    },
+    {
+      "context_window": null,
+      "evidence": {
+        "tier1": {
+          "eval": "mechanical_tool_call",
+          "passed": false,
+          "reason": "unreachable_429_free_usage_limit"
         },
         "tier2": {
           "passed": false,
-          "skipped": true,
-          "reason": "harness_unavailable",
-          "at": "2026-08-23"
+          "reason": "tier1_unreachable",
+          "skipped": true
         }
       },
-      "evidence_level": "tier1_only"
+      "id": "beam-free",
+      "last_probe": {
+        "at": "2026-11-14",
+        "outcome": "unreachable_429_free_usage_limit"
+      },
+      "reason": "unreachable_429_free_usage_limit",
+      "status": "rejected"
     },
     {
-      "id": "laguna-s-2.1-free",
-      "status": "rejected",
-      "reason": "no_well_formed_tool_call",
+      "context_window": null,
       "evidence": {
         "tier1": {
-          "passed": false,
           "eval": "mechanical_tool_call",
-          "at": "2026-08-23"
+          "passed": false,
+          "reason": "unreachable_429_free_usage_limit"
+        },
+        "tier2": {
+          "passed": false,
+          "reason": "tier1_unreachable",
+          "skipped": true
         }
-      }
+      },
+      "id": "deepseek-v4.1-flash-free",
+      "last_probe": {
+        "at": "2026-11-14",
+        "outcome": "unreachable_429_free_usage_limit"
+      },
+      "reason": "unreachable_429_free_usage_limit",
+      "status": "rejected"
     },
     {
-      "id": "hy3-free",
-      "status": "rejected",
-      "reason": "tool_call_request_rejected_400",
+      "context_window": null,
       "evidence": {
         "tier1": {
-          "passed": false,
           "eval": "mechanical_tool_call",
-          "at": "2026-08-23",
-          "note": "plain completion succeeds; 400s when tools are supplied"
+          "passed": false,
+          "reason": "unreachable_429_free_usage_limit"
+        },
+        "tier2": {
+          "passed": false,
+          "reason": "tier1_unreachable",
+          "skipped": true
         }
-      }
+      },
+      "id": "flint-40b-free",
+      "last_probe": {
+        "at": "2026-11-14",
+        "outcome": "unreachable_429_free_usage_limit"
+      },
+      "reason": "unreachable_429_free_usage_limit",
+      "status": "rejected"
     },
     {
-      "id": "deepseek-v4-flash-free",
-      "status": "rejected",
-      "reason": "tool_call_request_rejected_400",
+      "context_window": null,
       "evidence": {
         "tier1": {
-          "passed": false,
           "eval": "mechanical_tool_call",
-          "at": "2026-08-23"
+          "passed": false,
+          "reason": "unreachable_429_free_usage_limit"
+        },
+        "tier2": {
+          "passed": false,
+          "reason": "tier1_unreachable",
+          "skipped": true
         }
-      }
+      },
+      "id": "glm-5.3-flash-free",
+      "last_probe": {
+        "at": "2026-11-14",
+        "outcome": "unreachable_429_free_usage_limit"
+      },
+      "reason": "unreachable_429_free_usage_limit",
+      "status": "rejected"
     },
     {
-      "id": "muse-spark-1.2-contributor-free",
-      "status": "rejected",
-      "reason": "tool_call_request_rejected_400",
+      "context_window": null,
       "evidence": {
         "tier1": {
-          "passed": false,
           "eval": "mechanical_tool_call",
-          "at": "2026-08-23"
+          "passed": false,
+          "reason": "unreachable_429_free_usage_limit"
+        },
+        "tier2": {
+          "passed": false,
+          "reason": "tier1_unreachable",
+          "skipped": true
         }
-      }
+      },
+      "id": "iceman-free",
+      "last_probe": {
+        "at": "2026-11-14",
+        "outcome": "unreachable_429_free_usage_limit"
+      },
+      "reason": "unreachable_429_free_usage_limit",
+      "status": "rejected"
     },
     {
-      "id": "big-pickle",
-      "status": "rejected",
-      "reason": "ua_gated_429",
+      "context_window": null,
       "evidence": {
         "tier1": {
-          "passed": false,
           "eval": "mechanical_tool_call",
-          "at": "2026-08-23",
-          "note": "relay 429s FreeUsageLimitError for honest attribution; hermes-agent delisted for the same reason. Arbor does not spoof opencode/latest."
+          "passed": false,
+          "reason": "unreachable_429_free_usage_limit"
+        },
+        "tier2": {
+          "passed": false,
+          "reason": "tier1_unreachable",
+          "skipped": true
         }
-      }
+      },
+      "id": "inkling-2-small-free",
+      "last_probe": {
+        "at": "2026-11-14",
+        "outcome": "unreachable_429_free_usage_limit"
+      },
+      "reason": "unreachable_429_free_usage_limit",
+      "status": "rejected"
     },
     {
-      "id": "mimo-v2.5-free",
-      "status": "rejected",
-      "reason": "ua_gated_429",
+      "context_window": null,
       "evidence": {
         "tier1": {
-          "passed": false,
           "eval": "mechanical_tool_call",
-          "at": "2026-08-23",
-          "note": "relay 429s FreeUsageLimitError for honest attribution; hermes-agent delisted for the same reason."
+          "passed": false,
+          "reason": "unreachable_429_free_usage_limit"
+        },
+        "tier2": {
+          "passed": false,
+          "reason": "tier1_unreachable",
+          "skipped": true
         }
-      }
+      },
+      "id": "longcat-2.5-free",
+      "last_probe": {
+        "at": "2026-11-14",
+        "outcome": "unreachable_429_free_usage_limit"
+      },
+      "reason": "unreachable_429_free_usage_limit",
+      "status": "rejected"
+    },
+    {
+      "context_window": null,
+      "evidence": {
+        "tier1": {
+          "eval": "mechanical_tool_call",
+          "passed": false,
+          "reason": "unreachable_429_free_usage_limit"
+        },
+        "tier2": {
+          "passed": false,
+          "reason": "tier1_unreachable",
+          "skipped": true
+        }
+      },
+      "id": "mimo-v2.6-flash-free",
+      "last_probe": {
+        "at": "2026-11-14",
+        "outcome": "unreachable_429_free_usage_limit"
+      },
+      "reason": "unreachable_429_free_usage_limit",
+      "status": "rejected"
+    },
+    {
+      "context_window": null,
+      "evidence": {
+        "tier1": {
+          "eval": "mechanical_tool_call",
+          "passed": false,
+          "reason": "unreachable_429_free_usage_limit"
+        },
+        "tier2": {
+          "passed": false,
+          "reason": "tier1_unreachable",
+          "skipped": true
+        }
+      },
+      "id": "minimax-m3.1-flash-free",
+      "last_probe": {
+        "at": "2026-11-14",
+        "outcome": "unreachable_429_free_usage_limit"
+      },
+      "reason": "unreachable_429_free_usage_limit",
+      "status": "rejected"
+    },
+    {
+      "context_window": null,
+      "evidence": {
+        "tier1": {
+          "eval": "mechanical_tool_call",
+          "passed": false,
+          "reason": "unreachable_429_free_usage_limit"
+        },
+        "tier2": {
+          "passed": false,
+          "reason": "tier1_unreachable",
+          "skipped": true
+        }
+      },
+      "id": "nemotron-3.5-super-vl-free",
+      "last_probe": {
+        "at": "2026-11-14",
+        "outcome": "unreachable_429_free_usage_limit"
+      },
+      "reason": "unreachable_429_free_usage_limit",
+      "status": "rejected"
     }
   ]
 }

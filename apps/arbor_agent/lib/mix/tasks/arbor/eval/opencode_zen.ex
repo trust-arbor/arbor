@@ -51,7 +51,7 @@ defmodule Mix.Tasks.Arbor.Eval.OpencodeZen do
     case OpenCodeZen.prompt_acknowledgement() do
       :ok ->
         start_live_apps()
-        ids = live_ids(opts)
+        {ids, served} = live_ids(opts)
         max_heartbeats = opts[:max_heartbeats] || 3
 
         Mix.shell().info("Live probe of #{length(ids)} candidate(s). Tier 1 is mechanical;")
@@ -63,6 +63,7 @@ defmodule Mix.Tasks.Arbor.Eval.OpencodeZen do
           OpenCodeZen.with_probe_models(ids, fn ->
             OpenCodeZenLive.run(
               ids: ids,
+              served: served,
               max_heartbeats: max_heartbeats,
               log: fn line -> Mix.shell().info(line) end
             )
@@ -89,6 +90,13 @@ defmodule Mix.Tasks.Arbor.Eval.OpencodeZen do
   end
 
   defp start_live_apps do
+    # Load runtime config (and with it `.env`) the way `app.start` would;
+    # without it Security refuses to start with :session_token_secret_missing.
+    Mix.Task.run("app.config")
+    # Mix prunes OTP application paths no project app declares. The kernel
+    # runtime starts :os_mon as a provider, so without this the task dies on
+    # a fresh core build with `{~c"no such file or directory", ~c"os_mon.app"}`.
+    Mix.ensure_application!(:os_mon)
     {:ok, _} = Application.ensure_all_started(:arbor_memory)
     {:ok, _} = Application.ensure_all_started(:arbor_ai)
     {:ok, _} = Application.ensure_all_started(:arbor_orchestrator)
@@ -100,7 +108,7 @@ defmodule Mix.Tasks.Arbor.Eval.OpencodeZen do
   defp live_ids(opts) do
     case opts[:model] do
       id when is_binary(id) and id != "" ->
-        [id]
+        {[id], nil}
 
       _ ->
         # Discover from the relay, NOT from the local admission file. Sourcing
@@ -109,7 +117,7 @@ defmodule Mix.Tasks.Arbor.Eval.OpencodeZen do
         # catalog of models the relay does not serve survived unchallenged.
         case OpenCodeZen.discover_free_candidates() do
           {:ok, [_ | _] = ids} ->
-            ids
+            {ids, ids}
 
           {:ok, []} ->
             Mix.raise("OpenCode Zen returned no free-tier candidates.")
