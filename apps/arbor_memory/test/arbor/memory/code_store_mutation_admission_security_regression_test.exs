@@ -356,6 +356,9 @@ defmodule Arbor.Memory.CodeStoreMutationAdmissionSecurityRegressionTest do
 
   test "legacy delete/clear stay compatible, reads are root-free, and cleanup remains usable after drain" do
     agent_id = unique_agent("compat")
+    previous_seam = Arbor.Memory.Test.ConfirmingVectorSeam.install!()
+
+    on_exit(fn -> Arbor.Memory.Test.ConfirmingVectorSeam.restore(previous_seam) end)
 
     assert {:ok, keep} = store_pattern(agent_id, "keep")
     assert {:ok, drop} = store_pattern(agent_id, "drop")

@@ -394,6 +394,24 @@ defmodule Arbor.Memory.GraphOps do
   end
 
   @doc """
+  Remove one knowledge node and its edges.
+
+  Idempotent: a missing node is success. Used by item-level deletes that must
+  drop leftover derived artifacts without replacing the whole graph.
+  """
+  @spec remove_knowledge(String.t(), String.t()) :: :ok | {:error, term()}
+  def remove_knowledge(agent_id, node_id) do
+    operation_id = new_operation_id("remove_node")
+
+    case reconcile_ambiguous(fn ->
+           KnowledgeGraphStore.remove_node(agent_id, operation_id, node_id)
+         end) do
+      :ok -> :ok
+      {:error, _reason} = error -> error
+    end
+  end
+
+  @doc """
   Get knowledge graph statistics.
   """
   @spec knowledge_stats(String.t()) :: {:ok, map()} | {:error, term()}

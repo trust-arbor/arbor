@@ -243,6 +243,22 @@ defmodule Arbor.Memory.KnowledgeGraphStore do
     end
   end
 
+  @spec remove_node(String.t(), String.t()) :: :ok | {:error, term()}
+  def remove_node(agent_id, node_id) do
+    with {:ok, operation} <- Operation.remove_node(node_id),
+         {:ok, :ok} <- call_operation(agent_id, operation) do
+      :ok
+    end
+  end
+
+  @spec remove_node(String.t(), String.t(), String.t()) :: :ok | {:error, term()}
+  def remove_node(agent_id, operation_id, node_id) do
+    with {:ok, operation} <- Operation.remove_node(operation_id, node_id),
+         {:ok, :ok} <- call_operation(agent_id, operation) do
+      :ok
+    end
+  end
+
   @spec cascade_recall(String.t(), String.t(), String.t(), number(), keyword()) ::
           {:ok, map()} | {:error, term()}
   def cascade_recall(agent_id, operation_id, node_id, boost_amount, opts \\ []) do

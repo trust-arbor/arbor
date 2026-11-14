@@ -5,6 +5,35 @@ defmodule Arbor.Actions.MemoryCodeTest do
 
   @moduletag :fast
 
+  defmodule ConfirmingVectorSeam do
+    @moduledoc false
+    @behaviour Arbor.Memory.StrictVectorSeam
+
+    @impl true
+    def encode_operation(_input), do: {:error, :unsupported}
+
+    @impl true
+    def encode_batch(_inputs), do: {:error, :unsupported}
+
+    @impl true
+    def execute(_agent_id, _input, _opts \\ []), do: {:error, :unsupported}
+
+    @impl true
+    def reconcile(_agent_id, _input, _opts \\ []), do: {:error, :unsupported}
+
+    @impl true
+    def search(_agent_id, _vector, _opts \\ []), do: {:error, :unsupported}
+
+    @impl true
+    def fetch(_agent_id, _namespace, _key, _opts \\ []), do: {:error, :not_found}
+
+    @impl true
+    def list(_agent_id, _opts \\ []), do: {:ok, []}
+
+    @impl true
+    def destroy(_agent_id, _opts \\ []), do: :ok
+  end
+
   setup_all do
     {:ok, _} = Application.ensure_all_started(:arbor_memory)
 
@@ -151,6 +180,16 @@ defmodule Arbor.Actions.MemoryCodeTest do
           purpose: "Delete me"
         })
 
+      previous = Application.fetch_env(:arbor_memory, :strict_vector_seam)
+      Application.put_env(:arbor_memory, :strict_vector_seam, ConfirmingVectorSeam)
+
+      on_exit(fn ->
+        case previous do
+          {:ok, value} -> Application.put_env(:arbor_memory, :strict_vector_seam, value)
+          :error -> Application.delete_env(:arbor_memory, :strict_vector_seam)
+        end
+      end)
+
       assert {:ok, result} =
                MemoryCode.DeleteCode.run(%{entry_id: entry.id}, ctx)
 
@@ -168,6 +207,37 @@ defmodule Arbor.Actions.MemoryCodeTest do
     test "validates action metadata" do
       assert MemoryCode.DeleteCode.name() == "code_pattern_delete"
       assert "delete" in MemoryCode.DeleteCode.tags()
+    end
+
+    test "returns structured failure and emits failed when delete_code cannot confirm cleanup",
+         %{agent_id: agent_id, context: ctx} do
+      {:ok, entry} =
+        Arbor.Memory.store_code(agent_id, %{
+          code: "to_fail_closed",
+          language: "elixir",
+          purpose: "surface cleanup failure"
+        })
+
+      parent = self()
+
+      {:ok, failed_id} =
+        Arbor.Signals.subscribe("action.failed", fn signal ->
+          send(parent, {:action_signal, :failed, signal})
+          :ok
+        end)
+
+      on_exit(fn -> Arbor.Signals.unsubscribe(failed_id) end)
+
+      stop_knowledge_graph_store!()
+
+      assert {:error, :store_unavailable} =
+               MemoryCode.DeleteCode.run(%{entry_id: entry.id}, ctx)
+
+      assert_receive {:action_signal, :failed, signal}, 1_000
+      assert signal.data.action == "code_pattern_delete"
+      assert signal.data.error == inspect(:store_unavailable)
+    after
+      restart_knowledge_graph_store!()
     end
   end
 
@@ -228,6 +298,45 @@ defmodule Arbor.Actions.MemoryCodeTest do
       tool = MemoryCode.ViewCode.to_tool()
       assert is_map(tool)
       assert tool[:name] == "code_pattern_view"
+    end
+  end
+
+  defp stop_knowledge_graph_store! do
+    case Process.whereis(Arbor.Memory.KnowledgeGraphStore) do
+      pid when is_pid(pid) ->
+        ref = Process.monitor(pid)
+
+        :ok =
+          Supervisor.terminate_child(Arbor.Memory.Supervisor, Arbor.Memory.KnowledgeGraphStore)
+
+        receive do
+          {:DOWN, ^ref, :process, ^pid, _} -> :ok
+        after
+          1_000 -> :ok
+        end
+
+      nil ->
+        :ok
+    end
+  end
+
+  defp restart_knowledge_graph_store! do
+    case Supervisor.restart_child(Arbor.Memory.Supervisor, Arbor.Memory.KnowledgeGraphStore) do
+      {:ok, _pid} -> :ok
+      {:ok, _pid, _info} -> :ok
+      {:error, :running} -> :ok
+      {:error, {:already_started, _pid}} -> :ok
+      {:error, :not_found} -> start_knowledge_graph_store!()
+      {:error, _reason} -> start_knowledge_graph_store!()
+    end
+  end
+
+  defp start_knowledge_graph_store! do
+    case Supervisor.start_child(Arbor.Memory.Supervisor, {Arbor.Memory.KnowledgeGraphStore, []}) do
+      {:ok, _pid} -> :ok
+      {:ok, _pid, _info} -> :ok
+      {:error, {:already_started, _pid}} -> :ok
+      {:error, :already_present} -> restart_knowledge_graph_store!()
     end
   end
 end

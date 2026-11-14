@@ -48,7 +48,7 @@ defmodule Arbor.Memory.KnowledgeGraph.Codec do
   @operation_kinds ~w(
     add_edge add_node add_pending_fact add_pending_learning add_pending_learning_batch
     approve_pending cascade_recall consolidate merge_node_metadata merge_node_metadata_batch
-    reinforce reject_pending
+    reinforce reject_pending remove_node
   )
   @config_keys ~w(auto_embed decay_rate max_nodes_per_type prune_threshold)
   @legacy_node_keys @node_keys ++ ["embedding"]
