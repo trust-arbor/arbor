@@ -33,7 +33,8 @@ defmodule Arbor.Agent.Eval.SecurityReview.AnthropicLoop do
           optional(:max_rounds) => pos_integer(),
           optional(:receive_timeout) => pos_integer(),
           optional(:api_key) => String.t(),
-          optional(:post) => function()
+          optional(:post) => function(),
+          optional(:req_http_options) => keyword()
         }
 
   @doc "Run the tool loop. Returns `{:ok, final_text}` or `{:error, reason}`."
@@ -42,7 +43,7 @@ defmodule Arbor.Agent.Eval.SecurityReview.AnthropicLoop do
     max_rounds = o[:max_rounds] || 8
     recv = o[:receive_timeout] || 600_000
     api_key = o[:api_key] || "lm-studio"
-    post = o[:post] || (&default_post/4)
+    post = o[:post] || default_post_fun(o)
 
     url = String.trim_trailing(base_url, "/") <> "/v1/messages"
 
@@ -75,7 +76,7 @@ defmodule Arbor.Agent.Eval.SecurityReview.AnthropicLoop do
   def single_shot(%{base_url: base_url, model: model, system: system, user: user} = o) do
     recv = o[:receive_timeout] || 300_000
     api_key = o[:api_key] || "lm-studio"
-    post = o[:post] || (&default_post/4)
+    post = o[:post] || default_post_fun(o)
 
     url = String.trim_trailing(base_url, "/") <> "/v1/messages"
 
@@ -218,8 +219,22 @@ defmodule Arbor.Agent.Eval.SecurityReview.AnthropicLoop do
 
   # ---------------------------------------------------------------------------
 
-  defp default_post(url, headers, body, recv) do
-    case Req.post(url, json: body, headers: headers, receive_timeout: recv, retry: false) do
+  defp default_post_fun(opts) do
+    extra = req_http_options(opts)
+    fn url, headers, body, recv -> default_post(url, headers, body, recv, extra) end
+  end
+
+  defp req_http_options(%{req_http_options: extra}) when is_list(extra), do: extra
+  defp req_http_options(_opts), do: []
+
+  defp default_post(url, headers, body, recv, extra) do
+    opts =
+      [json: body, headers: headers, receive_timeout: recv, retry: false]
+      |> Keyword.merge(extra)
+      |> Keyword.put(:redirect, false)
+      |> Keyword.put(:max_redirects, 0)
+
+    case Req.post(url, opts) do
       {:ok, %Req.Response{status: status, body: body}} when status in 200..299 ->
         {:ok, body}
 
