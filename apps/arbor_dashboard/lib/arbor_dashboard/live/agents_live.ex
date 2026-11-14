@@ -215,8 +215,7 @@ defmodule Arbor.Dashboard.Live.AgentsLive do
               <span
                 style={"width: 10px; height: 10px; border-radius: 50%; background: #{status_dot_color(@running_ids, profile.agent_id)};"}
                 title={status_title(@running_ids, profile.agent_id)}
-              >
-              </span>
+              ></span>
             </div>
             <div style="display: flex; gap: 1rem; font-size: 0.9rem; color: var(--aw-text-muted, #888);">
               <span :if={profile.template}>Template: {profile.template}</span>
