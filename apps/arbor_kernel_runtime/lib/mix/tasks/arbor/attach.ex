@@ -8,6 +8,20 @@ defmodule Mix.Tasks.Arbor.Attach do
 
   Since interactive sessions require a TTY, this task prints the `iex --remsh`
   command for you to run directly in your terminal.
+
+  ## Why the attach client keeps a private HOME
+
+  The daemon no longer redirects HOME (see `mix help arbor.start`), but this
+  client still boots with `HOME=~/.arbor/distribution`. A remote shell must be
+  distributed from the first instant, and OTP gives a boot-time node its cookie
+  only from argv (visible in `ps`) or from `$HOME/.erlang.cookie`. The private
+  HOME is the second channel. It is safe here because the client runs no
+  Arbor code and loads no Arbor configuration: every expression is evaluated
+  on the daemon, which resolves `~` to the real HOME. Locally, only IEx's
+  `~/.iex.exs` lookup and shell history see the private HOME.
+
+  The client starts with `-dist_listen false -hidden`: it dials the daemon and
+  accepts no connections of its own.
   """
   use Mix.Task
 
@@ -27,13 +41,6 @@ defmodule Mix.Tasks.Arbor.Attach do
     suffix = :rand.uniform(99_999)
     attach_name = "arbor_attach_#{suffix}@#{hostname}"
     remote_node = "#{Config.node_name()}@#{hostname}"
-    operator_home = System.get_env("HOME") || System.user_home!()
-    project_dir = File.cwd!()
-    bootstrap_path = Config.runtime_bootstrap_file(project_dir)
-
-    unless File.regular?(bootstrap_path) do
-      Mix.raise("Runtime HOME bootstrap is missing at #{bootstrap_path}")
-    end
 
     cookie_home =
       case Config.prepare_distribution_cookie(Config.cookie()) do
@@ -46,8 +53,6 @@ defmodule Mix.Tasks.Arbor.Attach do
         attach_name: attach_name,
         remote_node: remote_node,
         cookie_home: cookie_home,
-        operator_home: operator_home,
-        bootstrap_path: bootstrap_path,
         iex_path: Config.elixir_executable("iex"),
         erlang_bin_dir: Config.erlang_bin_dir()
       })
@@ -68,22 +73,19 @@ defmodule Mix.Tasks.Arbor.Attach do
         attach_name: attach_name,
         remote_node: remote_node,
         cookie_home: cookie_home,
-        operator_home: operator_home,
-        bootstrap_path: bootstrap_path,
         iex_path: iex_path,
         erlang_bin_dir: erlang_bin_dir
       }) do
     [
       "PATH=#{shell_quote(erlang_bin_dir)}:\"$PATH\"",
-      "ARBOR_RUNTIME_ORIGINAL_HOME=#{shell_quote(operator_home)}",
       "HOME=#{shell_quote(cookie_home)}",
       "ERL_AFLAGS=''",
       "ERL_FLAGS=''",
       "ERL_ZFLAGS=''",
       "ELIXIR_ERL_OPTIONS=''",
       shell_quote(iex_path),
-      "-r",
-      shell_quote(bootstrap_path),
+      "--erl",
+      shell_quote("-dist_listen false -hidden"),
       "--name",
       shell_quote(attach_name),
       "--remsh",

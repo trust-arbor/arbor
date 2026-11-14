@@ -241,8 +241,19 @@ defmodule Mix.Tasks.Arbor.Helpers do
   end
 
   @doc false
+  # The `-r` script that starts the daemon's gated distribution before Mix.
+  # It compiles the gated carriers (`bin/arbor_gated_tcp*_dist.erl`) from its
+  # own directory.
   def runtime_bootstrap_file(project_dir \\ File.cwd!()) do
-    Path.join(project_dir, "bin/arbor-runtime-home-bootstrap.exs") |> Path.expand()
+    Path.join(project_dir, "bin/arbor-gated-dist-bootstrap.exs") |> Path.expand()
+  end
+
+  @doc false
+  # Where the 2026-10-07..2026-11 launcher's daemon wrote `~` state while its
+  # VM HOME pointed at the cookie directory. `mix arbor.home.migrate` moves it
+  # back; `mix arbor.start` refuses to launch while it exists.
+  def legacy_home_root(home \\ arbor_home()) do
+    Path.join(distribution_cookie_home(home), ".arbor")
   end
 
   @doc false
@@ -630,6 +641,13 @@ defmodule Mix.Tasks.Arbor.Helpers do
 
   Uses a unique name to avoid conflicts with the server node.
   Always uses longnames for clustering compatibility.
+
+  The CLI node starts without a listener (`dist_listen: false`, which also
+  makes it hidden). Distribution comes up with whatever cookie OTP found in
+  the operator's `~/.erlang.cookie` before `set_cookie/1` installs Arbor's;
+  without a listener nobody can connect in during that gap. Every CLI task
+  only dials out to the daemon or a named peer, and a hidden CLI node does
+  not join the cluster's `global`/`pg` mesh or knit two daemons together.
   """
   def ensure_distribution do
     load_dotenv()
@@ -638,28 +656,14 @@ defmodule Mix.Tasks.Arbor.Helpers do
       ensure_epmd()
       suffix = :rand.uniform(99_999)
       host = node_hostname()
-      configure_distribution_bind(host)
       # Safe: suffix is bounded integer from :rand, host is detected IP or env var
       # credo:disable-for-next-line Credo.Check.Security.UnsafeAtomConversion
       name = :"arbor_mix_#{suffix}@#{host}"
-      {:ok, _} = Node.start(name, :longnames)
-      Node.set_cookie(cookie())
+      {:ok, _} = :net_kernel.start(name, %{name_domain: :longnames, dist_listen: false})
+      :erlang.set_cookie(cookie())
     end
 
     :ok
-  end
-
-  defp configure_distribution_bind(host) do
-    case distribution_bind_mode(host) do
-      "loopback_v4" ->
-        Application.put_env(:kernel, :inet_dist_use_interface, {127, 0, 0, 1})
-
-      "loopback_v6" ->
-        Application.put_env(:kernel, :inet_dist_use_interface, {0, 0, 0, 0, 0, 0, 0, 1})
-
-      "default" ->
-        :ok
-    end
   end
 
   defp ensure_epmd do

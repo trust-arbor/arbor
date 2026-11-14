@@ -20,26 +20,32 @@ defmodule Mix.Tasks.Arbor.StartDaemonLaunchTest do
     {:ok, tmp: tmp}
   end
 
-  test "security regression: daemon launch argv references a cookie home without the cookie" do
-    assert {:ok, argv} =
-             Start.daemon_launch_argv(%{
-               elixir_path: "/opt/elixir/bin/elixir",
-               name_flag: "--name",
-               node_string: "arbor_dev@127.0.0.1",
-               cookie_home: "/home/operator/.arbor/distribution",
-               bind_mode: "loopback_v4",
-               bootstrap_path: "/repo/bin/arbor-runtime-home-bootstrap.exs",
-               mix_path: "/opt/elixir/bin/mix",
-               log_file: "/tmp/arbor-dev.log"
-             })
+  defp argv_spec(overrides \\ %{}) do
+    Map.merge(
+      %{
+        elixir_path: "/opt/elixir/bin/elixir",
+        node_string: "arbor_dev@127.0.0.1",
+        name_type: "longnames",
+        cookie_file: "/home/operator/.arbor/distribution/.erlang.cookie",
+        bind_mode: "loopback_v4",
+        bootstrap_path: "/repo/bin/arbor-gated-dist-bootstrap.exs",
+        mix_path: "/opt/elixir/bin/mix",
+        log_file: "/tmp/arbor-dev.log"
+      },
+      overrides
+    )
+  end
+
+  test "security regression: daemon launch argv references a cookie file without the cookie" do
+    assert {:ok, argv} = Start.daemon_launch_argv(argv_spec())
 
     assert argv == [
              "/opt/elixir/bin/elixir",
-             "--name",
              "arbor_dev@127.0.0.1",
-             "/home/operator/.arbor/distribution",
+             "longnames",
+             "/home/operator/.arbor/distribution/.erlang.cookie",
              "loopback_v4",
-             "/repo/bin/arbor-runtime-home-bootstrap.exs",
+             "/repo/bin/arbor-gated-dist-bootstrap.exs",
              "/opt/elixir/bin/mix",
              "/tmp/arbor-dev.log"
            ]
@@ -47,11 +53,28 @@ defmodule Mix.Tasks.Arbor.StartDaemonLaunchTest do
     refute "secret-cookie" in argv
   end
 
+  test "security regression: daemon launch argv rejects values the launcher would word-split" do
+    assert {:error, :invalid_node_name} =
+             Start.daemon_launch_argv(argv_spec(%{node_string: "-eval@127.0.0.1"}))
+
+    assert {:error, :invalid_node_name} =
+             Start.daemon_launch_argv(argv_spec(%{node_string: "a b@127.0.0.1"}))
+
+    assert {:error, :invalid_name_type} =
+             Start.daemon_launch_argv(argv_spec(%{name_type: "--name"}))
+
+    assert {:error, :relative_cookie_file} =
+             Start.daemon_launch_argv(argv_spec(%{cookie_file: "cookie"}))
+
+    assert {:error, :invalid_distribution_bind_mode} =
+             Start.daemon_launch_argv(argv_spec(%{bind_mode: "all"}))
+  end
+
   test "security regression: daemon launch rejects a literal cookie field" do
     assert {:error, :invalid_launch_spec} =
              Start.daemon_launch_argv(%{
                elixir_path: "/opt/elixir/bin/elixir",
-               name_flag: "--name",
+               name_type: "longnames",
                node_string: "arbor_dev@127.0.0.1",
                cookie: "secret-cookie-visible-in-argv",
                mix_path: "/opt/elixir/bin/mix",
@@ -61,16 +84,7 @@ defmodule Mix.Tasks.Arbor.StartDaemonLaunchTest do
 
   test "daemon_launch_argv rejects empty arguments" do
     assert {:error, :empty_launch_argument} =
-             Start.daemon_launch_argv(%{
-               elixir_path: "/opt/elixir/bin/elixir",
-               name_flag: "--name",
-               node_string: "arbor_dev@127.0.0.1",
-               cookie_home: "",
-               bind_mode: "loopback_v4",
-               bootstrap_path: "/repo/bin/arbor-runtime-home-bootstrap.exs",
-               mix_path: "/opt/elixir/bin/mix",
-               log_file: "/tmp/arbor-dev.log"
-             })
+             Start.daemon_launch_argv(argv_spec(%{cookie_file: ""}))
   end
 
   test "security regression: daemon environment clears inherited VM flag injection" do
@@ -82,7 +96,8 @@ defmodule Mix.Tasks.Arbor.StartDaemonLaunchTest do
           "ERL_AFLAGS" => "-setcookie stolen",
           "ERL_FLAGS" => "-eval attacker run",
           "ERL_ZFLAGS" => "-pa /attacker",
-          "ELIXIR_ERL_OPTIONS" => "-setcookie stolen-again"
+          "ELIXIR_ERL_OPTIONS" => "-setcookie stolen-again",
+          "ARBOR_COOKIE" => "daemon-reads-the-cookie-file-instead"
         },
         :dev,
         "/trusted/erlang/bin"
@@ -93,7 +108,7 @@ defmodule Mix.Tasks.Arbor.StartDaemonLaunchTest do
     assert env["MIX_ENV"] == "dev"
     assert env["PATH"] == "/trusted/erlang/bin:/usr/bin"
 
-    for key <- Helpers.blocked_vm_flag_env() do
+    for key <- Helpers.blocked_vm_flag_env() ++ ["ARBOR_COOKIE"] do
       assert Map.fetch!(env, key) == nil
     end
   end
@@ -174,11 +189,11 @@ defmodule Mix.Tasks.Arbor.StartDaemonLaunchTest do
                project_dir: tmp,
                launcher: fake,
                elixir_path: "/resolved/elixir",
-               name_flag: "--name",
                node_string: "arbor_dev@10.0.0.1",
-               cookie_home: "/private/cookie-home",
+               name_type: "longnames",
+               cookie_file: "/private/cookie-home/.erlang.cookie",
                bind_mode: "default",
-               bootstrap_path: "/repo/bin/arbor-runtime-home-bootstrap.exs",
+               bootstrap_path: "/repo/bin/arbor-gated-dist-bootstrap.exs",
                mix_path: "/resolved/mix",
                log_file: log,
                env: env
@@ -186,11 +201,11 @@ defmodule Mix.Tasks.Arbor.StartDaemonLaunchTest do
 
     body = File.read!(record)
     assert body =~ "arg1=/resolved/elixir\n"
-    assert body =~ "arg2=--name\n"
-    assert body =~ "arg3=arbor_dev@10.0.0.1\n"
-    assert body =~ "arg4=/private/cookie-home\n"
+    assert body =~ "arg2=arbor_dev@10.0.0.1\n"
+    assert body =~ "arg3=longnames\n"
+    assert body =~ "arg4=/private/cookie-home/.erlang.cookie\n"
     assert body =~ "arg5=default\n"
-    assert body =~ "arg6=/repo/bin/arbor-runtime-home-bootstrap.exs\n"
+    assert body =~ "arg6=/repo/bin/arbor-gated-dist-bootstrap.exs\n"
     assert body =~ "arg7=/resolved/mix\n"
     assert body =~ "arg8=#{log}\n"
     assert body =~ "cwd=#{tmp}\n"
@@ -217,9 +232,8 @@ defmodule Mix.Tasks.Arbor.StartDaemonLaunchTest do
              Start.spawn_daemon_process(launch_spec(tmp, fake))
   end
 
-  test "security regression: launcher hides cookie, strips VM flags, and binds loopback", %{
-    tmp: tmp
-  } do
+  test "security regression: launcher keeps HOME, hides cookie, strips VM flags, gates loopback",
+       %{tmp: tmp} do
     project_dir = Path.expand("../../../../../../", __DIR__)
     assert {:ok, launcher} = Start.resolve_daemon_launcher(project_dir)
 
@@ -227,9 +241,10 @@ defmodule Mix.Tasks.Arbor.StartDaemonLaunchTest do
     record = Path.join(tmp, "child-record")
     arbor_home = Path.join(tmp, "arbor-home")
     secret = "cookie-visible-in-old-argv"
-    assert {:ok, cookie_home} = Helpers.prepare_distribution_cookie(secret, arbor_home)
+    assert {:ok, _cookie_home} = Helpers.prepare_distribution_cookie(secret, arbor_home)
+    cookie_file = Helpers.distribution_cookie_file(arbor_home)
 
-    bootstrap = Path.join(project_dir, "bin/arbor-runtime-home-bootstrap.exs")
+    bootstrap = Helpers.runtime_bootstrap_file(project_dir)
     assert File.regular?(bootstrap)
 
     sleep = System.find_executable("sleep") || "/bin/sleep"
@@ -241,7 +256,10 @@ defmodule Mix.Tasks.Arbor.StartDaemonLaunchTest do
     {
       for arg in "$@"; do printf 'arg=%s\\n' "$arg"; done
       printf 'home=%s\\n' "$HOME"
-      printf 'original_home=%s\\n' "$ARBOR_RUNTIME_ORIGINAL_HOME"
+      printf 'original_home=%s\\n' "${ARBOR_RUNTIME_ORIGINAL_HOME-unset}"
+      printf 'arbor_cookie=%s\\n' "${ARBOR_COOKIE-unset}"
+      printf 'name_type=%s\\n' "${ARBOR_DIST_NAME_TYPE-unset}"
+      printf 'cookie_file=%s\\n' "${ARBOR_DIST_COOKIE_FILE-unset}"
       printf 'erl_aflags=%s\\n' "${ERL_AFLAGS-unset}"
       printf 'erl_flags=%s\\n' "${ERL_FLAGS-unset}"
       printf 'erl_zflags=%s\\n' "${ERL_ZFLAGS-unset}"
@@ -257,15 +275,17 @@ defmodule Mix.Tasks.Arbor.StartDaemonLaunchTest do
                project_dir: tmp,
                launcher: launcher,
                elixir_path: fake_elixir,
-               name_flag: "--name",
                node_string: "node@127.0.0.1",
-               cookie_home: cookie_home,
+               name_type: "longnames",
+               cookie_file: cookie_file,
                bind_mode: "loopback_v4",
                bootstrap_path: bootstrap,
                mix_path: "/bin/true",
                log_file: log,
                env: [
                  {"ARBOR_LAUNCH_RECORD", record},
+                 {"ARBOR_COOKIE", secret},
+                 {"ARBOR_RUNTIME_ORIGINAL_HOME", "/stale"},
                  {"ERL_AFLAGS", "-setcookie #{secret}"},
                  {"ERL_FLAGS", "-eval attacker run"},
                  {"ERL_ZFLAGS", "-pa /attacker"},
@@ -281,13 +301,22 @@ defmodule Mix.Tasks.Arbor.StartDaemonLaunchTest do
     body = File.read!(record)
     refute body =~ secret
     refute body =~ "-setcookie"
-    assert body =~ "arg=--name\n"
-    assert body =~ "arg=node@127.0.0.1\n"
-    assert body =~ "inet_dist_use_interface {127,0,0,1}"
+    refute body =~ "arg=--name\n"
+    refute body =~ "arg=--sname\n"
+    assert body =~ "arg=--erl\n"
+
+    assert body =~
+             "arg=-nocookie -proto_dist arbor_gated_tcp -kernel inet_dist_use_interface {127,0,0,1} " <>
+               "inet_dist_listen_min 9100 inet_dist_listen_max 9155 net_ticktime 120 " <>
+               "-arbor_dist_node node@127.0.0.1\n"
+
     assert body =~ "arg=-r\n"
     assert body =~ "arg=#{bootstrap}\n"
-    assert body =~ "home=#{cookie_home}\n"
-    assert body =~ "original_home=#{System.get_env("HOME")}\n"
+    assert body =~ "home=#{System.get_env("HOME")}\n"
+    assert body =~ "original_home=unset\n"
+    assert body =~ "arbor_cookie=unset\n"
+    assert body =~ "name_type=longnames\n"
+    assert body =~ "cookie_file=#{cookie_file}\n"
     assert body =~ "erl_aflags=unset\n"
     assert body =~ "erl_flags=unset\n"
     assert body =~ "erl_zflags=unset\n"
@@ -297,14 +326,68 @@ defmodule Mix.Tasks.Arbor.StartDaemonLaunchTest do
     assert Bitwise.band(log_mode, 0o777) == 0o600
   end
 
+  test "security regression: launcher selects the IPv6 gated carrier for the IPv6 loopback", %{
+    tmp: tmp
+  } do
+    project_dir = Path.expand("../../../../../../", __DIR__)
+    assert {:ok, launcher} = Start.resolve_daemon_launcher(project_dir)
+    record = Path.join(tmp, "child-record")
+    fake_elixir = Path.join(tmp, "fake-elixir")
+
+    File.write!(fake_elixir, """
+    #!/bin/sh
+    for arg in "$@"; do printf 'arg=%s\\n' "$arg"; done > "$ARBOR_LAUNCH_RECORD"
+    """)
+
+    File.chmod!(fake_elixir, 0o755)
+
+    spec =
+      launch_spec(tmp, launcher)
+      |> Map.merge(%{elixir_path: fake_elixir, node_string: "n@::1", bind_mode: "loopback_v6"})
+      |> Map.put(:env, [{"ARBOR_LAUNCH_RECORD", record}])
+
+    assert {:ok, _pid} = Start.spawn_daemon_process(spec)
+    assert :ok = wait_for_file(record)
+
+    assert File.read!(record) =~
+             "-proto_dist arbor_gated_tcp6 -kernel inet_dist_use_interface {0,0,0,0,0,0,0,1}"
+  end
+
+  test "security regression: launcher rejects a node name that would inject VM flags", %{tmp: tmp} do
+    project_dir = Path.expand("../../../../../../", __DIR__)
+    assert {:ok, launcher} = Start.resolve_daemon_launcher(project_dir)
+
+    for node <- ["-eval@h", "a b@h", "n@h;x"] do
+      argv = ["/e", node, "longnames", "/c", "default", "/b.exs", "/m", Path.join(tmp, "l.log")]
+      # Trusted test fixtures only: absolute toolchain or launcher paths.
+      # credo:disable-for-next-line
+      assert {out, 2} = System.cmd(launcher, argv, stderr_to_stdout: true)
+      assert out =~ "invalid node name"
+    end
+  end
+
+  test "launcher honors a validated distribution listen range", %{tmp: tmp} do
+    project_dir = Path.expand("../../../../../../", __DIR__)
+    assert {:ok, launcher} = Start.resolve_daemon_launcher(project_dir)
+    argv = ["/e", "n@h", "longnames", "/c", "default", "/b.exs", "/m", Path.join(tmp, "l.log")]
+
+    for {min, max} <- [{"80", "90"}, {"9100", "70000"}, {"9200", "9100"}, {"9x", "9100"}] do
+      env = [{"ARBOR_DIST_LISTEN_MIN", min}, {"ARBOR_DIST_LISTEN_MAX", max}]
+      # Trusted test fixtures only: absolute toolchain or launcher paths.
+      # credo:disable-for-next-line
+      assert {out, 2} = System.cmd(launcher, argv, env: env, stderr_to_stdout: true)
+      assert out =~ "invalid distribution listen"
+    end
+  end
+
   defp launch_spec(tmp, launcher) do
     %{
       project_dir: tmp,
       launcher: launcher,
       elixir_path: "/e",
-      name_flag: "--name",
       node_string: "n@h",
-      cookie_home: "/cookie-home",
+      name_type: "longnames",
+      cookie_file: "/cookie-home/.erlang.cookie",
       bind_mode: "default",
       bootstrap_path: "/bootstrap.exs",
       mix_path: "/m",

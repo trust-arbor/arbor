@@ -182,6 +182,14 @@ defmodule Mix.Tasks.Arbor.LifecycleIdentityTest do
       assert {:verified_arbor, @node} = Identity.parse_arbor_node_from_argv(argv, @local_id)
     end
 
+    test "recognizes the gated launcher's -arbor_dist_node flag (no -name at boot)" do
+      argv =
+        "beam.smp -- -root /otp -- -home /Users/op -- -nocookie -proto_dist arbor_gated_tcp " <>
+          "-kernel inet_dist_listen_min 9100 -arbor_dist_node #{@node} -- -extra -r boot.exs mix run"
+
+      assert {:verified_arbor, @node} = Identity.parse_arbor_node_from_argv(argv, @local_id)
+    end
+
     test "recognizes single-dash -sname" do
       argv = "erl -sname #{@node} -cookie x"
       assert {:verified_arbor, @node} = Identity.parse_arbor_node_from_argv(argv, @local_id)

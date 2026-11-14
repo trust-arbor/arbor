@@ -146,9 +146,12 @@ defmodule Mix.Tasks.Arbor.LifecycleIdentity do
   # --- Exact argv identity check ----------------------------------------
 
   @doc """
-  Parses a process's argv line for a bounded, exact `-name`/`--name` or
-  `-sname`/`--sname` value (the Elixir launcher re-execs into `erl`, which
-  reports the single-dash form in `ps` output — both forms are recognized).
+  Parses a process's argv line for a bounded, exact `-arbor_dist_node`,
+  `-name`/`--name` or `-sname`/`--sname` value. The gated launcher starts
+  distribution from its bootstrap rather than at boot, so it names the node
+  with the plain `-arbor_dist_node` VM flag; daemons from older launchers
+  carry `-name` (the Elixir launcher re-execs into `erl`, which reports the
+  single-dash form in `ps` output — both forms are recognized).
   The value must match `arbor_dev_<hex>@<host>` with `<hex>` equal to this
   machine's own `local_node_id`. Never inspects or retains any
   `-cookie`/`--cookie` token or value.
@@ -171,8 +174,11 @@ defmodule Mix.Tasks.Arbor.LifecycleIdentity do
     tokens
     |> Enum.chunk_every(2, 1, :discard)
     |> Enum.find_value(fn
-      [flag, value] when flag in ["-name", "--name", "-sname", "--sname"] -> value
-      _ -> nil
+      [flag, value] when flag in ["-arbor_dist_node", "-name", "--name", "-sname", "--sname"] ->
+        value
+
+      _ ->
+        nil
     end)
   end
 

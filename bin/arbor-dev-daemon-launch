@@ -4,10 +4,21 @@
 # No eval, no free-form command string, no second parser of interpolated text.
 #
 # Usage:
-#   arbor-dev-daemon-launch ELIXIR_ABS NAME_FLAG NODE COOKIE_HOME BIND_MODE BOOTSTRAP MIX_ABS LOG_ABS
+#   arbor-dev-daemon-launch ELIXIR_ABS NODE NAME_TYPE COOKIE_FILE BIND_MODE BOOTSTRAP MIX_ABS LOG_ABS
 #
 # Backgrounds the fixed elixir/mix argv, redirects stdout/stderr to LOG, and
 # prints the child OS PID on stdout for pre-readiness launch tracking.
+#
+# The VM boots with the operator's real HOME and WITHOUT distribution:
+# `-nocookie` stops OTP from reading or creating any `.erlang.cookie`, and
+# `-proto_dist arbor_gated_tcp[6]` names the gated carrier. BOOTSTRAP (passed
+# with `-r`, so it runs before Mix) reads the cookie from COOKIE_FILE, starts
+# distribution as NODE, sets the cookie and only then opens the gate. The
+# cookie never appears in argv or the environment.
+#
+# Optional ARBOR_DIST_LISTEN_MIN / ARBOR_DIST_LISTEN_MAX (decimal ports,
+# default 9100-9155) move the distribution listen range, e.g. for a second,
+# isolated daemon.
 set -eu
 umask 077
 
@@ -17,28 +28,75 @@ if [ "$#" -ne 8 ]; then
 fi
 
 ELIXIR=$1
-NAME_FLAG=$2
-NODE=$3
-COOKIE_HOME=$4
+NODE=$2
+NAME_TYPE=$3
+COOKIE_FILE=$4
 BIND_MODE=$5
 BOOTSTRAP=$6
 MIX=$7
 LOG=$8
 
-if [ -z "$ELIXIR" ] || [ -z "$NAME_FLAG" ] || [ -z "$NODE" ] || [ -z "$COOKIE_HOME" ] || [ -z "$BIND_MODE" ] || [ -z "$BOOTSTRAP" ] || [ -z "$MIX" ] || [ -z "$LOG" ]; then
+if [ -z "$ELIXIR" ] || [ -z "$NODE" ] || [ -z "$NAME_TYPE" ] || [ -z "$COOKIE_FILE" ] || [ -z "$BIND_MODE" ] || [ -z "$BOOTSTRAP" ] || [ -z "$MIX" ] || [ -z "$LOG" ]; then
   echo "arbor-dev-daemon-launch: empty argument is not allowed" >&2
   exit 2
 fi
 
+# The node name is word-split into the VM argv by `--erl`, so admit only the
+# characters an Erlang node name needs.
+case "$NODE" in
+  -* | *[!A-Za-z0-9_.:@-]*)
+    echo "arbor-dev-daemon-launch: invalid node name" >&2
+    exit 2
+    ;;
+esac
+
+case "$NAME_TYPE" in
+  longnames | shortnames) ;;
+  *)
+    echo "arbor-dev-daemon-launch: invalid name type" >&2
+    exit 2
+    ;;
+esac
+
+case "$COOKIE_FILE" in
+  /*) ;;
+  *)
+    echo "arbor-dev-daemon-launch: cookie file must be an absolute path" >&2
+    exit 2
+    ;;
+esac
+
+LISTEN_MIN=${ARBOR_DIST_LISTEN_MIN:-9100}
+LISTEN_MAX=${ARBOR_DIST_LISTEN_MAX:-9155}
+
+for PORT in "$LISTEN_MIN" "$LISTEN_MAX"; do
+  case "$PORT" in
+    '' | *[!0-9]* | ?????? | ???????*)
+      echo "arbor-dev-daemon-launch: invalid distribution listen port" >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [ "$LISTEN_MIN" -lt 1024 ] || [ "$LISTEN_MAX" -gt 65535 ] || [ "$LISTEN_MIN" -gt "$LISTEN_MAX" ]; then
+  echo "arbor-dev-daemon-launch: invalid distribution listen range" >&2
+  exit 2
+fi
+
+LISTEN="inet_dist_listen_min $LISTEN_MIN inet_dist_listen_max $LISTEN_MAX net_ticktime 120"
+
 case "$BIND_MODE" in
   loopback_v4)
-    ERL_OPTIONS='-kernel inet_dist_use_interface {127,0,0,1} inet_dist_listen_min 9100 inet_dist_listen_max 9155 net_ticktime 120'
+    PROTO=arbor_gated_tcp
+    KERNEL_OPTIONS="-kernel inet_dist_use_interface {127,0,0,1} $LISTEN"
     ;;
   loopback_v6)
-    ERL_OPTIONS='-kernel inet_dist_use_interface {0,0,0,0,0,0,0,1} inet_dist_listen_min 9100 inet_dist_listen_max 9155 net_ticktime 120'
+    PROTO=arbor_gated_tcp6
+    KERNEL_OPTIONS="-kernel inet_dist_use_interface {0,0,0,0,0,0,0,1} $LISTEN"
     ;;
   default)
-    ERL_OPTIONS='-kernel inet_dist_listen_min 9100 inet_dist_listen_max 9155 net_ticktime 120'
+    PROTO=arbor_gated_tcp
+    KERNEL_OPTIONS="-kernel $LISTEN"
     ;;
   *)
     echo "arbor-dev-daemon-launch: invalid bind mode" >&2
@@ -53,16 +111,17 @@ unset ERL_FLAGS
 unset ERL_ZFLAGS
 unset ELIXIR_ERL_OPTIONS
 
-# OTP reads the cookie from $HOME/.erlang.cookie while distribution boots.
-# The required bootstrap restores the operator HOME before Mix evaluates
-# runtime configuration or starts any Arbor application.
-ARBOR_RUNTIME_ORIGINAL_HOME=$HOME
-export ARBOR_RUNTIME_ORIGINAL_HOME
-HOME=$COOKIE_HOME
-export HOME
+# The daemon reads its cookie from COOKIE_FILE. Keep the value out of the
+# VM's initial environment, which the same user can read back with `ps -E`.
+unset ARBOR_COOKIE
+unset ARBOR_RUNTIME_ORIGINAL_HOME
 
-"$ELIXIR" "$NAME_FLAG" "$NODE" \
-  --erl "$ERL_OPTIONS" \
+ARBOR_DIST_NAME_TYPE=$NAME_TYPE
+ARBOR_DIST_COOKIE_FILE=$COOKIE_FILE
+export ARBOR_DIST_NAME_TYPE ARBOR_DIST_COOKIE_FILE
+
+"$ELIXIR" \
+  --erl "-nocookie -proto_dist $PROTO $KERNEL_OPTIONS -arbor_dist_node $NODE" \
   -r "$BOOTSTRAP" "$MIX" run --no-halt \
   >"$LOG" 2>&1 &
 

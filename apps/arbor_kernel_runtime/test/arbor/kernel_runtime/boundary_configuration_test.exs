@@ -111,7 +111,7 @@ defmodule Arbor.KernelRuntime.BoundaryConfigurationTest do
     tasks = Enum.filter(modules, &mix_task?/1)
     # Doctor is command-layer diagnostics; Kernel Runtime owns the remaining
     # development tasks and must keep each one explicitly classified.
-    assert length(tasks) == 26
+    assert length(tasks) == 29
 
     for task <- tasks do
       task_definition = boundary_definition(task)

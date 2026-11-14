@@ -1246,6 +1246,27 @@ Read this when changing capabilities, trust, authorization, identity, URI matchi
   refuses ambient session minting without actor authority.
   Regression: `bridge_authorize_tool_route_security_regression_test.exs`.
 
+## 39. Dev daemon distribution is gated until its cookie is set (2026-11-13)
+
+- **What:** `bin/arbor-dev-daemon-launch` boots the daemon with the real HOME,
+  `-nocookie`, `-proto_dist arbor_gated_tcp` and no node name.
+  `bin/arbor-gated-dist-bootstrap.exs` compiles `bin/arbor_gated_tcp_dist.erl`,
+  validates `~/.arbor/distribution/.erlang.cookie` (regular file, no symlink,
+  owner-only), starts distribution, sets the cookie, then opens the gate. While
+  closed, the carrier hands `dist_util` an unmatchable allowed-node list.
+- **Symptom:** a connection during boot fails with `pang`; the daemon log shows
+  `** Connection attempt from disallowed node <peer> **` (name stage, before any
+  cookie challenge). An unsafe cookie file halts the VM before Mix with
+  `arbor-gated-dist-bootstrap: refusing to start distribution: ...`.
+  `mix arbor.start` refuses while `~/.arbor/distribution/.arbor` exists (state
+  from the 2026-10-07 HOME-redirect launcher).
+- **Action:** never start the daemon's distribution with `-nocookie` (or any
+  public cookie) without the gate; never move the cookie into argv or the
+  environment. Probes and `mix arbor.attach` still read the cookie from
+  `HOME=~/.arbor/distribution` because they boot distributed and run no Arbor
+  code locally. Migrate legacy state with `mix arbor.home.migrate`.
+  Regression: `gated_distribution_security_regression_test.exs`.
+
 ## 2026-10-11 cross-library review — new gates and sharpened ones
 
 - **Signal approval replies are sender-bound (F-003).** `Arbor.Comms.Router` routes a

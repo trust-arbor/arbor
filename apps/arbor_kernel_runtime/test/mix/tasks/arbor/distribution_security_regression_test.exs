@@ -106,18 +106,59 @@ defmodule Mix.Tasks.Arbor.DistributionSecurityRegressionTest do
         attach_name: "arbor_attach_123@127.0.0.1",
         remote_node: "arbor_dev_abcd@127.0.0.1",
         cookie_home: cookie_home,
-        operator_home: "/Users/operator",
-        bootstrap_path: "/repo/bin/arbor-runtime-home-bootstrap.exs",
         iex_path: "/opt/elixir/bin/iex",
         erlang_bin_dir: "/opt/erlang/bin"
       })
 
     assert command =~ "--name 'arbor_attach_123@127.0.0.1'"
     assert command =~ "--remsh 'arbor_dev_abcd@127.0.0.1'"
+    # The remsh client reads the cookie at boot from its private HOME; it
+    # runs no Arbor code locally and accepts no inbound connections.
     assert command =~ "HOME='#{cookie_home}'"
-    assert command =~ "-r '/repo/bin/arbor-runtime-home-bootstrap.exs'"
+    assert command =~ "--erl '-dist_listen false -hidden'"
+    refute command =~ "ARBOR_RUNTIME_ORIGINAL_HOME"
+    refute command =~ " -r "
     refute command =~ "--sname"
     refute command =~ "--cookie"
     refute command =~ secret
+  end
+
+  @tag :slow
+  test "security regression: CLI clients start distribution without a listener", %{tmp: tmp} do
+    # Node.start/2 used to listen (and register with epmd) under the operator's
+    # personal ~/.erlang.cookie until set_cookie/1 ran. Run the real
+    # ensure_distribution/0 in a separate VM and check it never listened.
+    home = Path.join(tmp, "cli-home")
+    File.mkdir_p!(home)
+    ebin = :code.which(Helpers) |> to_string() |> Path.dirname()
+    epmd = Path.join(Helpers.erlang_bin_dir(), "epmd")
+    # Trusted test fixtures only: absolute toolchain or launcher paths.
+    # credo:disable-for-next-line
+    {_, 0} = System.cmd(epmd, ["-daemon"], stderr_to_stdout: true)
+
+    script = """
+    :ok = Mix.Tasks.Arbor.Helpers.ensure_distribution()
+    {:ok, names} = :erl_epmd.names()
+    [name, _host] = node() |> Atom.to_string() |> String.split("@")
+    IO.puts("cookie_set=\#{:erlang.get_cookie() == :cli_regression_cookie}")
+    IO.puts("registered=\#{Enum.any?(names, fn {n, _port} -> List.to_string(n) == name end)}")
+    """
+
+    elixir = Helpers.elixir_executable("elixir")
+
+    env = [
+      {"HOME", home},
+      {"PATH", Helpers.erlang_bin_dir() <> ":" <> System.get_env("PATH", "")},
+      {"ARBOR_NODE_HOST", "127.0.0.1"},
+      {"ARBOR_COOKIE", "cli_regression_cookie"}
+    ]
+
+    opts = [cd: tmp, env: env, stderr_to_stdout: true]
+    # Trusted test fixtures only: absolute toolchain or launcher paths.
+    # credo:disable-for-next-line
+    {out, 0} = System.cmd(elixir, ["-pa", ebin, "-e", script], opts)
+
+    assert out =~ "cookie_set=true"
+    assert out =~ "registered=false"
   end
 end
