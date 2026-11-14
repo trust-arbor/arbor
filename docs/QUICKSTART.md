@@ -317,7 +317,13 @@ jobs; the maintainer's daily pipelines stay off unless
 ./bin/mix arbor.agent chat river "Hello — what should we talk about?"
 ```
 
-Or open `http://localhost:4001/chat` and talk to the agent there.
+`start` and `chat` sign with `~/.arbor/operator.key` from §5 (pass
+`--key-file PATH` if yours is elsewhere). Only the signed request reaches the
+server; the private key stays in the file.
+
+The dashboard's conversation page (`http://localhost:4001`) needs a signed-in
+session, which the local operator from §5 does not have yet, so talk to the
+agent through the CLI.
 
 On the free tier the first reply can take 20–60 s, because it is a shared free
 service. Through an ACP agent such as Claude Code it took 15–30 s in our runs.

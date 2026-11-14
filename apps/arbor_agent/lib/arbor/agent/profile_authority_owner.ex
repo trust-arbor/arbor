@@ -31,17 +31,17 @@ defmodule Arbor.Agent.ProfileAuthorityOwner do
   def store_signing_identity(_identity), do: {:error, :key_mutation_authority_required}
 
   def store_signing_identity(identity, actor_authority) do
-    with {:ok, principal} <- identity_principal(identity),
-         {:ok, proof} <- key_operation_proof(actor_authority, :store, principal) do
-      call({:store_signing_identity, identity, actor_authority, proof})
+    with {:ok, _principal} <- identity_principal(identity),
+         {:ok, actor_id} <- key_operation_actor(actor_authority) do
+      call({:store_signing_identity, identity, actor_authority, actor_id})
     end
   end
 
   def delete_signing_key(_principal), do: {:error, :key_mutation_authority_required}
 
   def delete_signing_key(principal, actor_authority) when is_binary(principal) do
-    with {:ok, proof} <- key_operation_proof(actor_authority, :delete, principal) do
-      call({:delete_signing_key, principal, actor_authority, proof})
+    with {:ok, actor_id} <- key_operation_actor(actor_authority) do
+      call({:delete_signing_key, principal, actor_authority, actor_id})
     end
   end
 
@@ -52,9 +52,9 @@ defmodule Arbor.Agent.ProfileAuthorityOwner do
     do: {:error, :key_mutation_authority_required}
 
   def build_stored_identity_registration_proof(identity, actor_authority) do
-    with {:ok, principal} <- identity_principal(identity),
-         {:ok, proof} <- key_operation_proof(actor_authority, :registration_proof, principal) do
-      call({:build_stored_identity_registration_proof, identity, actor_authority, proof})
+    with {:ok, _principal} <- identity_principal(identity),
+         {:ok, actor_id} <- key_operation_actor(actor_authority) do
+      call({:build_stored_identity_registration_proof, identity, actor_authority, actor_id})
     end
   end
 
@@ -258,7 +258,7 @@ defmodule Arbor.Agent.ProfileAuthorityOwner do
   end
 
   def handle_call(
-        {:store_signing_identity, identity, actor_authority, proof},
+        {:store_signing_identity, identity, actor_authority, actor_id},
         {caller, _tag},
         state
       ) do
@@ -273,7 +273,6 @@ defmodule Arbor.Agent.ProfileAuthorityOwner do
            when is_binary(agent_id) and is_binary(public_key) and is_binary(private_key) and
                   is_binary(encryption_public_key) and is_binary(encryption_private_key) <-
              identity,
-           {:ok, actor_id} <- verify_key_operation_proof(proof, :store, agent_id, caller),
            :ok <-
              Arbor.Security.validate_signing_authority_owner(
                actor_authority,
@@ -295,13 +294,12 @@ defmodule Arbor.Agent.ProfileAuthorityOwner do
   end
 
   def handle_call(
-        {:delete_signing_key, principal, actor_authority, proof},
+        {:delete_signing_key, principal, actor_authority, actor_id},
         {caller, _tag},
         state
       ) do
     result =
-      with {:ok, actor_id} <- verify_key_operation_proof(proof, :delete, principal, caller),
-           :ok <-
+      with :ok <-
              Arbor.Security.validate_signing_authority_owner(
                actor_authority,
                caller,
@@ -317,14 +315,12 @@ defmodule Arbor.Agent.ProfileAuthorityOwner do
   end
 
   def handle_call(
-        {:build_stored_identity_registration_proof, identity, actor_authority, proof},
+        {:build_stored_identity_registration_proof, identity, actor_authority, actor_id},
         {caller, _tag},
         state
       ) do
     result =
-      with {:ok, principal} <- identity_principal(identity),
-           {:ok, actor_id} <-
-             verify_key_operation_proof(proof, :registration_proof, principal, caller),
+      with {:ok, _principal} <- identity_principal(identity),
            :ok <-
              Arbor.Security.validate_signing_authority_owner(
                actor_authority,
@@ -364,41 +360,21 @@ defmodule Arbor.Agent.ProfileAuthorityOwner do
     _ -> {:error, :authority_owner_directory_unavailable}
   end
 
-  defp key_operation_proof(actor_authority, operation, principal) do
-    with {:ok, _actor_id} <- Arbor.Security.signing_authority_principal(actor_authority),
-         {:ok, %Arbor.Contracts.Security.SignedRequest{} = proof} <-
-           Arbor.Security.sign_with_authority(
-             actor_authority,
-             key_operation_resource(operation, principal, self())
-           ) do
-      {:ok, proof}
-    else
+  # Key operations are authorized by owning a live authority, not by a
+  # signature from it. The owner re-validates the authority against the pid it
+  # actually received the call from (`validate_signing_authority_owner/3`), so
+  # a copied authority struct is refused there as well as here. A caller-held
+  # lifecycle authority (the local operator's, whose key the server never
+  # holds) cannot sign, but it is owner-bound exactly like a keyed one.
+  defp key_operation_actor(actor_authority) do
+    case Arbor.Security.signing_authority_principal(actor_authority) do
+      {:ok, actor_id} when is_binary(actor_id) -> {:ok, actor_id}
       _ -> {:error, :key_mutation_authority_required}
     end
   rescue
     _ -> {:error, :key_mutation_authority_required}
   catch
     _, _ -> {:error, :key_mutation_authority_required}
-  end
-
-  defp verify_key_operation_proof(proof, operation, principal, caller) do
-    expected = key_operation_resource(operation, principal, caller)
-
-    with %Arbor.Contracts.Security.SignedRequest{payload: ^expected} <- proof,
-         {:ok, actor_id} when is_binary(actor_id) <- Arbor.Security.verify_request(proof) do
-      {:ok, actor_id}
-    else
-      _ -> {:error, :key_mutation_unauthorized}
-    end
-  end
-
-  defp key_operation_resource(operation, principal, caller) when is_pid(caller) do
-    caller_binding =
-      caller
-      |> :erlang.term_to_binary()
-      |> Base.url_encode64(padding: false)
-
-    "arbor://agent/lifecycle/profile-key/#{operation}/#{principal}/caller/#{caller_binding}"
   end
 
   defp identity_principal(%{agent_id: principal}) when is_binary(principal) and principal != "",

@@ -253,6 +253,64 @@ defmodule Arbor.Agent do
   defdelegate connect_mcp_servers(agent_id), to: Arbor.Agent.Manager
 
   # ===========================================================================
+  # Public API — Operator-signed lifecycle (CLI key file)
+  # ===========================================================================
+
+  @doc """
+  Exact payload an operator signs for `submit_signed_lifecycle_request/4`.
+
+  Pure; safe to call in an offline CLI process. `request` is
+  `%{operation: :start, template:, display_name:, provider:, model:}` or
+  `%{operation: :resume, agent_id:}`; see `Arbor.Agent.LifecycleRequestCore`.
+  """
+  @spec lifecycle_request_payload(String.t(), map() | keyword()) ::
+          {:ok, binary()} | {:error, :invalid_lifecycle_request}
+  defdelegate lifecycle_request_payload(principal_id, request),
+    to: Arbor.Agent.LifecycleRequestCore,
+    as: :payload
+
+  @doc """
+  Start or resume an agent from a request the operator signed with its key file.
+
+  This is how `mix arbor.agent start` and `resume` act as the local operator
+  without the operator's private key ever reaching the server. The signed
+  request must cover exactly `lifecycle_request_payload/2` for `request` and
+  `principal_id`, and it is verified against the principal's registered key.
+  Verifying it opens a one-use `:agent_lifecycle` authority owned by the
+  calling process; for a principal whose key the server does not hold, that
+  authority is caller-held and cannot sign. It is closed after the operation.
+
+    * `:start` resumes the agent with this display name and template if one
+      exists (`arbor://agent/lifecycle/start/<id>`), otherwise creates and
+      starts it (`arbor://agent/lifecycle/create`), naming the operator as its
+      owner. Returns `{:ok, agent_id, pid, :created | :resumed}`.
+    * `:resume` starts an existing agent. Returns `{:ok, agent_id, pid}`.
+
+  A proof that is malformed, replayed, stale, signed by another key, or signed
+  for another request returns `{:error, {:unauthorized, reason}}` before
+  anything is created or started. Pending approval returns
+  `{:ok, :pending_approval, proposal_id}`.
+  """
+  @spec submit_signed_lifecycle_request(
+          String.t(),
+          map() | keyword(),
+          Arbor.Contracts.Security.SignedRequest.t(),
+          keyword()
+        ) ::
+          {:ok, String.t(), pid(), :created | :resumed}
+          | {:ok, String.t(), pid()}
+          | {:ok, :pending_approval, String.t()}
+          | {:error, term()}
+  defdelegate submit_signed_lifecycle_request(
+                principal_id,
+                request,
+                signed_request,
+                opts \\ []
+              ),
+              to: Arbor.Agent.SignedLifecycle,
+              as: :submit
+
+  # ===========================================================================
   # Public API — Authorized live message (owner-scoped chat)
   # ===========================================================================
 

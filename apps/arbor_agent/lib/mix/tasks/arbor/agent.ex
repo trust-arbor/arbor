@@ -30,8 +30,18 @@ defmodule Mix.Tasks.Arbor.Agent do
     * `--auto-start` — set auto-start on creation (with start)
     * `--timeout` — response timeout in seconds (default: 300, with chat;
       capped at 300 by the authenticated delivery path)
-    * `--key-file` — local operator signing key for chat (default
+    * `--key-file` — local operator key for start, resume and chat (default
       `~/.arbor/operator.key`, created by `mix arbor.user.init`)
+
+  ## How start and resume prove who you are
+
+  `start` and `resume` sign one lifecycle request with the operator key file
+  in this process (`Arbor.Agent.lifecycle_request_payload/2`): the operation,
+  your principal, and the template, name, provider and model (or the agent id).
+  Only the request and its signature go to the server, which verifies them
+  against your registered key and runs the one operation with a one-use
+  authority (`Arbor.Agent.submit_signed_lifecycle_request/4`). Your private key
+  never leaves this machine's key file. `stop` and `status` need no key.
     * `--all` — show both running and stopped agents (with list)
     * `--yes` — skip the destroy confirmation (required when stdin is not a
       TTY, e.g. scripted or non-interactive ssh runs)
@@ -54,6 +64,10 @@ defmodule Mix.Tasks.Arbor.Agent do
   # Same defect as 246c73b5b, which fixed it for `mix arbor.eval.task`.
   @requirements ["app.config"]
 
+  # Arbor.Agent.IdentityAliasProof stays fully qualified: the chat fallback
+  # counterwitness test recompiles this file with that exact name rewritten.
+  alias Arbor.Agent.LifecycleRequestCore
+  alias Arbor.Agent.LLMDefaults
   alias Mix.Tasks.Arbor.Helpers, as: Config
 
   @shortdoc "Manage agent lifecycle (start, stop, chat, status)"
@@ -202,92 +216,166 @@ defmodule Mix.Tasks.Arbor.Agent do
   defp do_start(template_name, opts) do
     ensure_server!()
 
-    case remote(Arbor.Agent.TemplateStore, :get, [template_name]) do
+    case start_operator(template_name, opts, &remote/3) do
+      :ok -> :ok
+      :error -> exit({:shutdown, 1})
+    end
+  end
+
+  @doc false
+  # Everything `start` does after the server check. `remote` performs one call
+  # on the server: `remote/3` here, a peer-node call in tests. The request is
+  # signed in THIS process from the operator key file; only the request and
+  # its signature cross to the server, which verifies it against the
+  # operator's registered key. Returns `:ok`, or `:error` after reporting.
+  @spec start_operator(String.t(), keyword(), (module(), atom(), list() -> term())) ::
+          :ok | :error
+  def start_operator(template_name, opts, remote) when is_function(remote, 3) do
+    case remote.(Arbor.Agent.TemplateStore, :get, [template_name]) do
       {:ok, template_data} ->
-        display_name =
-          opts[:name] || get_in(template_data, ["character", "name"]) || template_name
-
-        # Honor the template's declared model/provider (metadata.model / metadata.provider) when no
-        # explicit --model/--provider is given, before the system default. The roster's templates
-        # (e.g. test_agent → gpt-5.5/openai_oauth) rely on this; the task previously dropped the
-        # template's model and always used LLMDefaults, so a started agent ran the wrong model.
-        model_id =
-          opts[:model] ||
-            get_in(template_data, ["metadata", "model"]) ||
-            Arbor.Agent.LLMDefaults.default_model()
-
-        provider =
-          parse_provider(
-            opts[:provider] ||
-              get_in(template_data, ["metadata", "provider"]) ||
-              to_string(Arbor.Agent.LLMDefaults.default_provider())
-          )
-
-        case maybe_acknowledge_keyless(provider) do
-          :ok ->
-            :ok
-
-          {:error, :disclosure_not_acknowledged} ->
-            Mix.shell().error(
-              "OpenCode Zen was not started: the data-disclosure warning was not acknowledged."
-            )
-
-            exit({:shutdown, 1})
-        end
-
-        model_config = %{
-          id: model_id,
-          provider: provider,
-          runtime: :arbor,
-          module: Arbor.Agent.APIAgent,
-          start_opts: []
-        }
-
-        # Name the creator so `Lifecycle.grant_owner_chat_capability/2` issues
-        # `arbor://chat/agent/<agent_id>` to them. That capability cannot exist
-        # before creation — the agent id does not — so creation is the only
-        # place it can be granted, and it is scoped to THIS agent.
-        #
-        # Travels as `tenant_context`, NOT a bare `principal_id`:
-        # `Manager.do_start_agent/2` builds the AgentSpec from a closed
-        # allowlist (`[:capabilities, :initial_goals, :delegator_id,
-        # :tenant_context, :character]`), so a top-level `:principal_id` is
-        # silently dropped before `Lifecycle.create/2` sees it, and
-        # `extract_principal_id/1` reads `tenant_context.principal_id` for
-        # exactly this. No workspace_root, so workspace fs grants stay a no-op.
-        base_start_opts = [
-          template: template_name,
-          display_name: display_name,
-          model_config: model_config
-        ]
-
-        start_opts =
-          case local_operator_principal() do
-            nil -> base_start_opts
-            p -> base_start_opts ++ [tenant_context: Arbor.Contracts.TenantContext.new(p)]
-          end
-
-        case remote(Arbor.Agent.Manager, :start_or_resume, [
-               Arbor.Agent.APIAgent,
-               display_name,
-               start_opts
-             ]) do
-          {:ok, agent_id, _pid} ->
-            Mix.shell().info("Started agent '#{display_name}' (#{agent_id})")
-
-            if opts[:auto_start] do
-              auto_start_unavailable!(display_name)
-            end
-
-          {:error, reason} ->
-            Mix.shell().error("Failed to start agent: #{inspect(reason)}")
-        end
+        start_from_template(template_name, template_data, opts, remote)
 
       {:error, :not_found} ->
         Mix.shell().error("Template '#{template_name}' not found.")
-        print_available_templates()
+        print_available_templates(remote)
+        :error
+
+      other ->
+        Mix.shell().error("Failed to load template '#{template_name}': #{inspect(other)}")
+        :error
     end
   end
+
+  defp start_from_template(template_name, template_data, opts, remote) do
+    display_name =
+      opts[:name] || get_in(template_data, ["character", "name"]) || template_name
+
+    # Honor the template's declared model/provider (metadata.model / metadata.provider) when no
+    # explicit --model/--provider is given, before the system default. The roster's templates
+    # (e.g. test_agent → gpt-5.5/openai_oauth) rely on this; the task previously dropped the
+    # template's model and always used LLMDefaults, so a started agent ran the wrong model.
+    model_id =
+      opts[:model] ||
+        get_in(template_data, ["metadata", "model"]) ||
+        LLMDefaults.default_model()
+
+    provider =
+      parse_provider(
+        opts[:provider] ||
+          get_in(template_data, ["metadata", "provider"]) ||
+          to_string(LLMDefaults.default_provider())
+      )
+
+    with :ok <- acknowledge_keyless(provider),
+         request = %{
+           operation: :start,
+           template: template_name,
+           display_name: display_name,
+           provider: Atom.to_string(provider),
+           model: model_id
+         },
+         {:ok, result} <- submit_lifecycle(request, opts, remote) do
+      report_started(display_name, result, opts)
+    end
+  end
+
+  defp acknowledge_keyless(provider) do
+    case maybe_acknowledge_keyless(provider) do
+      :ok ->
+        :ok
+
+      {:error, :disclosure_not_acknowledged} ->
+        Mix.shell().error(
+          "OpenCode Zen was not started: the data-disclosure warning was not acknowledged."
+        )
+
+        :error
+    end
+  end
+
+  defp report_started(display_name, {:ok, agent_id, _pid, status}, opts) do
+    verb = if status == :created, do: "Started", else: "Resumed"
+    Mix.shell().info("#{verb} agent '#{display_name}' (#{agent_id})")
+
+    if opts[:auto_start] do
+      auto_start_unavailable(display_name)
+    else
+      :ok
+    end
+  end
+
+  # Sign `request` with the operator key file and submit it. The private key
+  # is read here and never sent; the server sees the request and signature.
+  defp submit_lifecycle(request, opts, remote) do
+    key_path = Arbor.Agent.IdentityAliasProof.key_file_path(opts)
+
+    with {:ok, principal} <- operator_principal(key_path),
+         {:ok, signed} <- sign_lifecycle_request(key_path, principal, request) do
+      case remote.(Arbor.Agent, :submit_signed_lifecycle_request, [principal, request, signed]) do
+        {:ok, :pending_approval, proposal_id} ->
+          Mix.shell().error(
+            "Approval required before this runs (proposal #{proposal_id}). Nothing was started."
+          )
+
+          :error
+
+        {:ok, _agent_id, _pid, _status} = started ->
+          {:ok, started}
+
+        {:ok, _agent_id, _pid} = resumed ->
+          {:ok, resumed}
+
+        {:error, reason} ->
+          Mix.shell().error(lifecycle_error(reason, principal))
+          :error
+
+        other ->
+          Mix.shell().error("Unexpected reply from the server: #{inspect(other)}")
+          :error
+      end
+    end
+  end
+
+  defp operator_principal(key_path) do
+    case Arbor.Security.key_file_principal(key_path) do
+      {:ok, principal} ->
+        {:ok, principal}
+
+      {:error, _reason} ->
+        Mix.shell().error(
+          "Starting an agent requires your operator key (#{key_path}). " <>
+            "Run mix arbor.user.init or supply --key-file <path>."
+        )
+
+        :error
+    end
+  end
+
+  defp sign_lifecycle_request(key_path, principal, request) do
+    with {:ok, payload} <- Arbor.Agent.lifecycle_request_payload(principal, request),
+         {:ok, ^principal, signed} <- sign_key_file_request(key_path, payload) do
+      {:ok, signed}
+    else
+      {:ok, _other, _signed} ->
+        Mix.shell().error("Operator key changed while signing (#{key_path}).")
+        :error
+
+      {:error, reason} ->
+        Mix.shell().error("Could not sign the request with #{key_path}: #{inspect(reason)}")
+        :error
+    end
+  end
+
+  defp lifecycle_error({:unauthorized, :capability_mutation_unauthorized}, principal),
+    do: """
+    #{principal} may not create or start agents here (:capability_mutation_unauthorized).
+    The first administrator is made by `mix arbor.user.init` (genesis).
+    """
+
+  defp lifecycle_error({:unauthorized, reason}, principal),
+    do: "The server refused the signed request from #{principal}: #{inspect(reason)}"
+
+  defp lifecycle_error(reason, _principal), do: "Failed to start agent: #{inspect(reason)}"
 
   defp do_list_templates do
     ensure_server!()
@@ -300,8 +388,8 @@ defmodule Mix.Tasks.Arbor.Agent do
     print_available_templates()
   end
 
-  defp print_available_templates do
-    templates = remote(Arbor.Agent.TemplateStore, :list, [])
+  defp print_available_templates(remote \\ &remote/3) do
+    templates = remote.(Arbor.Agent.TemplateStore, :list, [])
 
     if templates == [] do
       Mix.shell().info(
@@ -329,23 +417,35 @@ defmodule Mix.Tasks.Arbor.Agent do
 
   # ── Resume ────────────────────────────────────────────────────────────
 
-  defp do_resume(ref, _opts) do
+  defp do_resume(ref, opts) do
     ensure_server!()
 
-    case find_profile(ref) do
-      {:ok, profile} ->
-        case remote(Arbor.Agent.Manager, :resume_agent, [profile.agent_id, []]) do
-          {:ok, agent_id, _pid} ->
-            Mix.shell().info("Resumed agent '#{profile.display_name}' (#{agent_id})")
+    case resume_operator(ref, opts, &remote/3) do
+      :ok -> :ok
+      :error -> exit({:shutdown, 1})
+    end
+  end
 
-          {:error, reason} ->
-            Mix.shell().error("Failed to resume: #{inspect(reason)}")
+  @doc false
+  # Everything `resume` does after the server check; see `start_operator/3`.
+  @spec resume_operator(String.t(), keyword(), (module(), atom(), list() -> term())) ::
+          :ok | :error
+  def resume_operator(ref, opts, remote) when is_function(remote, 3) do
+    case find_profile(ref, remote) do
+      {:ok, profile} ->
+        request = %{operation: :resume, agent_id: profile.agent_id}
+
+        with {:ok, {:ok, agent_id, _pid}} <- submit_lifecycle(request, opts, remote) do
+          Mix.shell().info("Resumed agent '#{profile.display_name}' (#{agent_id})")
+          :ok
         end
 
       :not_found ->
         Mix.shell().error(
           "Agent '#{ref}' not found. Use `mix arbor.agent list --all` to see all agents."
         )
+
+        :error
     end
   end
 
@@ -592,6 +692,11 @@ defmodule Mix.Tasks.Arbor.Agent do
   # yet (only single capability grants have one), so this CLI fails closed
   # rather than calling the authority-less arity, which would only be refused.
   defp auto_start_unavailable!(display_name) do
+    :error = auto_start_unavailable(display_name)
+    exit({:shutdown, 1})
+  end
+
+  defp auto_start_unavailable(display_name) do
     Mix.shell().error("""
     Auto-start was not changed for '#{display_name}'.
     Changing auto-start delegates (or revokes) the agent's start rights for the
@@ -601,7 +706,7 @@ defmodule Mix.Tasks.Arbor.Agent do
     actor_authority:) instead.
     """)
 
-    exit({:shutdown, 1})
+    :error
   end
 
   # ── Shared Plumbing ──────────────────────────────────────────────────
@@ -673,41 +778,12 @@ defmodule Mix.Tasks.Arbor.Agent do
     end
   end
 
-  # The local-operator principal, or nil.
-  #
-  # Deliberately conservative: this is a principal asserted by local config, not
-  # one proved by a login, so it resolves ONLY in :dev and ONLY when no OIDC
-  # provider is configured and auth is not required. Anywhere else the turn
-  # carries no principal, exactly as before — a missing principal fails a
-  # `human_` check closed, while a forged one would pass it.
-  defp local_operator_principal do
-    if Mix.env() == :dev and not auth_required?() and not oidc_configured?() do
-      # The REAL local human principal — the same `human_<hash>` that
-      # `mix arbor.user.init` produces, derived from identical claims rather
-      # than read from state.
-      #
-      # This used to send `Identity.local_operator_id()`, the static string
-      # "human_dashboard", which is NOT the principal `arbor.user.init` creates.
-      # See `0-inbox/human-dashboard-principal-assumptions.md` for why that
-      # static id exists at all.
-      remote(Arbor.Security, :local_human_principal_id, [[]])
-    end
-  end
-
-  defp auth_required? do
-    Application.get_env(:arbor_dashboard, :require_auth, false) == true
-  end
-
-  # Through the facade, never `OIDC.Config` directly — that is another
-  # library's internal.
-  defp oidc_configured?, do: Arbor.Security.oidc_enabled?()
-
   defp remote(mod, fun, args) do
     Config.rpc!(Config.full_node_name(), mod, fun, args)
   end
 
-  defp find_profile(ref) do
-    profiles = remote(Arbor.Agent.Lifecycle, :list_agents, [])
+  defp find_profile(ref, remote \\ &remote/3) do
+    profiles = remote.(Arbor.Agent.Lifecycle, :list_agents, [])
 
     match =
       Enum.find(profiles, fn p ->
@@ -748,28 +824,20 @@ defmodule Mix.Tasks.Arbor.Agent do
 
   defp maybe_acknowledge_keyless(_provider), do: :ok
 
+  # The provider table lives in LifecycleRequestCore, because the server
+  # resolves the same names from the signed request. Aliases stay here.
   defp parse_provider(str) when is_binary(str) do
-    # Safe: bounded set of known provider atoms
-    case str do
-      "openrouter" -> :openrouter
-      "anthropic" -> :anthropic
-      "openai" -> :openai
-      "google" -> :google
-      "local" -> :local
-      "ollama" -> :ollama
-      "lmstudio" -> :lmstudio
-      "lm_studio" -> :lmstudio
-      "acp" -> :acp
-      "gemini" -> :gemini
-      "xai" -> :xai
-      # Subscription-OAuth providers (roster primaries) — tokens from ~/.codex/auth.json (openai)
-      # / ~/.grok (xai), see Arbor.LLM.OAuth. The *_oauth atoms are what the session config expects.
-      "openai_oauth" -> :openai_oauth
-      "xai_oauth" -> :xai_oauth
-      "opencode_zen" -> :opencode_zen
-      "opencode-zen" -> :opencode_zen
-      "opencode-free" -> :opencode_zen
-      other -> Mix.raise("Unknown provider: #{other}")
+    canonical =
+      case str do
+        "lm_studio" -> "lmstudio"
+        "opencode-zen" -> "opencode_zen"
+        "opencode-free" -> "opencode_zen"
+        other -> other
+      end
+
+    case LifecycleRequestCore.provider_atom(canonical) do
+      {:ok, provider} -> provider
+      {:error, :unknown_provider} -> Mix.raise("Unknown provider: #{str}")
     end
   end
 

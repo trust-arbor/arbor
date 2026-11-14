@@ -2,9 +2,9 @@ defmodule Mix.Tasks.Arbor.User.InitTest do
   @moduledoc """
   `mix arbor.user.init` against a real Arbor security server.
 
-  The server is a fresh peer node running `:arbor_capabilities` with private,
-  durable authority state and the local-human gate open, as on a dev
-  install. The task's core (`init_operator/2`) runs in this VM as the CLI
+  The server is a fresh peer node (`Arbor.Agent.Test.SecurityPeer`) running
+  `:arbor_capabilities` with private, durable authority state and the
+  local-human gate open, as on a dev install. The task's core (`init_operator/2`) runs in this VM as the CLI
   does, and every server call crosses to the peer as a serialized term
   through `:peer.call/5`, as `:rpc` would carry it. Each call is recorded so
   the test can prove that no private key crossed in either direction.
@@ -15,20 +15,19 @@ defmodule Mix.Tasks.Arbor.User.InitTest do
   @moduletag :slow
   @moduletag timeout: 180_000
 
+  alias Arbor.Agent.Test.SecurityPeer
   alias Arbor.Common.SafePath
   alias Mix.Tasks.Arbor.User.Init
-
-  @call_timeout 60_000
 
   setup do
     previous_shell = Mix.shell()
     Mix.shell(Mix.Shell.Process)
     dir = private_dir!()
-    peer = start_server!(Path.join(dir, "server"))
+    peer = SecurityPeer.start!(Path.join(dir, "server"))
 
     on_exit(fn ->
       Mix.shell(previous_shell)
-      stop_peer(peer)
+      SecurityPeer.stop(peer)
       File.rm_rf!(dir)
     end)
 
@@ -210,87 +209,10 @@ defmodule Mix.Tasks.Arbor.User.InitTest do
     Enum.filter(caps, &(&1.resource_uri == "arbor://**"))
   end
 
-  # -- the server: a fresh peer running :arbor_capabilities -------------------
-
-  # Mirrors the full-Security peer in arbor_security's
-  # OIDCOptionalAdapterHostSecurityRegressionTest: this VM's code paths and
-  # test configuration, plus private durable authority state.
-  defp start_server!(base_dir) do
-    File.mkdir_p!(base_dir)
-    File.chmod!(base_dir, 0o700)
-    authority_root = Path.join(base_dir, "authority")
-    File.mkdir!(authority_root)
-    File.chmod!(authority_root, 0o700)
-
-    peer =
-      case :peer.start_link(%{connection: :standard_io, wait_boot: 30_000}) do
-        {:ok, peer} -> peer
-        {:ok, peer, _node} -> peer
-      end
-
-    :ok = peer_call(peer, :code, :add_paths, [:code.get_path()])
-    {:ok, _} = peer_call(peer, :application, :ensure_all_started, [:elixir])
-
-    for app <- [:arbor_kernel, :arbor_capabilities],
-        {key, value} <- Application.get_all_env(app) do
-      :ok = peer_call(peer, Application, :put_env, [app, key, value, [persistent: true]])
-    end
-
-    kernel_runtime =
-      peer
-      |> peer_call(Application, :get_env, [:arbor_kernel, :kernel_runtime, []])
-      |> Keyword.put(:start_profile, :full)
-
-    :ok =
-      peer_call(peer, Application, :put_env, [
-        :arbor_kernel,
-        :kernel_runtime,
-        kernel_runtime,
-        [persistent: true]
-      ])
-
-    for {key, value} <- [
-          start_children: true,
-          storage_backend: Arbor.Security.Store.JSONFile,
-          authority_state_root: authority_root,
-          revocation_ledger_path: Path.join(base_dir, "revocations.json"),
-          audit_journal_mode: :durable,
-          system_authority_mode: :persistent,
-          master_key_path: Path.join(authority_root, "master.key"),
-          session_token_secret: Base.url_encode64(:crypto.strong_rand_bytes(48), padding: false),
-          distributed_signals: false,
-          event_log_adapter: nil,
-          allow_local_human_identity: true,
-          oidc_adapter: nil,
-          oidc: []
-        ] do
-      peer_put_env(peer, key, value)
-    end
-
-    {:ok, _started} =
-      peer_call(peer, Application, :ensure_all_started, [:arbor_capabilities])
-
-    peer
-  end
-
-  defp peer_put_env(peer, key, value) do
-    :ok =
-      peer_call(peer, Application, :put_env, [
-        :arbor_capabilities,
-        key,
-        value,
-        [persistent: true]
-      ])
-  end
+  defp peer_put_env(peer, key, value), do: SecurityPeer.put_env(peer, key, value)
 
   defp peer_call(peer, module, function, args),
-    do: :peer.call(peer, module, function, args, @call_timeout)
-
-  defp stop_peer(peer) do
-    :peer.stop(peer)
-  catch
-    _, _ -> :ok
-  end
+    do: SecurityPeer.call(peer, module, function, args)
 
   defp private_dir! do
     {:ok, system_tmp} = SafePath.resolve_real(System.tmp_dir!())

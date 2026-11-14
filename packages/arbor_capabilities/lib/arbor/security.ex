@@ -6104,8 +6104,9 @@ defmodule Arbor.Security do
     * the request must sign exactly `expected_payload`, the bytes of the one
       lifecycle request the caller is about to perform (for the Gateway, the
       `method\\npath\\nbody` it serves), and its claimed principal must be a
-      `human_` principal whose identity is `:active` and whose signing key the
-      server holds. These are checked before the nonce is consumed;
+      `human_` principal whose identity is `:active`. A server-held signing
+      key, if present, must be valid. These are checked before the nonce is
+      consumed;
     * the request is verified by the inbound verifier (cluster replay gate,
       timestamp freshness, registered key, Ed25519 signature, single-use
       nonce), and the verified principal must equal the claimed one;
@@ -6118,9 +6119,16 @@ defmodule Arbor.Security do
   lifecycle resource and action stays with the operation's facade (e.g.
   `Arbor.Agent.authorize_create/3`, `Arbor.Agent.authorize_start/3`).
 
+  When the server holds no key for the principal (the local operator from
+  `mix arbor.user.init` keeps its key in its own key file), the authority is
+  *caller-held*: verified the same way against the registered key, bound to
+  the calling process, accepted wherever an owner-bound actor authority is
+  checked, but it carries no key. Every signing operation on it returns
+  `{:error, :caller_held_authority}`.
+
   Returns `{:ok, principal_id, authority}`. Errors include
   `:payload_mismatch`, `:human_principal_required`, `:identity_suspended`,
-  `:identity_revoked`, `:identity_not_found`, `:no_signing_key`,
+  `:identity_revoked`, `:identity_not_found`, `:signing_key_mismatch`,
   `:replayed_nonce`, `:invalid_signature`, `:expired_timestamp`,
   `:principal_mismatch`, `:cluster_replay_protection_unavailable` and
   `:broker_unavailable`.

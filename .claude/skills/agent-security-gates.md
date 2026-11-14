@@ -1177,17 +1177,24 @@ Read this when changing capabilities, trust, authorization, identity, URI matchi
   `does not match the registered identity` means the file holds a different
   key than the one registered; identities are never re-keyed here.
 - **Caller-held local operators have no server-held key (2026-11-13):**
-  server-side flows that open a human's *stored* key fail closed for the
-  `mix arbor.user.init` identity. Known ones: the gateway's signed
-  `POST /api/chat/agents` and `/start` routes
-  (`verify_request_and_open_agent_lifecycle_authority/2` → `:no_signing_key`,
-  `Chat.LifecycleAuthority` → `:capability_mutation_unauthorized`), and
-  channel membership via `ChannelAuthorityBroker` (no X25519 key is
-  registered). `create_local_human_identity/1` refuses this identity with
+  the `mix arbor.user.init` identity's key lives only in its key file.
+  Lifecycle authorities for such a human are *caller-held*:
+  `verify_request_and_open_agent_lifecycle_authority/2` verifies the request
+  against the registered key and opens an owner-bound authority with no key.
+  It works as the actor of security mutations and of `ProfileAuthorityOwner`
+  key operations (authorized by owner binding, not by a signature), but every
+  `sign*` call returns `{:error, :caller_held_authority}`. So `mix arbor.agent
+  start`/`resume` work (the CLI signs `Arbor.Agent.lifecycle_request_payload/2`
+  and the server runs `submit_signed_lifecycle_request/4`), and so does the
+  gateway's signed `POST /api/chat/agents/:id/start`. **Still fails closed:**
+  gateway `POST /api/chat/agents` (create runs in `Chat.LifecycleAuthority`
+  from the stored key → 403 `:capability_mutation_unauthorized`); channel
+  membership via `ChannelAuthorityBroker` (no X25519 key registered); the
+  dashboard conversation page (local-dev session has no `session_token`).
+  `create_local_human_identity/1` refuses this identity with
   `:local_human_key_held_by_caller` rather than minting a second keypair.
-  **Action:** sign client-side from the key file (the `prepare_key_file_*`
-  facade functions); do not add a path that copies the operator's private key
-  into the server.
+  **Action:** sign client-side from the key file and submit the proof; do not
+  add a path that copies the operator's private key into the server.
 - **Local genesis is refused while OIDC is configured:** with `OIDC_ISSUER`
   and `OIDC_CLIENT_ID` set (for example in `.env`), `mix arbor.user.init`
   stops with "An OIDC provider is configured". This is by design (D1); OIDC

@@ -40,10 +40,12 @@ defmodule Mix.Tasks.Arbor.User.Init do
   instructions instead of generating a second key. A key file whose public key
   differs from the registered one is refused.
 
-  Because the server holds no private key for this identity, server-side
-  flows that sign with a human's server-held key (the gateway's signed HTTP
-  agent create/start routes) are not available to it. CLI commands sign with
-  the key file instead.
+  Because the server holds no private key for this identity, CLI commands sign
+  with the key file instead (`mix arbor.agent start`, `resume`, `chat`,
+  `mix arbor.user.link`). Server-side flows that need the server to *sign* as
+  this identity are not available to it; the one known today is the gateway's
+  signed HTTP agent create route (`POST /api/chat/agents`), which opens the
+  human's stored key.
 
   The key file is plaintext with mode `0600` (the same convention as
   `~/.arbor/identity.key`). There is no passphrase wrapping in this
