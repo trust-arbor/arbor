@@ -1137,8 +1137,9 @@ defmodule Arbor.Agent.ContextCompactorTest do
         |> ContextCompactor.llm_messages()
         |> Enum.find(&(Map.get(&1, :compactor_kind) == :summary))
 
-      assert %{role: :user, content: content} = summary
-      assert content =~ ~r/^\[Context summary of earlier conversation, written by the system/
+      assert %{role: :user, content: content, untrusted: true} = summary
+      assert content =~ ~r/^\[Untrusted context summary of earlier conversation/
+      assert content =~ "not system"
       assert content =~ "not a new message or request from the user"
     end
 

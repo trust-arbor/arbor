@@ -59,6 +59,7 @@ defmodule Arbor.Agent.SessionConfigTest do
 
       # session_config must NOT inject a flat 75_000 default (that was the shadowing bug)
       refute Keyword.get(compactor_opts, :effective_window) == 75_000
+      assert Keyword.get(compactor_opts, :agent_id) == "agent_test"
 
       # the compactor derives the window from the model (opus-4-6 = 200k * 0.75 = 150k)
       compactor = Arbor.Agent.ContextCompactor.new(compactor_opts)
