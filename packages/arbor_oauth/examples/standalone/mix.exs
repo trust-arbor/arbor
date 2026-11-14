@@ -11,7 +11,7 @@ defmodule OAuthStandaloneConsumer.MixProject do
          path: System.get_env("OAUTH_PACKAGE_PATH") || "../..", override: true},
         {:req, "~> 0.7.5", runtime: false},
         {:finch, "~> 0.24", runtime: false},
-        {:mint, "~> 1.9.3", runtime: false}
+        {:mint, "~> 1.9 and >= 1.9.3", runtime: false}
       ],
       releases: [
         oauth_standalone_consumer: [
