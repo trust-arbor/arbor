@@ -6,7 +6,12 @@ defmodule Arbor.Orchestrator.Session.TurnEgress do
   # Engine JSON context or public Session state.
 
   alias Arbor.Contracts.Security.Taint
+  alias Arbor.Contracts.Security.TaintEnvelope
   alias Arbor.Contracts.Session.TurnAuthority
+
+  # Human-owned context an authenticated turn installs (Session
+  # put_private_recall/3 and put_private_goal_context/3).
+  @private_context_keys ~w(session.private_recalled_memories session.private_relationship session.private_goal_context)
 
   @route_keys [:destination, :provider, :runtime, :model]
   @accepted_runtimes MapSet.new(["arbor", "acp"])
@@ -398,6 +403,29 @@ defmodule Arbor.Orchestrator.Session.TurnEgress do
       _ ->
         nil
     end
+  end
+
+  @doc false
+  # An authenticated turn's private context may hold the human's own data, so
+  # each private key it installs carries the fail-closed `missing_fallback`
+  # envelope (sensitivity :restricted, which no cloud backend may see) — but
+  # only when the key holds something. An empty recall list, relationship map
+  # or goal section discloses nothing; labeling it :restricted made every
+  # authenticated turn on a fresh install (no embedding route, so recall is
+  # always `[]`) unroutable to any cloud provider (found 2026-11-14). Any value
+  # that is not provably empty keeps the label.
+  @spec put_private_context_taint(map(), map(), TurnAuthority.t() | nil) :: map()
+  def put_private_context_taint(taint, _final_values, nil) when is_map(taint), do: taint
+
+  def put_private_context_taint(taint, final_values, %TurnAuthority{})
+      when is_map(taint) and is_map(final_values) do
+    Enum.reduce(@private_context_keys, taint, fn key, acc ->
+      case Map.fetch(final_values, key) do
+        {:ok, value} when value in [nil, "", [], %{}] -> acc
+        {:ok, _value} -> Map.put(acc, key, TaintEnvelope.missing_fallback())
+        :error -> acc
+      end
+    end)
   end
 
   @doc false

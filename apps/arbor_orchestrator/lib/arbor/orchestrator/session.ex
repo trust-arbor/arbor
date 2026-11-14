@@ -87,7 +87,6 @@ defmodule Arbor.Orchestrator.Session do
   alias Arbor.Contracts.Security.DeliveryReceipt
   alias Arbor.Contracts.Security.{SigningAuthority, SigningAuthorityBootstrap}
   alias Arbor.Contracts.Security.Taint
-  alias Arbor.Contracts.Security.TaintEnvelope
   alias Arbor.Contracts.Session.SteeringMessage
   alias Arbor.Contracts.Session.TurnAuthority
   alias Arbor.Contracts.Session.UserMessage
@@ -3308,8 +3307,7 @@ defmodule Arbor.Orchestrator.Session do
       pre_values
       |> TurnEgress.derive_initial_taint(final_values)
       |> PersistenceCore.join_authoritative_history_taint(ContextBuilder.get_messages(state))
-      |> put_private_recall_taint(turn_authority)
-      |> put_private_goal_taint(turn_authority)
+      |> TurnEgress.put_private_context_taint(final_values, turn_authority)
 
     turn_taint_evidence =
       PersistenceCore.build_partial_turn_evidence(
@@ -3451,16 +3449,6 @@ defmodule Arbor.Orchestrator.Session do
     |> Map.put("session.private_relationship", Map.get(turn || %{}, :relationship, %{}))
   end
 
-  defp put_private_recall_taint(taint, nil), do: taint
-
-  defp put_private_recall_taint(taint, %TurnAuthority{}) do
-    envelope = TaintEnvelope.missing_fallback()
-
-    taint
-    |> Map.put("session.private_recalled_memories", envelope)
-    |> Map.put("session.private_relationship", envelope)
-  end
-
   # Receipt-authenticated private turns may contain human-owned data. Until
   # Memory admits scoped writes, keep this restriction in runtime opts only.
   # Graph values, node attributes and model arguments cannot supply or clear it.
@@ -3512,16 +3500,6 @@ defmodule Arbor.Orchestrator.Session do
     |> Map.drop(omitted)
     |> Map.put("session.private_goal_context", section)
   end
-
-  defp put_private_goal_taint(taint, nil), do: taint
-
-  defp put_private_goal_taint(taint, %TurnAuthority{}),
-    do:
-      Map.put(
-        taint,
-        "session.private_goal_context",
-        TaintEnvelope.missing_fallback()
-      )
 
   defp update_authenticated_private_goal(message, receipt, goal_id, attrs, state) do
     with {:ok, user_message} <- canonicalize_authenticated_user_message(message),

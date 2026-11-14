@@ -26,6 +26,42 @@ defmodule Arbor.Common.SensitiveDataTest do
       assert Enum.any?(findings, fn {label, _} -> label == "Phone Number" end)
     end
 
+    test "detects phone numbers in common formats and positions" do
+      for text <- [
+            "5551234567",
+            "Call 5551234567.",
+            "(555) 123-4567",
+            "+1 555 123 4567",
+            "+15551234567",
+            "tel:555.123.4567",
+            "phone=555-123-4567",
+            "+44 2071234567",
+            "reach me at 555-123-4567, thanks"
+          ] do
+        assert Enum.any?(SensitiveData.scan_pii(text), fn {label, _} ->
+                 label == "Phone Number"
+               end),
+               "missed phone number in #{inspect(text)}"
+      end
+    end
+
+    test "a digit run inside a hex identifier is not a phone number" do
+      # Real shape found 2026-11-14: an agent id whose hex holds ten digits in a row.
+      for text <- [
+            "agent_9f2c5263109001ab7e44d0c1e8b2a6f3d5c7e9a1b3d5f7092468ace13579bdf0",
+            "agent_5263109001ab7e44d0c1e8b2a6f3d5c7e9a1b3d5f7092468ace13579bdf0ab",
+            "session ab12cd5551234567ef started",
+            "sha a1b2c3d4e5f60718293a4b5c6d7e8f9012345678ab"
+          ] do
+        refute Enum.any?(SensitiveData.scan_pii(text), fn {label, _} ->
+                 label == "Phone Number"
+               end),
+               "flagged #{inspect(text)} as a phone number"
+
+        assert SensitiveData.redact(text) == text
+      end
+    end
+
     test "detects credit card with valid Luhn" do
       findings = SensitiveData.scan_pii("Card: 4532015112830366")
       assert Enum.any?(findings, fn {label, _} -> label == "Credit Card Number" end)

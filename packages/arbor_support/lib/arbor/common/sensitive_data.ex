@@ -59,11 +59,16 @@ defmodule Arbor.Common.SensitiveData do
     ]
   end
 
+  # A phone number never sits inside a longer word or identifier. Without the
+  # letter/digit/underscore lookarounds, any ten-digit run inside a hex id
+  # (about one agent id in five) read as a phone number: the id was redacted
+  # from logs and the prompt carrying it was raised to :internal, which
+  # rerouted heartbeats away from the configured provider (found 2026-11-14).
   @doc false
   def phone_patterns do
     [
-      ~r/\+?1?[-.\s]?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}(?!\d)/,
-      ~r/\+\d{1,3}[-.\s]\d{6,14}(?!\d)/
+      ~r/(?<![0-9A-Za-z_])\+?1?[-.\s]?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}(?![0-9A-Za-z_])/,
+      ~r/(?<![0-9A-Za-z_])\+\d{1,3}[-.\s]\d{6,14}(?![0-9A-Za-z_])/
     ]
   end
 
