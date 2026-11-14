@@ -19,12 +19,15 @@ clients: [arbor/EXTERNAL_MCP_CLIENT.md](arbor/EXTERNAL_MCP_CLIENT.md).
   headers (`libssl-dev libncurses-dev` on Debian/Ubuntu).
 - Network access to hex.pm and github.com for `deps.get` and the first compile
 - An LLM, any one of:
-  - nothing at all — the keyless OpenCode Zen free tier (see step 3)
   - an API key for any supported provider (OpenRouter, Anthropic, OpenAI,
     Google Gemini, xAI, Groq, Cerebras, Z.ai, …)
   - a local runtime such as Ollama or LM Studio
   - a coding agent you already subscribe to, driven over the
     [Agent Client Protocol](https://agentclientprotocol.com/get-started/agents)
+  - nothing at all — the keyless OpenCode Zen free tier (see step 3). As of
+    2026-11-14 OpenCode refused Arbor's free-tier requests with HTTP 429
+    ("Free models work in OpenCode"), so do not count on it; bring one of the
+    above
     (ACP) — Claude Code, Codex, Gemini CLI and others listed there
 
 SQLite is the default database and needs no setup. PostgreSQL is optional
@@ -175,8 +178,12 @@ running `--configure`:
   recommend `acp / <agent>`. Detection only checks the binary is on `PATH`,
   not that it is logged in, so do the check. Your agent then talks through
   that subscription: no API key, no free-tier data disclosure.
-- **None of the above?** A new install can run **without an API key and
-  without a subscription** on the OpenCode Zen free tier. Before the first
+- **None of the above?** A new install can be configured **without an API key
+  and without a subscription** on the OpenCode Zen free tier. On 2026-11-14,
+  though, OpenCode answered every free-tier request from Arbor with HTTP 429
+  (`Free usage limit reached. Free models work in OpenCode …`), so your first
+  chat will likely fail there; an API key, a local model or a subscription is
+  the reliable path. Before the first
   request Arbor shows this disclosure, which you must acknowledge once (the
   acknowledgement is stored locally):
 
@@ -371,10 +378,12 @@ service. Through an ACP agent such as Claude Code it took 15–30 s in our runs.
 If `chat` prints `Chat failed: :delivery_failed`, search that log for
 `[LlmHandler]` and `[Session] turn refused`:
 
-- `HTTP 429: Free usage limit reached` — OpenCode refused the request. It limits
-  the free tier, and in our tests from one network on 2026-11-14 every free model
-  answered 429. Arbor cannot raise that limit. Wait and retry, or rerun
-  `./bin/mix arbor.doctor --configure` with an API key or a local model (§3).
+- `HTTP 429: Free usage limit reached` (heartbeats) or
+  `{:stream_http_error, 429}` (chat) on `provider=opencode_zen` — OpenCode
+  refused the request. Its message says free models work in OpenCode's own
+  client; on 2026-11-14 every free model answered 429. Arbor cannot change
+  that. Rerun `./bin/mix arbor.doctor --configure` with an API key, a local
+  model or a subscription (§3).
 - `cannot handle internal data; rerouted` — the prompt held something the
   chosen provider may not see (for example a path or an IP address), and
   Arbor refused to send it. Pick a provider that may (§3).
