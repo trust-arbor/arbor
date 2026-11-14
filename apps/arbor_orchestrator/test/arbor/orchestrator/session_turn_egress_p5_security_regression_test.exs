@@ -17,6 +17,7 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
 
   alias Arbor.Contracts.Security.Identity
   alias Arbor.Contracts.Security.SignedRequest
+  alias Arbor.Contracts.Security.TaintEnvelope
   alias Arbor.Contracts.Session.TurnAuthority
   alias Arbor.Contracts.Session.UserMessage
   alias Arbor.Identifiers
@@ -835,6 +836,37 @@ defmodule Arbor.Orchestrator.SessionTurnEgressP5SecurityRegressionTest do
 
     assert {:error, _} = authorizer2.(route)
     Application.put_env(:arbor_capabilities, :egress_gate_enforcing, false)
+  end
+
+  # Owner decision 2026-11-14: the human's disclosure lifts the local-only
+  # floor on their private context to :confidential, for the disclosed external
+  # route only. Session must label with the authority issue returned; the
+  # pre-issue authority carries no capability id and must not lift.
+  test "security regression: only the issued disclosure lifts private context, and only on the external tier",
+       %{agent_id: agent_id, human_id: human_id} do
+    auth = authority!(human_id)
+    state = %{agent_id: agent_id, session_id: "session_p5_private_lift"}
+    {bound, cap_id} = issue_disclosure!(state, auth, external_route())
+    assert bound.disclosure_capability_id == cap_id
+
+    key = "session.private_goal_context"
+    base = %{key => :untrusted}
+    values = %{key => "Finish the report"}
+    restricted = TaintEnvelope.missing_fallback()
+
+    assert %{^key => lifted} =
+             TurnEgress.put_private_context_taint(base, values, bound, @external_tier)
+
+    assert lifted == TurnEgress.disclosed_private_context_taint()
+    assert lifted.sensitivity == :confidential
+
+    assert %{^key => ^restricted} =
+             TurnEgress.put_private_context_taint(base, values, auth, @external_tier)
+
+    assert %{^key => ^restricted} =
+             TurnEgress.put_private_context_taint(base, values, bound, :on_host)
+
+    assert :ok = Security.revoke(cap_id, actor_authority: Process.get(@actor_authority_key))
   end
 
   test "security regression: hostile non-tool Session compute cannot use an external disclosure",

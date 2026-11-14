@@ -3303,16 +3303,18 @@ defmodule Arbor.Orchestrator.Session do
       |> put_private_recall(turn_authority, state.private_memory_turn)
       |> put_private_goal_context(turn_authority, state)
 
-    initial_taint =
+    # Private-context labels depend on the bound disclosure, so they are added
+    # after issue (below). Partial-turn evidence reads only the user-input and
+    # history keys, which this base taint already carries.
+    base_taint =
       pre_values
       |> TurnEgress.derive_initial_taint(final_values)
       |> PersistenceCore.join_authoritative_history_taint(ContextBuilder.get_messages(state))
-      |> TurnEgress.put_private_context_taint(final_values, turn_authority)
 
     turn_taint_evidence =
       PersistenceCore.build_partial_turn_evidence(
         final_values,
-        initial_taint,
+        base_taint,
         user_message.content
       )
 
@@ -3338,6 +3340,14 @@ defmodule Arbor.Orchestrator.Session do
           }
 
           try do
+            initial_taint =
+              TurnEgress.put_private_context_taint(
+                base_taint,
+                final_values,
+                authority,
+                frozen_tier
+              )
+
             authorizer =
               TurnEgress.build_taint_authorizer(%{
                 fence: fence,

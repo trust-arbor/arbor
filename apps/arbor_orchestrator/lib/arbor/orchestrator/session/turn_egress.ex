@@ -13,6 +13,17 @@ defmodule Arbor.Orchestrator.Session.TurnEgress do
   # put_private_recall/3 and put_private_goal_context/3).
   @private_context_keys ~w(session.private_recalled_memories session.private_relationship session.private_goal_context)
 
+  # Label for non-empty private context in a turn the human disclosed to one
+  # external route; see put_private_context_taint/4.
+  @disclosed_private_context_taint %Taint{
+    level: :untrusted,
+    sensitivity: :confidential,
+    sanitizations: 0,
+    confidence: :unverified,
+    source: "disclosed_private_context",
+    chain: []
+  }
+
   @route_keys [:destination, :provider, :runtime, :model]
   @accepted_runtimes MapSet.new(["arbor", "acp"])
   # Session turn freeze admits only these two tiers. :on_premises, :none,
@@ -407,26 +418,61 @@ defmodule Arbor.Orchestrator.Session.TurnEgress do
 
   @doc false
   # An authenticated turn's private context may hold the human's own data, so
-  # each private key it installs carries the fail-closed `missing_fallback`
-  # envelope (sensitivity :restricted, which no cloud backend may see) — but
-  # only when the key holds something. An empty recall list, relationship map
-  # or goal section discloses nothing; labeling it :restricted made every
-  # authenticated turn on a fresh install (no embedding route, so recall is
-  # always `[]`) unroutable to any cloud provider (found 2026-11-14). Any value
-  # that is not provably empty keeps the label.
-  @spec put_private_context_taint(map(), map(), TurnAuthority.t() | nil) :: map()
-  def put_private_context_taint(taint, _final_values, nil) when is_map(taint), do: taint
+  # each private key it installs is labeled — but only when the key holds
+  # something. An empty recall list, relationship map or goal section
+  # discloses nothing; labeling it made every authenticated turn on a fresh
+  # install (no embedding route, so recall is always `[]`) unroutable to any
+  # cloud provider (found 2026-11-14). Any value that is not provably empty
+  # keeps the label.
+  #
+  # Which label depends on the bound authority and the frozen tier:
+  #
+  #   * `:external_provider` with the disclosure capability issued for this
+  #     turn's frozen route: `disclosed_private_context` (:confidential). The
+  #     human disclosed this turn to that one route, and the turn-egress
+  #     authorizer admits only the frozen route and revalidates that capability
+  #     for it. The owner decided on 2026-11-14 that this disclosure lifts the
+  #     local-only floor. The floor stays :confidential, not the content scan's
+  #     verdict: a regex cannot tell that a recalled memory is personal, so the
+  #     data reaches only backends trusted with confidential data
+  #     (`backend_capabilities`), never one rated :internal or lower.
+  #   * Anything else — an on-host route, an external route without a bound
+  #     disclosure, any other tier: the fail-closed `missing_fallback` envelope
+  #     (:restricted, which no cloud backend may see).
+  #
+  # Call it with the authority `issue_disclosure_if_needed/4` returned, never
+  # the pre-issue one: only the returned authority carries the capability id.
+  @spec put_private_context_taint(map(), map(), TurnAuthority.t() | nil, atom()) :: map()
+  def put_private_context_taint(taint, _final_values, nil, _frozen_tier) when is_map(taint),
+    do: taint
 
-  def put_private_context_taint(taint, final_values, %TurnAuthority{})
+  def put_private_context_taint(taint, final_values, %TurnAuthority{} = authority, frozen_tier)
       when is_map(taint) and is_map(final_values) do
+    label = private_context_label(authority, frozen_tier)
+
     Enum.reduce(@private_context_keys, taint, fn key, acc ->
       case Map.fetch(final_values, key) do
         {:ok, value} when value in [nil, "", [], %{}] -> acc
-        {:ok, _value} -> Map.put(acc, key, TaintEnvelope.missing_fallback())
+        {:ok, _value} -> Map.put(acc, key, label)
         :error -> acc
       end
     end)
   end
+
+  @doc false
+  @spec disclosed_private_context_taint() :: Taint.t()
+  def disclosed_private_context_taint, do: @disclosed_private_context_taint
+
+  defp private_context_label(
+         %TurnAuthority{disclosure_capability_id: cap_id},
+         :external_provider
+       ) do
+    if valid_disclosure_id?(cap_id),
+      do: @disclosed_private_context_taint,
+      else: TaintEnvelope.missing_fallback()
+  end
+
+  defp private_context_label(_authority, _frozen_tier), do: TaintEnvelope.missing_fallback()
 
   @doc false
   @spec derive_initial_taint(map(), map()) :: %{String.t() => :untrusted}

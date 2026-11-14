@@ -1321,6 +1321,31 @@ Read this when changing capabilities, trust, authorization, identity, URI matchi
   `disclosure_issue_right_security_regression_test.exs` (capabilities) and
   `session_disclosure_issue_right_security_regression_test.exs` (orchestrator).
 
+## 41. Private memory in a chat turn reaches only confidential-trusted backends (2026-11-14)
+
+- **What:** an authenticated turn installs the human's private recall,
+  relationship and goal sections. Non-empty ones are labeled by
+  `TurnEgress.put_private_context_taint/4`: `:confidential`
+  (`disclosed_private_context`) when the frozen route is `:external_provider` and
+  the turn holds the disclosure issued for it (§40); `:restricted` otherwise. The
+  sensitivity router then admits only backends whose `backend_capabilities`
+  include that level: by default `anthropic`, `opencode` (paid) and `openrouter`
+  `anthropic/*` for `:confidential`; only `ollama`/`lmstudio` for `:restricted`.
+  Owner decision 2026-11-14 (the disclosure lifts the local-only floor);
+  rationale in `.arbor/roadmap/0-inbox/newcomer-core-only-default-build.md`.
+- **Symptom:** with an embedding route configured and private memory non-empty,
+  chat on `openai`, `gemini`, `opencode_zen` or `qwen` gets a routing decision of
+  `<provider>/<model> cannot handle confidential data; rerouted to ...` (or
+  `routing blocked by policy`) and the turn is refused by the frozen route;
+  earlier turns' `:restricted` history pins later turns local.
+- **Action:** use a backend trusted with confidential data, or have the operator
+  add `:confidential` to that backend's `backend_capabilities` in config (an
+  operator trust decision, not a code change). Never relabel private context
+  below `:confidential`: the disclosure is automatic per turn and a content scan
+  cannot see that a memory is personal. Regressions:
+  `private_context_taint_test.exs` and the P5 "only the issued disclosure lifts
+  private context" test.
+
 ## 2026-10-11 cross-library review — new gates and sharpened ones
 
 - **Signal approval replies are sender-bound (F-003).** `Arbor.Comms.Router` routes a
