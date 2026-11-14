@@ -246,6 +246,14 @@ defmodule Mix.Tasks.Arbor.Helpers do
   end
 
   @doc false
+  # Where the 2026-10-07..2026-11 launcher's daemon wrote `~` state while its
+  # VM HOME pointed at the cookie directory. `mix arbor.home.migrate` moves it
+  # back; `mix arbor.start` refuses to launch while it exists.
+  def legacy_home_root(home \\ arbor_home()) do
+    Path.join(distribution_cookie_home(home), ".arbor")
+  end
+
+  @doc false
   def elixir_executable(name) when name in ["elixir", "iex", "mix"] do
     elixir_lib = :code.lib_dir(:elixir) |> to_string() |> Path.expand()
     elixir_root = elixir_lib |> Path.dirname() |> Path.dirname()
