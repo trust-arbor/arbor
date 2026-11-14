@@ -30,7 +30,7 @@ defmodule Arbor.OAuth.MixProject do
       {:jason, "~> 1.4"},
       {:req, "~> 0.7.5", runtime: false},
       {:finch, "~> 0.24", runtime: false},
-      {:mint, "~> 1.9.3", runtime: false},
+      {:mint, "~> 1.9 and >= 1.9.3", runtime: false},
       {:boundary, "~> 0.10", runtime: false}
     ]
   end

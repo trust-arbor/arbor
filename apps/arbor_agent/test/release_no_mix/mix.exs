@@ -19,7 +19,7 @@ defmodule ArborAgentReleaseGate.MixProject do
           {:jido_signal, "~> 2.0", override: true},
           {:jido_ai, "~> 2.0.0-rc.0", override: true},
           {:req_llm, "~> 1.6", override: true},
-          {:ex_mcp, "1.3.0", override: true},
+          {:ex_mcp, "1.8.1", override: true},
           {:jido_sandbox,
            git: "https://github.com/agentjido/jido_sandbox.git",
            ref: "7fc90881d3c8ca49e769413cc8217344f2b4c29a",

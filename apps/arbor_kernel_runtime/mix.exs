@@ -74,8 +74,9 @@ defmodule Arbor.KernelRuntime.MixProject do
       {:finch, "~> 0.24", runtime: false},
       {:jason, "~> 1.4"},
       # OAuth's bounded HTTP/1 pool relies on Mint's parser-level response
-      # header limit and the response-smuggling fixes released in 1.9.3.
-      {:mint, "~> 1.9.3", override: true, runtime: false},
+      # header limit and the response-smuggling fixes released in 1.9.3. That is
+      # a floor, not a ceiling: ex_mcp >= 1.7.3 needs mint >= 1.10.2.
+      {:mint, "~> 1.9 and >= 1.9.3", override: true, runtime: false},
       {:llm_db, "~> 2026.1", optional: true, runtime: false},
       {:req, "~> 0.5", runtime: false},
       {:zoi, "~> 0.17"},
