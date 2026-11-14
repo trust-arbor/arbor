@@ -18,6 +18,35 @@ Direct HTTP/Bearer is therefore **not** enough for principal-scoped tools even
 if a dashboard session or API key can reach other Gateway routes. Use the
 signing proxy for those tools.
 
+## Session binding
+
+Gateway `/mcp` sessions (Streamable HTTP and legacy SSE) are bound to the
+authenticated principal, not just to the random `mcp-session-id`. The gateway
+resolves that principal as:
+
+1. **`agent_id`** when SignedRequest or JWT authentication set
+   `conn.assigns[:agent_id]`.
+2. Otherwise the **API-key fingerprint** `apikey:<sha256-hex>` of the key
+   presented in `Authorization: Bearer` or `x-api-key`. The raw key is never
+   stored on the session.
+
+A later caller that presents another principal's session id is refused (HTTP
+404, no event replay) on GET/SSE attach, POST, and DELETE. The owner's
+reconnect with the same principal still works.
+
+**Shared-key limitation.** The gateway has a single configured API key
+(`ARBOR_GATEWAY_API_KEY` / `:arbor_gateway, :api_key`). Every caller that
+authenticates with that key hashes to the same `apikey:<sha256>` principal
+and can attach to each other's sessions. Treat the shared key as
+**single-tenant**: do not give the same key to mutually untrusted clients.
+Signed-request and JWT callers do not share this limitation; each verified
+`agent_id` is its own session principal.
+
+Per-client credentials (named keys, isolation, rotation, revocation, and
+per-client audit attribution) are planned. See
+[Per-client gateway API keys](roadmap/per-client-gateway-keys.md) and
+[Security architecture — Gateway MCP session binding](SECURITY_ARCHITECTURE.md#gateway-mcp-session-binding).
+
 ## Signing proxy (required for principal-scoped tools)
 
 1. Register an external agent in the Arbor dashboard (**Settings → External
@@ -80,6 +109,11 @@ private key stays in that subprocess and signs each upstream HTTP request.
 - `mix arbor.signer` — `apps/arbor_gateway/lib/mix/tasks/arbor.signer.ex`
 - `Arbor.Gateway.Signer.Proxy` — stdio signing proxy implementation
 - `Arbor.Gateway.SignedRequestAuth` — HTTP signature verification
+- `Arbor.Gateway.Router.mcp_principal_id/3` — session principal resolution
+- [SECURITY_ARCHITECTURE.md](./SECURITY_ARCHITECTURE.md#gateway-mcp-session-binding) —
+  session binding and the shared API-key principal
+- [per-client-gateway-keys.md](./roadmap/per-client-gateway-keys.md) — planned
+  named keys and per-client isolation
 - [SOFTWARE_FACTORY.md](./SOFTWARE_FACTORY.md) — what the factory is,
   prerequisites, and first-run setup
 - [CODING_TASK_DISPATCH.md](./CODING_TASK_DISPATCH.md) — signed dispatch of
