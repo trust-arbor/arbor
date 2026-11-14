@@ -387,6 +387,33 @@ If `chat` prints `Chat failed: :delivery_failed`, search that log for
 - `cannot handle internal data; rerouted` — the prompt held something the
   chosen provider may not see (for example a path or an IP address), and
   Arbor refused to send it. Pick a provider that may (§3).
+- `turn refused for <agent> at route_and_disclosure:
+  :capability_mutation_unauthorized` — the agent was created before
+  2026-11-14. See the next section.
+
+### Upgrading agents created before 2026-11-14
+
+Before a chat turn goes to an external provider, the agent's session issues
+a one-turn permission to share your messages with that provider. Agents
+created since 2026-11-14 get the right to issue it at creation. Older agents
+lack it, so every chat to them fails as above before the model is called.
+Grant it once, signed with your operator key:
+
+```bash
+./bin/mix arbor.agent.grant_disclosure river
+```
+
+Or do every agent you created at once:
+
+```bash
+./bin/mix arbor.agent.grant_disclosure --all-owned
+```
+
+It takes effect on the next message; no restart is needed. Running it again
+changes nothing. The right covers only turns signed by your key, never another
+person's, and the task refuses agents you did not create. An agent whose
+profile records no creator (for example one created before 2026-03) cannot be
+upgraded this way; recreate it with `mix arbor.agent start`.
 
 If a turn through an ACP agent fails and the server log shows
 `OAuth session expired and could not be refreshed`, the CLI's login has

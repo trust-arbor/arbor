@@ -310,6 +310,30 @@ defmodule Arbor.Agent do
               to: Arbor.Agent.SignedLifecycle,
               as: :submit
 
+  @doc """
+  Grant an agent the narrow disclosure-issue right for its creator, from a
+  grant the creator signed with its key file
+  (`Arbor.Security.prepare_key_file_disclosure_right_grant/2`).
+
+  This backfills agents created before `create/2` granted that right
+  (2026-11-14); without it every authenticated turn of the owner on an
+  external route is refused. Used by `mix arbor.agent.grant_disclosure`.
+
+  Returns `{:ok, :granted}`, or `{:ok, :already_granted}` without consuming
+  the proof when the agent already holds the exact right. Refused with
+  `:disclosure_right_not_bound_to_signer` when the right names a human other
+  than the signer, `:not_agent_owner` when the signer did not create the
+  agent, `:agent_not_found`, or the Security refusal when the signer lacks
+  grant authority over the agent or the proof is invalid or replayed.
+  """
+  @spec submit_signed_owner_disclosure_grant(
+          Arbor.Contracts.Security.Capability.t(),
+          Arbor.Contracts.Security.SignedRequest.t()
+        ) :: {:ok, :granted | :already_granted} | {:error, term()}
+  defdelegate submit_signed_owner_disclosure_grant(capability, signed_request),
+    to: Arbor.Agent.OwnerDisclosureRight,
+    as: :submit
+
   # ===========================================================================
   # Public API — Authorized live message (owner-scoped chat)
   # ===========================================================================

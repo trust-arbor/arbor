@@ -1313,13 +1313,19 @@ Read this when changing capabilities, trust, authorization, identity, URI matchi
   any LLM call. Since 2026-11-14 the Session also logs
   `[Session] turn refused for <agent> at route_and_disclosure:
   :capability_mutation_unauthorized`.
-- **Action:** for an agent created before this fix, have an administrator grant
-  it the narrow right for its owner (or recreate it). Never grant
+- **Action:** for an agent created before this fix, its creator runs
+  `mix arbor.agent.grant_disclosure <name|id>` (or `--all-owned`), signed with
+  their key file. It binds the right to the key's own principal, refuses
+  agents whose profile `created_by` is someone else (or nobody), and still
+  needs the signer's own grant authority over the agent. Never grant
   `arbor://security/grant/<agent_id>` to clear this. Tests that build a Session
   by hand must grant the narrow right too; the P5 fixture's general grant hid
   the production gap. Regressions:
   `disclosure_issue_right_security_regression_test.exs` (capabilities) and
-  `session_disclosure_issue_right_security_regression_test.exs` (orchestrator).
+  `session_disclosure_issue_right_security_regression_test.exs` (orchestrator);
+  backfill: `disclosure_right_backfill_security_regression_test.exs`
+  (capabilities) and `owner_disclosure_right_security_regression_test.exs`
+  (agent).
 
 ## 41. Private memory in a chat turn reaches only confidential-trusted backends (2026-11-14)
 
