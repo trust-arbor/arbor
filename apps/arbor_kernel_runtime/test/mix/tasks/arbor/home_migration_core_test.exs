@@ -17,12 +17,14 @@ defmodule Mix.Tasks.Arbor.HomeMigrationCoreTest do
     }
   end
 
-  defp dir, do: %{kind: :directory}
+  defp dir(mode \\ 0o700), do: %{kind: :directory, mode: mode}
 
   describe "owner case (2026-11-13 decision)" do
     setup do
+      # Modes as found on the owner's machine on 2026-11-14: the daemon's
+      # legacy security/ was private, the February target was not.
       legacy = %{
-        "security" => dir(),
+        "security" => dir(0o700),
         "security/master.key" => file("october key bytes"),
         "security/capability_revocations.v1.json" => file(~s({"revoked":[]})),
         "security/.initialized" => file(""),
@@ -30,7 +32,7 @@ defmodule Mix.Tasks.Arbor.HomeMigrationCoreTest do
       }
 
       target = %{
-        "security" => dir(),
+        "security" => dir(0o755),
         "security/master.key" => file("february key bytes", @feb),
         "logs" => dir(),
         "arbor-dev.meta.json" => file("{}")
@@ -58,6 +60,7 @@ defmodule Mix.Tasks.Arbor.HomeMigrationCoreTest do
       assert Core.applicable?(plan)
 
       assert plan.ops == [
+               {:restrict_mode, "security", 0o755, 0o700},
                {:move, "security/.initialized", :regular},
                {:move, "security/capability_revocations.v1.json", :regular},
                {:replace, "security/master.key",
@@ -66,6 +69,77 @@ defmodule Mix.Tasks.Arbor.HomeMigrationCoreTest do
                {:remove_empty_dir, "workspace_retention"},
                {:remove_empty_dir, ""}
              ]
+    end
+
+    test "regression (2026-11-14 boot failure): the 0755 target security/ is made 0700 " <>
+           "before the private ledger moves into it",
+         %{plan: plan} do
+      restrict = Enum.find_index(plan.ops, &match?({:restrict_mode, "security", _, _}, &1))
+
+      first_move =
+        Enum.find_index(
+          plan.ops,
+          &match?({op, "security/" <> _, _} when op in [:move, :replace], &1)
+        )
+
+      assert {:restrict_mode, "security", 0o755, 0o700} = Enum.at(plan.ops, restrict)
+      assert restrict < first_move
+
+      text = Enum.join(Core.describe(plan), "\n")
+      assert text =~ "chmod    security/  0755 -> 0700"
+      assert text =~ "1 directory to make private."
+    end
+  end
+
+  # A directory both trees hold, with one legacy file to merge into it.
+  defp shared(legacy_mode, target_mode) do
+    Core.plan(
+      %{"d" => dir(legacy_mode), "d/f" => file("x")},
+      %{"d" => dir(target_mode)}
+    )
+  end
+
+  describe "directory permissions" do
+    test "permissions are never loosened" do
+      plan = shared(0o755, 0o700)
+      assert Core.applicable?(plan)
+      refute Enum.any?(plan.ops, &match?({:restrict_mode, _, _, _}, &1))
+    end
+
+    test "the merged directory keeps only the bits both copies grant" do
+      assert {:restrict_mode, "d", 0o705, 0o700} in shared(0o750, 0o705).ops
+    end
+
+    test "the target's setuid/setgid/sticky bits are kept" do
+      assert {:restrict_mode, "d", 0o2755, 0o2700} in shared(0o700, 0o2755).ops
+    end
+
+    # [AL:never-hide-prior-exposure-by-chmod-repairing-an-existing-evidence-root-at-startup]
+    test "a copy other users can write blocks instead of being tightened" do
+      for {legacy_mode, target_mode} <- [{0o700, 0o777}, {0o700, 0o775}, {0o770, 0o700}] do
+        plan = shared(legacy_mode, target_mode)
+        refute Core.applicable?(plan)
+        assert plan.blocked == [{"d", :writable_by_others}]
+        refute Enum.any?(plan.ops, &match?({:restrict_mode, _, _, _}, &1))
+        refute Enum.any?(plan.ops, &match?({:move, "d/f", _}, &1))
+      end
+
+      text = Enum.join(Core.describe(shared(0o700, 0o777)), "\n")
+      assert text =~ "d  other users can write a copy of this directory"
+    end
+
+    test "a shared directory whose modes cannot be compared blocks" do
+      plan = Core.plan(%{"d" => %{kind: :directory}, "d/f" => file("x")}, %{"d" => dir()})
+      refute Core.applicable?(plan)
+      assert plan.blocked == [{"d", :missing_mode}]
+
+      assert Enum.join(Core.describe(plan), "\n") =~
+               "d  directory permissions could not be compared"
+    end
+
+    test "a legacy directory with no files needs no modes: it is only removed" do
+      plan = Core.plan(%{"w" => %{kind: :directory}}, %{"w" => %{kind: :directory}})
+      assert plan.ops == [{:remove_empty_dir, "w"}, {:remove_empty_dir, ""}]
     end
   end
 

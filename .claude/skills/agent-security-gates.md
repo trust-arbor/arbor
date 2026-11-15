@@ -1352,6 +1352,29 @@ Read this when changing capabilities, trust, authorization, identity, URI matchi
   `private_context_taint_test.exs` and the P5 "only the issued disclosure lifts
   private context" test.
 
+## 42. The revocation ledger boots only from a private (0700) directory (2026-11-14)
+
+- **What:** the capability revocation ledger
+  (`security/capability_revocations.v1.json`, beside `master.key`) is read at
+  boot by `RevocationLedger`, which admits its parent directory only when it is
+  a real directory (no symlink in the path) with mode exactly `0700`. Anything
+  else fails authority-store hydration, so `arbor_capabilities` refuses to
+  start. Homes whose `~/.arbor/security` was created before the 2026-06-09
+  key-store fix are `0755`; `mix arbor.home.migrate` merges into such a
+  directory and now tightens it first (owner case, 2026-11-14).
+- **Symptom:** `mix arbor.start` reports the node unreachable during startup,
+  and the log's first failure is
+  `{:security_readiness_failed, {:authority_store_startup_failed, :arbor_security_capabilities, {:authority_store_hydration_failed, :revocation_ledger_parent_insecure_mode}}}`.
+  Before 2026-11-14 the same case read `:revocation_ledger_parent_unavailable`,
+  which still covers a missing, non-directory or symlinked parent.
+- **Action:** `chmod 700 ~/.arbor/security` (the files inside are already
+  `0600`), then start again. Never relax the check to accept a group- or
+  world-readable directory: the ledger is what keeps revoked capabilities
+  revoked across restarts. Regressions: the ledger's "looser than 0700" test in
+  `revocation_ledger_security_regression_test.exs`, and the migration's
+  `restrict_mode` tests in `home_migration_core_test.exs` and
+  `home_migration_test.exs`.
+
 ## 2026-10-11 cross-library review — new gates and sharpened ones
 
 - **Signal approval replies are sender-bound (F-003).** `Arbor.Comms.Router` routes a

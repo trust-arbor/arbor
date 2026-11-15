@@ -460,15 +460,26 @@ defmodule Arbor.Security.Store.RevocationLedger do
     end
   end
 
+  # A real directory whose mode is not 0700 gets its own reason, so a home
+  # whose `security/` predates the private-directory rule (created 0755
+  # before the 2026-06-09 key-store fix) names what to fix instead of
+  # reporting the ledger as unavailable. Both reasons refuse the same way.
   defp admit_private_parent(parent) do
     with {:ok, %File.Stat{type: :directory, mode: mode}} <- File.lstat(parent),
-         true <- Bitwise.band(mode, 0o777) == 0o700,
+         :ok <- private_parent_mode(mode),
          {:ok, real} <- SafePath.resolve_real(parent),
          true <- real == Path.expand(parent) do
       :ok
     else
+      {:error, :revocation_ledger_parent_insecure_mode} = error -> error
       _ -> {:error, :revocation_ledger_parent_unavailable}
     end
+  end
+
+  defp private_parent_mode(mode) do
+    if Bitwise.band(mode, 0o777) == 0o700,
+      do: :ok,
+      else: {:error, :revocation_ledger_parent_insecure_mode}
   end
 
   defp ledger_path(authority_root, opts) do

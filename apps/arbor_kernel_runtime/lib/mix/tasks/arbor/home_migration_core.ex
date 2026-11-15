@@ -16,7 +16,8 @@ defmodule Mix.Tasks.Arbor.HomeMigrationCore do
 
   A listing maps a path relative to its tree root (`"security/master.key"`)
   to `%{kind: kind}` plus, for regular files, `:size`, `:digest` (any stable
-  content hash) and `:mtime` (an `:calendar.datetime()` in local time). Kinds
+  content hash) and `:mtime` (an `:calendar.datetime()` in local time), and
+  for directories `:mode` (the permission bits, masked to `0o7777`). Kinds
   are `:regular`, `:directory`, `:symlink` or `:other`. The target listing
   needs entries for every legacy path and for the other names in each
   directory the two trees share (to detect archive-name collisions).
@@ -30,6 +31,18 @@ defmodule Mix.Tasks.Arbor.HomeMigrationCore do
       daemon used. The target copy is archived as
       `<name>.pre-home-migration-<YYYYMMDD of its mtime>`, never deleted.
     * Directories whose subtree holds no files are **removed**.
+    * A directory both trees hold ends up **no looser than either copy**: its
+      permission bits become the bitwise AND of the two, and a looser target
+      directory is tightened before any legacy file moves into it.
+      Permissions are never loosened, and a shared directory whose modes
+      cannot be compared blocks. So does one that either copy lets group or
+      other users write: tightening it would hide that someone else could
+      have placed files there, so a human inspects it first. (Added
+      2026-11-14: the owner's
+      `~/.arbor/security` had been 0755 since 2026-02, the daemon's legacy
+      copy was 0700, and the revocation ledger refuses any parent that is not
+      0700, so the merged home failed to boot.) The two roots' own modes are
+      not compared.
     * Anything else blocks the whole migration: symlinks or special files on
       either side, a file facing a directory, an archive name already taken,
       or a legacy `distribution/` entry (it would land in the cookie
@@ -47,7 +60,8 @@ defmodule Mix.Tasks.Arbor.HomeMigrationCore do
           required(:kind) => kind(),
           optional(:size) => non_neg_integer(),
           optional(:digest) => binary(),
-          optional(:mtime) => :calendar.datetime()
+          optional(:mtime) => :calendar.datetime(),
+          optional(:mode) => non_neg_integer()
         }
   @type listing :: %{String.t() => entry()}
   @type op ::
@@ -55,6 +69,7 @@ defmodule Mix.Tasks.Arbor.HomeMigrationCore do
           | {:replace, String.t(), String.t()}
           | {:remove_identical, String.t()}
           | {:remove_empty_dir, String.t()}
+          | {:restrict_mode, String.t(), non_neg_integer(), non_neg_integer()}
   @type reason ::
           :reserved_path
           | :unsupported_legacy_kind
@@ -62,6 +77,8 @@ defmodule Mix.Tasks.Arbor.HomeMigrationCore do
           | :kind_mismatch
           | :missing_digest
           | :missing_mtime
+          | :missing_mode
+          | :writable_by_others
           | :archive_name_taken
           | :sqlite_family_conflict
   @type t :: %__MODULE__{ops: [op()], blocked: [{String.t(), reason()}]}
@@ -154,7 +171,7 @@ defmodule Mix.Tasks.Arbor.HomeMigrationCore do
        when kind not in [:regular, :directory],
        do: block(acc, rel, :unsupported_legacy_kind)
 
-  defp decide(rel, %{kind: :directory}, t, legacy, target, children, acc) do
+  defp decide(rel, %{kind: :directory} = l, t, legacy, target, children, acc) do
     descendants = descendants(rel, legacy)
 
     cond do
@@ -168,9 +185,16 @@ defmodule Mix.Tasks.Arbor.HomeMigrationCore do
         end
 
       t.kind == :directory ->
-        rel
-        |> walk(legacy, target, children, acc)
-        |> op({:remove_empty_dir, rel})
+        case restrict_mode(rel, l, t) do
+          {:block, reason} ->
+            block(acc, rel, reason)
+
+          restrict ->
+            acc
+            |> maybe_op(restrict)
+            |> then(&walk(rel, legacy, target, children, &1))
+            |> op({:remove_empty_dir, rel})
+        end
 
       t.kind == :regular ->
         block(acc, rel, :kind_mismatch)
@@ -223,6 +247,29 @@ defmodule Mix.Tasks.Arbor.HomeMigrationCore do
     end
   end
 
+  # The merged directory keeps only the permission bits both copies grant;
+  # the target's setuid/setgid/sticky bits are left as they are. A copy that
+  # other users could write blocks instead: tightening it would erase the
+  # sign that someone else may have placed files there.
+  defp restrict_mode(rel, %{mode: legacy_mode}, %{mode: target_mode})
+       when is_integer(legacy_mode) and is_integer(target_mode) do
+    target_mode = Bitwise.band(target_mode, 0o7777)
+
+    if Bitwise.band(Bitwise.bor(legacy_mode, target_mode), 0o022) != 0 do
+      {:block, :writable_by_others}
+    else
+      permissions = target_mode |> Bitwise.band(legacy_mode) |> Bitwise.band(0o777)
+      merged = target_mode |> Bitwise.band(0o7000) |> Bitwise.bor(permissions)
+
+      if merged == target_mode, do: nil, else: {:restrict_mode, rel, target_mode, merged}
+    end
+  end
+
+  defp restrict_mode(_rel, _legacy, _target), do: {:block, :missing_mode}
+
+  defp maybe_op(acc, nil), do: acc
+  defp maybe_op(acc, op), do: op(acc, op)
+
   defp has_digest?(entry),
     do: is_binary(Map.get(entry, :digest)) and is_integer(Map.get(entry, :size))
 
@@ -265,6 +312,13 @@ defmodule Mix.Tasks.Arbor.HomeMigrationCore do
   defp describe_op({:remove_identical, rel}),
     do: ["  drop     #{rel}  (identical to the current copy)"]
 
+  defp describe_op({:restrict_mode, rel, from, to}) do
+    [
+      "  chmod    #{rel}/  #{octal(from)} -> #{octal(to)}  " <>
+        "(as private as the legacy copy, before files move in)"
+    ]
+  end
+
   defp describe_op({:remove_empty_dir, @root}), do: ["  rmdir    (legacy root, once empty)"]
   defp describe_op({:remove_empty_dir, rel}), do: ["  rmdir    #{rel}/ (no files left)"]
 
@@ -273,8 +327,15 @@ defmodule Mix.Tasks.Arbor.HomeMigrationCore do
 
     "#{Map.get(counts, :move, 0)} to move, #{Map.get(counts, :replace, 0)} to replace " <>
       "(current copy archived), #{Map.get(counts, :remove_identical, 0)} identical " <>
-      "copies to drop, #{Map.get(counts, :remove_empty_dir, 0)} directories to remove."
+      "copies to drop, #{Map.get(counts, :remove_empty_dir, 0)} directories to remove." <>
+      restrict_summary(Map.get(counts, :restrict_mode, 0))
   end
+
+  defp restrict_summary(0), do: ""
+  defp restrict_summary(1), do: " 1 directory to make private."
+  defp restrict_summary(n), do: " #{n} directories to make private."
+
+  defp octal(mode), do: mode |> Integer.to_string(8) |> String.pad_leading(4, "0")
 
   defp display(@root), do: "(legacy root)"
   defp display(rel), do: rel
@@ -286,6 +347,12 @@ defmodule Mix.Tasks.Arbor.HomeMigrationCore do
   defp describe_reason(:unsupported_target_kind), do: "current entry is a symlink or special file"
   defp describe_reason(:kind_mismatch), do: "a file on one side faces a directory on the other"
   defp describe_reason(:missing_digest), do: "contents could not be compared"
+
+  defp describe_reason(:missing_mode),
+    do: "directory permissions could not be compared"
+
+  defp describe_reason(:writable_by_others),
+    do: "other users can write a copy of this directory; inspect its contents, then fix its mode"
 
   defp describe_reason(:missing_mtime),
     do: "current copy has no modification time to date its archive"
