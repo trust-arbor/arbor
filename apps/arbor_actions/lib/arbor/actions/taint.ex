@@ -48,6 +48,8 @@ defmodule Arbor.Actions.Taint do
   without `requires:` (bare `:control` or `:data`).
   """
 
+  alias Arbor.Actions.Config
+  alias Arbor.Common.SafePath
   alias Arbor.Signals.Taint
 
   @type role :: :data | :control | {:control, keyword()}
@@ -128,31 +130,73 @@ defmodule Arbor.Actions.Taint do
   @doc """
   Provenance for content read from a filesystem path (taint-rebuild Phase 1).
 
-  Foreign / shared / sensitive locations are `:untrusted`; everything else
-  returns `nil` (no provenance asserted — we never silently label a read
-  `:trusted`, which would launder it). Mirrors the orchestrator's
-  `auto_classify_by_path` heuristic.
+  Classification is monotonic (taint only goes up):
+
+  1. The legacy path-string heuristic still flags foreign/shared/sensitive
+     locations (`/tmp`, secrets, downloads) as `:untrusted`.
+  2. **Default change (2026-10-29):** unless the operator explicitly sets
+     `config :arbor_actions, taint_file_reads_outside_trusted_roots: false`,
+     a path whose canonical (symlink-resolved) form is outside every
+     configured `trusted_file_roots` is also `:untrusted`. An empty root
+     list is fail-closed.
+
+  Everything else returns `nil` (no provenance asserted — we never silently
+  label a read `:trusted`, which would launder it).
   """
   @spec path_provenance(term()) :: :untrusted | nil
   def path_provenance(path) when is_binary(path) do
-    if String.contains?(path, [
-         ".env",
-         "credentials",
-         "secret",
-         "private_key",
-         "/tmp/",
-         "/var/",
-         "/proc/",
-         "/Downloads/",
-         "/downloads/"
-       ]) do
-      :untrusted
-    else
-      nil
+    canonical = canonicalize_file_path(path)
+
+    cond do
+      heuristic_untrusted_path?(path) or heuristic_untrusted_path?(canonical) ->
+        :untrusted
+
+      Config.taint_file_reads_outside_trusted_roots?() and
+          not inside_trusted_file_roots?(canonical) ->
+        :untrusted
+
+      true ->
+        nil
     end
   end
 
   def path_provenance(_), do: nil
+
+  @heuristic_untrusted_fragments [
+    ".env",
+    "credentials",
+    "secret",
+    "private_key",
+    "/tmp/",
+    "/var/",
+    "/proc/",
+    "/Downloads/",
+    "/downloads/"
+  ]
+
+  defp heuristic_untrusted_path?(path) when is_binary(path),
+    do: String.contains?(path, @heuristic_untrusted_fragments)
+
+  defp heuristic_untrusted_path?(_), do: false
+
+  defp canonicalize_file_path(path) do
+    case SafePath.resolve_real(path) do
+      {:ok, real} ->
+        real
+
+      {:error, _} ->
+        case SafePath.resolve_within(path, "/") do
+          {:ok, real} -> real
+          {:error, _} -> Path.expand(path)
+        end
+    end
+  end
+
+  defp inside_trusted_file_roots?(path) do
+    Enum.any?(Config.trusted_file_roots(), fn root ->
+      match?({:ok, _}, SafePath.resolve_within(path, root))
+    end)
+  end
 
   @doc """
   Check if action parameters comply with taint policy.

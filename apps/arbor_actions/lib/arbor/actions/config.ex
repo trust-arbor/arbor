@@ -531,6 +531,49 @@ defmodule Arbor.Actions.Config do
   defp inferred_base_url(_provider, %{host: host}) when is_binary(host), do: "https://#{host}"
   defp inferred_base_url(_provider, _remote_info), do: nil
 
+  @doc """
+  Canonical trusted filesystem roots for file-read taint labeling.
+
+  File content whose real path is outside every configured root is labeled
+  `:untrusted` when `taint_file_reads_outside_trusted_roots?/0` is true
+  (the default). An empty list is fail-closed: every file read is outside
+  the roots.
+  """
+  @spec trusted_file_roots() :: [String.t()]
+  def trusted_file_roots do
+    case Application.get_env(:arbor_actions, :trusted_file_roots, []) do
+      roots when is_list(roots) ->
+        Enum.filter(roots, &(is_binary(&1) and String.trim(&1) != ""))
+
+      root when is_binary(root) and root != "" ->
+        [root]
+
+      _ ->
+        []
+    end
+  end
+
+  @doc """
+  Whether file reads outside `trusted_file_roots/0` are labeled `:untrusted`.
+
+  **This is on by default** (taint-labeling default change, 2026-10-29).
+  Opt out explicitly with one of:
+
+      config :arbor_actions, taint_file_reads_outside_trusted_roots: false
+      config :arbor_actions, taint_file_reads_outside_trusted_roots: :disabled
+  """
+  @spec taint_file_reads_outside_trusted_roots?() :: boolean()
+  def taint_file_reads_outside_trusted_roots? do
+    case Application.get_env(:arbor_actions, :taint_file_reads_outside_trusted_roots, true) do
+      false -> false
+      :disabled -> false
+      "false" -> false
+      "0" -> false
+      0 -> false
+      _ -> true
+    end
+  end
+
   defp first_present(nil, fallback), do: fallback
   defp first_present("", fallback), do: fallback
   defp first_present(value, _fallback), do: value
