@@ -241,6 +241,7 @@ config :arbor_kernel,
 
 # P0-4: Default workspace for MCP file operations (FileGuard scope)
 config :arbor_gateway, mcp_workspace: "~/.arbor/workspace"
+config :arbor_gateway, mcp_tool_pin_dir: "~/.arbor/mcp_tool_pins"
 config :arbor_gateway, :chat_agent_facade, Arbor.Agent
 
 # Generic mechanisms use exact trusted host contracts and integration ports.

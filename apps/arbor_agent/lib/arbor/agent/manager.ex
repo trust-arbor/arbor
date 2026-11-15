@@ -473,10 +473,12 @@ defmodule Arbor.Agent.Manager do
   This call is the operator's consent: for each server it grants the agent a
   capability bound to that server's exact config
   (`Arbor.Security.mcp_server_approval_uri/2`) and revokes approvals for
-  servers no longer listed. `Arbor.Gateway.connect_mcp_server/2` refuses an
-  agent-bound connection without it, so metadata written any other way (or
-  edited afterwards) does not connect (Imp review D7, 2026-09-28). Every server
-  needs a non-empty `:name`.
+  servers no longer listed. Revoking or replacing an approval also drops that
+  identity's persisted MCP tool-fingerprint pins via
+  `Arbor.Gateway.drop_mcp_tool_pins/1`. `Arbor.Gateway.connect_mcp_server/2`
+  refuses an agent-bound connection without the approval, so metadata written
+  any other way (or edited afterwards) does not connect (Imp review D7,
+  2026-09-28). Every server needs a non-empty `:name`.
 
   ## Server Config
 
@@ -568,11 +570,35 @@ defmodule Arbor.Agent.Manager do
   defp revoke_all(caps, actor_authority) do
     Enum.reduce_while(caps, :ok, fn cap, :ok ->
       case Arbor.Security.revoke(cap.id, actor_authority: actor_authority) do
-        :ok -> {:cont, :ok}
-        {:error, :not_found} -> {:cont, :ok}
-        {:error, reason} -> {:halt, {:error, {:mcp_server_approval_revoke_failed, reason}}}
+        :ok ->
+          drop_mcp_tool_pins(cap.resource_uri)
+          {:cont, :ok}
+
+        {:error, :not_found} ->
+          drop_mcp_tool_pins(cap.resource_uri)
+          {:cont, :ok}
+
+        {:error, reason} ->
+          {:halt, {:error, {:mcp_server_approval_revoke_failed, reason}}}
       end
     end)
+  end
+
+  # Pins live in arbor_gateway; this library cannot compile-depend on it.
+  # A missing Gateway is a no-op so profile-only tests still reconcile.
+  defp drop_mcp_tool_pins(uri) when is_binary(uri) do
+    if Code.ensure_loaded?(Arbor.Gateway) and
+         function_exported?(Arbor.Gateway, :drop_mcp_tool_pins, 1) do
+      case apply(Arbor.Gateway, :drop_mcp_tool_pins, [uri]) do
+        :ok ->
+          :ok
+
+        {:error, reason} ->
+          Logger.warning("[Manager] Failed to drop MCP tool pins for #{uri}: #{inspect(reason)}")
+      end
+    end
+
+    :ok
   end
 
   @doc """

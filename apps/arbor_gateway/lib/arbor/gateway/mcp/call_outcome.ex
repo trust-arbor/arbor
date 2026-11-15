@@ -113,6 +113,19 @@ defmodule Arbor.Gateway.MCP.CallOutcome do
     )
   end
 
+  @doc """
+  A call refused because the tool's pinned fingerprint no longer matches
+  the server's advertised definition.
+  """
+  @spec fingerprint_changed(String.t() | nil, String.t()) :: CallFailure.t()
+  def fingerprint_changed(server_name, tool_name) do
+    failure(
+      :refused,
+      "MCP tool #{server_name || "connection"}/#{tool_name} is quarantined after a fingerprint change; re-approve the new pin.",
+      tool_name
+    )
+  end
+
   @doc false
   @spec classify(term()) :: CallFailure.outcome()
   def classify(:not_connected), do: :not_sent
