@@ -43,6 +43,7 @@ defmodule Arbor.Common.SkillLibrary do
   require Logger
 
   alias Arbor.Common.Config
+  alias Arbor.Common.InstructionTrust
 
   alias Arbor.Common.SkillLibrary.{
     EmbeddingText,
@@ -604,20 +605,58 @@ defmodule Arbor.Common.SkillLibrary do
   end
 
   defp source_policy(source_root) do
-    root = Path.expand(source_root)
-    project = Path.expand(".agents/skills")
-    bundled = Application.app_dir(:arbor_kernel_runtime, "priv/library/skills") |> Path.expand()
-    personal = Path.expand("~/.agents/skills")
-    arbor_home = System.get_env("ARBOR_HOME") || Path.expand("~/.arbor")
-    operator = Path.join(arbor_home, "library/skills") |> Path.expand()
+    {identity_taint, origin} = source_identity(source_root)
+    trust_opts = [additional_roots: bundled_skill_roots()]
 
     cond do
-      root == project -> {:untrusted, "project:#{File.cwd!()}"}
-      root == bundled -> {:trusted, "bundled"}
-      root == operator -> {:trusted, "operator"}
-      root == personal -> {:derived, "personal"}
+      InstructionTrust.trusted?(source_root, trust_opts) ->
+        if identity_taint == :derived, do: {:derived, origin}, else: {:trusted, origin}
+
+      identity_taint == :trusted ->
+        {:untrusted, origin}
+
+      true ->
+        {identity_taint, origin}
+    end
+  end
+
+  defp source_identity(source_root) do
+    root = identity_path(source_root)
+    project = identity_path(".agents/skills")
+    bundled = identity_path(bundled_skill_dir())
+    personal = identity_path("~/.agents/skills")
+    operator = identity_path(operator_skill_dir())
+
+    cond do
+      InstructionTrust.contained_in?(root, project) -> {:untrusted, "project:#{File.cwd!()}"}
+      InstructionTrust.contained_in?(root, bundled) -> {:trusted, "bundled"}
+      InstructionTrust.contained_in?(root, operator) -> {:trusted, "operator"}
+      InstructionTrust.contained_in?(root, personal) -> {:derived, "personal"}
       true -> {:untrusted, "configured:#{root}"}
     end
+  end
+
+  defp identity_path(path) do
+    case InstructionTrust.canonicalize(path) do
+      {:ok, real} -> real
+      _ -> Path.expand(path)
+    end
+  end
+
+  defp bundled_skill_roots do
+    case InstructionTrust.canonicalize(bundled_skill_dir()) do
+      {:ok, real} -> [real]
+      _ -> []
+    end
+  end
+
+  defp bundled_skill_dir do
+    Application.app_dir(:arbor_kernel_runtime, "priv/library/skills")
+  end
+
+  defp operator_skill_dir do
+    arbor_home = System.get_env("ARBOR_HOME") || Path.expand("~/.arbor")
+    Path.join(arbor_home, "library/skills")
   end
 
   # Precedence is enforced at insertion time as well as by default directory

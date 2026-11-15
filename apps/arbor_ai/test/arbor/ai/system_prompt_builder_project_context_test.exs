@@ -13,6 +13,7 @@ defmodule Arbor.AI.SystemPromptBuilderProjectContextTest do
     File.mkdir_p!(Path.join(root, ".git"))
     File.write!(Path.join(root, "CLAUDE.md"), "PROJECT_MARKER_CONVENTIONS")
     Arbor.Common.Config.Testing.isolate_namespace()
+    Arbor.Common.Config.Testing.put(:instruction_trusted_roots, [root])
 
     on_exit(fn -> File.rm_rf(root) end)
 
