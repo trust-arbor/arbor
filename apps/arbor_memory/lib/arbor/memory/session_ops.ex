@@ -650,7 +650,7 @@ defmodule Arbor.Memory.SessionOps do
 
       :ok = Arbor.Memory.delete_code("agent_001", "code_abc123")
   """
-  @spec delete_code(String.t(), String.t()) :: :ok
+  @spec delete_code(String.t(), String.t()) :: :ok | {:error, :store_unavailable}
   defdelegate delete_code(agent_id, entry_id), to: CodeStore, as: :delete
 
   @doc """
