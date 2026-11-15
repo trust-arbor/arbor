@@ -7,6 +7,10 @@
 **Scoped update:** 2026-09-07, product/security priorities and the current egress
 decision path. This is not a fresh audit of every subsystem described below.
 
+**Scoped update:** 2026-10-23, Gateway MCP Streamable HTTP / legacy SSE sessions
+are bound to the authenticated principal (`agent_id` or an API-key fingerprint).
+The single configured gateway API key remains a shared, single-tenant principal.
+
 This document describes the security controls represented by the current source and
 the Phase 6 decisions. It deliberately separates implemented controls from planned
 work and from historical design material. It is an architecture overview, not a
@@ -130,6 +134,38 @@ Authoritative code: [`Arbor.Security`](../../apps/arbor_security/lib/arbor/secur
 [`SignedRequestAuth`](../../apps/arbor_gateway/lib/arbor/gateway/signed_request_auth.ex),
 [`Identity.Verifier`](../../apps/arbor_security/lib/arbor/security/identity/verifier.ex),
 and [`Reload-Stable Signing Authority`](../../.arbor/decisions/2026-07-11-reload-stable-signing-authority.md).
+
+### Gateway MCP session binding
+
+`/mcp` Streamable HTTP and legacy SSE sessions are bound to the caller that
+authenticated the request that created them. `ExMCP.HttpPlug` stores a
+`principal_id` on the session; later GET/SSE, POST, and DELETE that present the
+same `mcp-session-id` must resolve to that same principal or the plug returns
+404 (`Session not found`) and does not replay buffered events.
+
+`Arbor.Gateway.Router.mcp_principal_id/3` resolves the binding in this order:
+
+1. `conn.assigns[:agent_id]` when SignedRequest or JWT authentication set it.
+2. Otherwise a SHA-256 fingerprint of the presented API key, stored as
+   `apikey:<hex>`. The raw key is never written onto the session.
+3. `nil` only when neither is present (the auth pipeline should already have
+   halted).
+
+This isolates agent-authenticated sessions from API-key sessions. Tool
+permissions remain a per-request check against the caller's own identity; the
+session binding only prevents attach, replay, and close of another principal's
+transport session.
+
+The gateway still has **one** configured API key (`ARBOR_GATEWAY_API_KEY` or
+`:arbor_gateway, :api_key`). Every holder of that key hashes to the same
+`apikey:<sha256>` principal and can attach to each other's sessions. Treat the
+shared key as single-tenant. Per-client keys are planned; see
+[Per-client gateway API keys](roadmap/per-client-gateway-keys.md) and
+[External MCP client — session binding](EXTERNAL_MCP_CLIENT.md#session-binding).
+
+Authoritative code: [`Arbor.Gateway.Router`](../../apps/arbor_gateway/lib/arbor/gateway/router.ex)
+(`mcp_principal_id/3`) and
+[`Arbor.Gateway.Auth`](../../apps/arbor_gateway/lib/arbor/gateway/auth.ex).
 
 ### Capabilities, delegation, and revocation
 
@@ -428,6 +464,13 @@ complete than their current implementation.
 - Signed-request authentication is available, but Gateway intentionally passes through
   to other auth schemes when the signature is absent or invalid. Deployment policy must
   decide which schemes are acceptable on each endpoint.
+- Gateway MCP session binding is implemented (see
+  [Gateway MCP session binding](#gateway-mcp-session-binding)), but the single
+  configured API key is one shared principal. Multiple named keys, per-client
+  credentials, rotation, revocation, and per-client audit attribution are
+  **planned**, not implemented. Until then, do not share `ARBOR_GATEWAY_API_KEY`
+  across mutually untrusted clients. Tracked at
+  [docs/arbor/roadmap/per-client-gateway-keys.md](roadmap/per-client-gateway-keys.md).
 
 ### ACP authorization granularity
 
@@ -526,6 +569,10 @@ features.
 
 - [`docs/arbor-security-design.md`](../arbor-security-design.md) - action authorization
   risks and remaining hardening context.
+- [`External MCP client`](EXTERNAL_MCP_CLIENT.md) - `/mcp` connection modes and
+  session-principal binding.
+- [`Per-client gateway API keys`](roadmap/per-client-gateway-keys.md) - planned
+  named keys and per-client session isolation.
 - [`Agent security gates`](../../.claude/skills/agent-security-gates.md) - gate-by-gate
   operational checklist.
 - [`CONTRACT_RULES.md`](./CONTRACT_RULES.md) - facade and dependency-boundary rules.
