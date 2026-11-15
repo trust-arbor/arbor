@@ -101,50 +101,119 @@ defmodule Arbor.Agent.Prototypes.XaiVoiceOrchestrator do
   """
   @spec converse_from_mic(pos_integer(), keyword()) :: {:ok, map()} | {:error, term()}
   def converse_from_mic(seconds \\ 6, opts \\ []) do
-    with {:ok, _actor_authority} <- require_actor_authority(opts) do
-      device = opts[:device] || ":default"
-      mic = "/tmp/arbor_mic_in.pcm"
+    with {:ok, _actor_authority} <- require_actor_authority(opts),
+         {:ok, mic} <- private_mic_capture_path() do
+      try do
+        device = opts[:device] || ":default"
 
-      Logger.info("[VoiceOrch] recording #{seconds}s from mic (#{device})…")
+        Logger.info("[VoiceOrch] recording #{seconds}s from mic (#{device})…")
 
-      {_, rc} =
-        System.cmd(
-          "ffmpeg",
-          [
-            "-y",
-            "-loglevel",
-            "error",
-            "-f",
-            "avfoundation",
-            "-i",
-            device,
-            "-ar",
-            "16000",
-            "-ac",
-            "1",
-            "-t",
-            to_string(seconds),
-            "-f",
-            "s16le",
-            mic
-          ],
-          stderr_to_stdout: true
-        )
+        {_, rc} =
+          System.cmd(
+            "ffmpeg",
+            [
+              "-y",
+              "-loglevel",
+              "error",
+              "-f",
+              "avfoundation",
+              "-i",
+              device,
+              "-ar",
+              "16000",
+              "-ac",
+              "1",
+              "-t",
+              to_string(seconds),
+              "-f",
+              "s16le",
+              mic
+            ],
+            stderr_to_stdout: true
+          )
 
-      cond do
-        rc != 0 ->
-          {:error, {:mic_record_failed, rc}}
+        cond do
+          rc != 0 ->
+            {:error, {:mic_record_failed, rc}}
 
-        true ->
-          case converse_audio_file(mic, opts) do
-            {:ok, r} ->
-              play_audio(r.audio_path)
-              {:ok, r}
+          true ->
+            case converse_audio_file(mic, opts) do
+              {:ok, r} ->
+                play_audio(r.audio_path)
+                {:ok, r}
 
-            err ->
-              err
-          end
+              err ->
+                err
+            end
+        end
+      after
+        _ = File.rm(mic)
       end
+    end
+  end
+
+  defp private_mic_capture_path do
+    dir = Path.join(arbor_data_home(), "tmp")
+
+    with :ok <- File.mkdir_p(dir),
+         :ok <- File.chmod(dir, 0o700),
+         {:ok, %File.Stat{type: :directory, uid: uid, mode: mode}} <-
+           File.lstat(dir, time: :posix),
+         {:ok, euid} <- mic_capture_euid(),
+         true <- uid == euid and Bitwise.band(mode, 0o022) == 0 do
+      exclusive_mic_capture_file(dir)
+    else
+      _ -> {:error, :insecure_mic_capture_dir}
+    end
+  end
+
+  defp exclusive_mic_capture_file(dir) do
+    name =
+      "arbor_mic_in-" <>
+        Base.encode16(:crypto.strong_rand_bytes(16), case: :lower) <> ".pcm"
+
+    path = Path.join(dir, name)
+
+    case :file.open(String.to_charlist(path), [:write, :binary, :raw, :exclusive]) do
+      {:ok, io} ->
+        _ = :file.close(io)
+        _ = File.chmod(path, 0o600)
+        {:ok, path}
+
+      {:error, reason} ->
+        {:error, {:mic_capture_path_failed, reason}}
+    end
+  end
+
+  defp arbor_data_home do
+    case System.get_env("ARBOR_HOME") do
+      home when is_binary(home) and home != "" -> Path.expand(home)
+      _ -> Path.expand("~/.arbor")
+    end
+  end
+
+  defp mic_capture_euid do
+    probe =
+      Path.join(
+        System.tmp_dir!(),
+        ".arbor-euid-" <> Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
+      )
+
+    case :file.open(String.to_charlist(probe), [:write, :binary, :raw, :exclusive]) do
+      {:ok, io} ->
+        _ = :file.close(io)
+
+        try do
+          case File.lstat(probe, time: :posix) do
+            {:ok, %File.Stat{uid: uid}} when is_integer(uid) -> {:ok, uid}
+            _other -> :error
+          end
+        after
+          _ = File.rm(probe)
+        end
+
+      {:error, _reason} ->
+        :error
     end
   end
 
