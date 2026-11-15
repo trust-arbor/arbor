@@ -33,6 +33,8 @@ defmodule Mix.Tasks.Arbor.HomeMigrationTest do
 
   # The owner's case: a February target key, an October legacy key, a
   # legacy-only ledger and marker, and an empty legacy retention directory.
+  # The modes are the owner's too: the daemon's legacy security/ was 0700,
+  # the February target security/ was 0755.
   defp owner_fixture(home) do
     legacy = Helpers.legacy_home_root(home)
 
@@ -45,8 +47,16 @@ defmodule Mix.Tasks.Arbor.HomeMigrationTest do
     write(legacy, "security/.initialized", "")
     File.mkdir_p!(Path.join(legacy, "workspace_retention"))
 
+    File.chmod!(Path.join(home, "security"), 0o755)
+    File.chmod!(Path.join(legacy, "security"), 0o700)
+
     write(Helpers.distribution_cookie_home(home), ".erlang.cookie", "cookie\n")
     legacy
+  end
+
+  defp dir_mode(path) do
+    %File.Stat{type: :directory, mode: mode} = File.lstat!(path)
+    Bitwise.band(mode, 0o777)
   end
 
   defp write(root, rel, contents) do
@@ -90,6 +100,12 @@ defmodule Mix.Tasks.Arbor.HomeMigrationTest do
              ~s({"v":1,"revoked":[]})
 
     assert File.regular?(Path.join(home, "security/.initialized"))
+
+    # Regression (2026-11-14): the merged security/ must be as private as the
+    # daemon's copy, or the revocation ledger (which admits only a 0700
+    # parent) refuses to boot.
+    assert dir_mode(Path.join(home, "security")) == 0o700
+
     refute File.exists?(Path.join(home, "workspace_retention"))
     refute File.exists?(legacy)
     refute HomeMigration.legacy_state_present?(home)
@@ -110,6 +126,7 @@ defmodule Mix.Tasks.Arbor.HomeMigrationTest do
              HomeMigration.apply_plan(plan, home)
 
     assert done == [
+             {:restrict_mode, "security", 0o755, 0o700},
              {:move, "security/.initialized", :regular},
              {:move, "security/capability_revocations.v1.json", :regular}
            ]
@@ -157,16 +174,35 @@ defmodule Mix.Tasks.Arbor.HomeMigrationTest do
     assert output =~ "move     security/capability_revocations.v1.json"
     assert output =~ "move     security/.initialized"
     assert output =~ "rmdir    workspace_retention/ (no files left)"
+    assert output =~ "chmod    security/  0755 -> 0700"
     assert output =~ "Dry run: nothing changed"
 
     assert File.read!(Path.join(home, "security/master.key")) == "february-master-key"
     assert File.dir?(Path.join(legacy, "workspace_retention"))
+    assert dir_mode(Path.join(home, "security")) == 0o755
+  end
+
+  test "a target directory whose mode changed after planning stops the migration first",
+       %{home: home} do
+    owner_fixture(home)
+    assert {:ok, plan} = HomeMigration.plan(home)
+
+    # Someone loosens it further between the plan and the apply.
+    File.chmod!(Path.join(home, "security"), 0o777)
+
+    assert {:error, %{done: [], failed: {{:restrict_mode, "security", 0o755, 0o700}, reason}}} =
+             HomeMigration.apply_plan(plan, home)
+
+    assert reason == :changed_since_plan
+    assert dir_mode(Path.join(home, "security")) == 0o777
+    assert File.read!(Path.join(home, "security/master.key")) == "february-master-key"
+    assert HomeMigration.legacy_state_present?(home)
   end
 
   test "--apply migrates when no managed daemon is recorded", %{home: home} do
     owner_fixture(home)
     Migrate.run(["--apply", "--arbor-home", home])
-    assert shell_output() =~ "Applied 6 operations"
+    assert shell_output() =~ "Applied 7 operations"
     assert File.read!(Path.join(home, "security/master.key")) == "october-master-key"
     refute HomeMigration.legacy_state_present?(home)
     refute File.exists?(Helpers.lock_dir(home))

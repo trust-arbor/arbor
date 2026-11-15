@@ -59,6 +59,7 @@ defmodule Arbor.Security.AuthorityStore do
     :revocation_ledger_marker_symlink_rejected,
     :revocation_ledger_marker_hardlink_rejected,
     :revocation_ledger_marker_not_regular,
+    :revocation_ledger_parent_insecure_mode,
     :revocation_ledger_parent_unavailable
   ]
 

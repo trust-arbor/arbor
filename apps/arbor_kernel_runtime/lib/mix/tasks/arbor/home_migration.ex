@@ -13,7 +13,9 @@ defmodule Mix.Tasks.Arbor.HomeMigration do
   target name (it fails if that name exists) before the legacy name is
   unlinked. A replacement first hard-links the current target to its archive
   name, then renames the legacy file over the target, so the target path
-  always names one complete copy. Erlang cannot fsync a directory, so the
+  always names one complete copy. A directory tightening re-checks the
+  target's mode against the plan before its `chmod`, so it can only ever
+  remove permission bits the plan saw. Erlang cannot fsync a directory, so the
   shell runs `sync` once after applying.
   """
 
@@ -149,8 +151,8 @@ defmodule Mix.Tasks.Arbor.HomeMigration do
         base = %{kind: :regular, size: size, mtime: mtime}
         if digest?, do: Map.put(base, :digest, digest!(path)), else: base
 
-      {:ok, %File.Stat{type: :directory}} ->
-        %{kind: :directory}
+      {:ok, %File.Stat{type: :directory, mode: mode}} ->
+        %{kind: :directory, mode: Bitwise.band(mode, 0o7777)}
 
       {:ok, %File.Stat{type: :symlink}} ->
         %{kind: :symlink}
@@ -213,6 +215,23 @@ defmodule Mix.Tasks.Arbor.HomeMigration do
     end
   catch
     {:gather_failed, _path, reason} -> {:error, reason}
+  end
+
+  defp perform({:restrict_mode, rel, from, to}, {_legacy, home}) do
+    target = join(home, rel)
+
+    case File.lstat(target) do
+      {:ok, %File.Stat{type: :directory, mode: mode}} ->
+        if Bitwise.band(mode, 0o7777) == from,
+          do: File.chmod(target, to),
+          else: {:error, :changed_since_plan}
+
+      {:ok, %File.Stat{type: type}} ->
+        {:error, {:not_a_directory, target, type}}
+
+      {:error, reason} ->
+        {:error, {reason, target}}
+    end
   end
 
   defp perform({:remove_empty_dir, rel}, {legacy, _home}) do

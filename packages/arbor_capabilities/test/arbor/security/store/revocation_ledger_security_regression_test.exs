@@ -11,6 +11,7 @@ defmodule Arbor.Security.Store.RevocationLedgerSecurityRegressionTest do
   @loss_store :revocation_ledger_loss_security_regression_store
   @upgrade_store :revocation_ledger_upgrade_security_regression_store
   @marker_store :revocation_ledger_marker_security_regression_store
+  @parent_mode_store :revocation_ledger_parent_mode_security_regression_store
   @shared_store_names [
     :revocation_shared_ledger_store_1,
     :revocation_shared_ledger_store_2,
@@ -144,6 +145,48 @@ defmodule Arbor.Security.Store.RevocationLedgerSecurityRegressionTest do
 
     assert {:error, :hydration_unavailable} =
              AuthorityStore.authoritative_get(capability_id, name: @marker_store)
+  end
+
+  # 2026-11-14: a home migration left the owner's ledger directory at 0755
+  # and boot failed as `:revocation_ledger_parent_unavailable`, which hid
+  # the fix (chmod 700). The refusal must stay; the reason must name it.
+  @tag spec: "SSEC-010"
+  test "security regression: a ledger directory looser than 0700 fails hydration closed " <>
+         "and names the mode",
+       ctx do
+    authority_root = authority_root(ctx.fixture_root, "parent-mode")
+    store_opts = authority_store_opts(@parent_mode_store, authority_root, ctx.ledger_path)
+    capability_id = "cap_parent_mode"
+    ledger_root = Path.dirname(ctx.ledger_path)
+
+    start_supervised!({AuthorityStore, store_opts})
+
+    assert {:ok, %Record{}} =
+             AuthorityStore.acknowledged_compare_and_create(
+               capability_id,
+               :absent,
+               Record.new(capability_id, %{"scope" => "parent-mode"}),
+               name: @parent_mode_store
+             )
+
+    stop_supervised!(@parent_mode_store)
+    File.chmod!(ledger_root, 0o755)
+    start_supervised!({AuthorityStore, store_opts})
+
+    assert {:ok, %{status: :failed, reason: :revocation_ledger_parent_insecure_mode}} =
+             AuthorityStore.hydration_status(name: @parent_mode_store)
+
+    assert {:error, :hydration_unavailable} =
+             AuthorityStore.authoritative_get(capability_id, name: @parent_mode_store)
+
+    stop_supervised!(@parent_mode_store)
+    File.chmod!(ledger_root, 0o700)
+    start_supervised!({AuthorityStore, store_opts})
+
+    assert {:ok, %{status: :ready}} = AuthorityStore.hydration_status(name: @parent_mode_store)
+
+    assert {:ok, %Record{data: %{"scope" => "parent-mode"}}} =
+             AuthorityStore.authoritative_get(capability_id, name: @parent_mode_store)
   end
 
   @tag spec: "SSEC-010"
