@@ -58,9 +58,16 @@ defmodule Arbor.LLM.ToolLoop do
     * `:tool_taint` - Optional exact `%Arbor.Contracts.Security.Taint{}` label
       for model-produced tool calls. When present, it is forwarded to every
       executor invocation as aggregate `:taint` plus a complete `:param_taint`
-      map covering every normalized argument key. It is process-local and is
-      never forwarded to an LLM client or provider adapter. A malformed present
-      value fails closed; absence preserves the legacy behavior.
+      map covering every normalized argument key. After any tool result from an
+      untrusted or external source (MCP `mcp.*` tools, `source: :mcp`/`:external`,
+      or a result envelope already labeled untrusted/hostile) enters context,
+      the aggregate is raised via `Arbor.LLM.ToolTaint`. Send-capable tools
+      (email, HTTP POST, messaging) are then refused unless the operator sets
+      `config :arbor_llm, :strict_taint_send_gate, false`. **This is a default
+      change (2026-10-29).** The label is process-local and is never forwarded
+      to an LLM client or provider adapter. A malformed present value fails
+      closed; absence starts unlabeled and is still raised by later external
+      results.
 
   ## Example
 
@@ -94,6 +101,8 @@ defmodule Arbor.LLM.ToolLoop do
   alias Arbor.LLM.ResponseBudget
 
   alias Arbor.LLM.ToolResultBudget
+
+  alias Arbor.LLM.ToolTaint
 
   alias Arbor.Signals.Taint, as: SignalTaint
 
@@ -1265,10 +1274,11 @@ defmodule Arbor.LLM.ToolLoop do
     require Logger
 
     initial_guards =
-      {Map.get(state, :tool_failures, %{}), Map.get(state, :indeterminate_calls, MapSet.new())}
+      {Map.get(state, :tool_failures, %{}), Map.get(state, :indeterminate_calls, MapSet.new()),
+       state.tool_taint}
 
-    {results, {tool_failures, indeterminate_calls}} =
-      Enum.map_reduce(tool_calls, initial_guards, fn tc, {failures, indeterminate} ->
+    {results, {tool_failures, indeterminate_calls, tool_taint}} =
+      Enum.map_reduce(tool_calls, initial_guards, fn tc, {failures, indeterminate, tool_taint} ->
         {args, args_error} =
           case normalize_args(tc.arguments) do
             {:ok, args} -> {args, nil}
@@ -1298,13 +1308,22 @@ defmodule Arbor.LLM.ToolLoop do
 
         exec_opts =
           exec_opts
-          |> put_tool_taint(state.tool_taint, args)
+          |> put_tool_taint(tool_taint, args)
           |> Keyword.put(:provider_call_id, tc.id)
+
+        send_refusal = ToolTaint.refuse_send(tc.name, tool_taint)
 
         {result, duration_ms} =
           cond do
             args_error ->
               {{:error, {:invalid_tool_arguments, args_error}}, 0}
+
+            match?({:error, %CallFailure{}}, send_refusal) ->
+              Logger.warning(
+                "[ToolLoop] tool=#{tc.name} SEND-GATED: untrusted/external context blocks send-capable tools"
+              )
+
+              {send_refusal, 0}
 
             # An identical earlier call may have taken effect with no answer. Never
             # re-run it automatically (backoff retry would duplicate the effect).
@@ -1406,7 +1425,10 @@ defmodule Arbor.LLM.ToolLoop do
 
         new_indeterminate = track_indeterminate(indeterminate, call_key, result)
 
-        {{{tc.id, tc.name, result}, duration_ms}, {new_failures, new_indeterminate}}
+        next_taint =
+          ToolTaint.raise_from_result(tool_taint, tc.name, result, state.all_tools || [])
+
+        {{{tc.id, tc.name, result}, duration_ms}, {new_failures, new_indeterminate, next_taint}}
       end)
 
     # map_reduce threads `failures`, not `state`, so per-tool time has to travel
@@ -1419,6 +1441,7 @@ defmodule Arbor.LLM.ToolLoop do
       state
       |> Map.put(:tool_failures, tool_failures)
       |> Map.put(:indeterminate_calls, indeterminate_calls)
+      |> Map.put(:tool_taint, tool_taint)
       |> Map.update(:discovery_count, discovery_this_round, &(&1 + discovery_this_round))
       |> Map.update(:tool_ms_total, round_tool_ms, &(&1 + round_tool_ms))
 

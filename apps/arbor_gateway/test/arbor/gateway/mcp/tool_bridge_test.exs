@@ -23,7 +23,10 @@ defmodule Arbor.Gateway.MCP.ToolBridgeTest do
       result = ToolBridge.to_arbor_tool("github", mcp_tool)
 
       assert result.name == "mcp.github.create_issue"
-      assert result.description == "Create a GitHub issue"
+      assert result.description =~ "Create a GitHub issue"
+      assert result.description =~ ~r/UNTRUSTED/i
+      assert result.description =~ "github"
+      refute String.contains?(result.description, "\n")
       assert result.source == :mcp
       assert result.server_name == "github"
       assert result.mcp_tool_name == "create_issue"
@@ -37,7 +40,9 @@ defmodule Arbor.Gateway.MCP.ToolBridgeTest do
       result = ToolBridge.to_arbor_tool("fs", mcp_tool)
 
       assert result.name == "mcp.fs.list_files"
-      assert result.description == "MCP tool: list_files"
+      assert result.description =~ "MCP tool: list_files"
+      assert result.description =~ ~r/UNTRUSTED/i
+      assert result.description =~ "fs"
     end
 
     test "handles tool with no input schema" do

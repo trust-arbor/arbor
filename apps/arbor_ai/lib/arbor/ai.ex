@@ -364,9 +364,17 @@ defmodule Arbor.AI do
   - `:temperature` - Sampling temperature (default: 0.7)
   - `:auto_execute` - Auto-execute tool calls (default: true)
   - `:max_turns` - Max tool-use turns (default: 10)
-  - `:tools` - List of Jido.Action modules (default: Arbor.Actions.all_actions())
+  - `:tools` - Tool definitions forwarded to ToolLoop (OpenAI-style maps or Jido modules)
+  - `:tool_executor` - Module implementing `execute/4` (default: ToolLoop's ArborActionsExecutor)
+  - `:taint` / `:tool_taint` - Exact `%Arbor.Contracts.Security.Taint{}` propagated to ToolLoop
+  - `:allow_untainted` - Opt out of the conservative untrusted label (also
+    `config :arbor_ai, :allow_untainted_tool_calls, true`)
   - `:agent_id` - Agent ID for memory/action context (required for memory tools)
   - `:context` - Additional context map merged into tool execution context
+
+  **DEFAULT CHANGE (2026-10-29):** unlabeled calls are no longer treated as
+  clean. Missing taint is labeled untrusted unless `:allow_untainted` or the
+  config opt-out is set.
   """
   @spec generate_text_with_tools(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def generate_text_with_tools(prompt, opts \\ []) do
@@ -457,7 +465,12 @@ defmodule Arbor.AI do
       timeout_ms: Keyword.fetch!(opts, :timeout_ms)
     ]
 
-    tool_loop_opts = Keyword.merge(tool_loop_opts, Arbor.LLM.sensitivity_options(opts))
+    tool_loop_opts =
+      tool_loop_opts
+      |> maybe_put_tool_loop_opt(:tools, Keyword.get(opts, :tools))
+      |> maybe_put_tool_loop_opt(:tool_executor, Keyword.get(opts, :tool_executor))
+      |> Keyword.merge(Arbor.LLM.sensitivity_options(opts))
+      |> put_generate_tool_taint(opts)
 
     # Run ToolLoop — single path through UnifiedLLM
     case Arbor.LLM.ToolLoop.run(client, request, tool_loop_opts) do
@@ -487,6 +500,38 @@ defmodule Arbor.AI do
         ToolSignals.record_usage_failure(provider, opts, reason, duration_ms)
         LLMTrace.finish(trace, {:error, reason})
         {:error, reason}
+    end
+  end
+
+  defp maybe_put_tool_loop_opt(opts, _key, nil), do: opts
+  defp maybe_put_tool_loop_opt(opts, key, value), do: Keyword.put(opts, key, value)
+
+  # DEFAULT CHANGE (2026-10-29): unlabeled generate_text_with_tools runs are
+  # no longer treated as clean. Opt out with :allow_untainted or
+  # config :arbor_ai, :allow_untainted_tool_calls, true.
+  defp put_generate_tool_taint(tool_loop_opts, opts) do
+    allow_untainted? =
+      Keyword.get(
+        opts,
+        :allow_untainted,
+        Application.get_env(:arbor_ai, :allow_untainted_tool_calls, false)
+      ) == true
+
+    explicit = Keyword.get(opts, :tool_taint) || Keyword.get(opts, :taint)
+
+    cond do
+      match?(%Arbor.Contracts.Security.Taint{}, explicit) ->
+        Keyword.put(tool_loop_opts, :tool_taint, explicit)
+
+      allow_untainted? ->
+        tool_loop_opts
+
+      true ->
+        Keyword.put(
+          tool_loop_opts,
+          :tool_taint,
+          Arbor.LLM.ToolTaint.conservative_untrusted("generate_text_with_tools")
+        )
     end
   end
 

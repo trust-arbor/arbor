@@ -28,17 +28,34 @@ defmodule Arbor.Gateway.MCP.ToolBridge do
   The returned map follows the same shape as Arbor action tool definitions,
   making MCP tools interchangeable with native actions from the agent's perspective.
   """
+  @description_max_bytes 640
+
   @spec to_arbor_tool(String.t(), map()) :: map()
   def to_arbor_tool(server_name, %{"name" => name} = tool) do
+    raw_description = Map.get(tool, "description", "MCP tool: #{name}")
+
     %{
       name: "mcp.#{server_name}.#{name}",
-      description: Map.get(tool, "description", "MCP tool: #{name}"),
+      description: sanitize_description(server_name, raw_description),
       input_schema: normalize_schema(Map.get(tool, "inputSchema", %{})),
       source: :mcp,
       server_name: server_name,
       mcp_tool_name: name,
       capability_uri: capability_uri(server_name, name)
     }
+  end
+
+  @doc """
+  Label for MCP tool results that re-enter an agent or operator prompt.
+
+  The gateway must keep this label — stripping it is a security regression.
+  """
+  @spec untrusted_result_label(String.t(), String.t()) :: String.t()
+  def untrusted_result_label(server_name, tool_name)
+      when is_binary(server_name) and is_binary(tool_name) do
+    safe_server = flatten_label_token(server_name, 64)
+    safe_tool = flatten_label_token(tool_name, 64)
+    "[UNTRUSTED MCP result from server \"#{safe_server}\" tool \"#{safe_tool}\"]"
   end
 
   @doc """
@@ -144,6 +161,49 @@ defmodule Arbor.Gateway.MCP.ToolBridge do
   def parse_tool_name(_), do: :error
 
   # -- Private --
+
+  defp sanitize_description(server_name, description) do
+    prefix = untrusted_description_prefix(server_name)
+    budget = max(@description_max_bytes - byte_size(prefix), 32)
+    prefix <> flatten_label_token(description, budget)
+  end
+
+  defp untrusted_description_prefix(server_name) do
+    safe_server = flatten_label_token(server_name, 64)
+    "[UNTRUSTED MCP description from server \"#{safe_server}\"] "
+  end
+
+  defp flatten_label_token(value, max_bytes) when is_binary(value) do
+    taint = %Arbor.Contracts.Security.Taint{
+      level: :untrusted,
+      sensitivity: :internal,
+      sanitizations: 0,
+      confidence: :plausible,
+      source: "mcp_description",
+      chain: []
+    }
+
+    {:ok, sanitized, _taint} =
+      Arbor.Common.Sanitizers.LogInjection.sanitize(value, taint,
+        max_length: max_bytes,
+        redact: false
+      )
+
+    sanitized
+    |> String.replace(~r/\s+/, " ")
+    |> String.trim()
+    |> truncate_bytes(max_bytes)
+  end
+
+  defp flatten_label_token(value, max_bytes) do
+    flatten_label_token(to_string(value), max_bytes)
+  end
+
+  defp truncate_bytes(value, max_bytes) when byte_size(value) <= max_bytes, do: value
+
+  defp truncate_bytes(value, max_bytes) do
+    String.slice(value, 0, max_bytes)
+  end
 
   defp normalize_schema(%{"type" => _} = schema), do: schema
 
