@@ -61,7 +61,9 @@ mise install
 No API key is needed: `arbor.doctor --configure` falls back to the keyless
 OpenCode Zen free tier after you acknowledge its data disclosure. If you have an
 OpenRouter key, a local Ollama/LM Studio, or an ACP CLI such as Claude Code,
-it prefers those instead.
+it prefers those instead. Priced LLM calls are refused until you set
+`ARBOR_LLM_USAGE_BUDGET_USD` (default `$0`); see
+[docs/QUICKSTART.md](docs/QUICKSTART.md).
 
 Use `./bin/mix` so Mix runs under the pinned toolchain. `ARBOR_DB=postgres` is
 opt-in, not the getting-started path.
