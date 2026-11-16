@@ -361,6 +361,22 @@ defmodule Arbor.Orchestrator.HeartbeatServiceTest do
           end
         )
 
+      # The startup timer can already be queued. Swallow it so the two explicit
+      # beats below are consecutive ordinals.
+      :sys.suspend(pid)
+
+      :sys.replace_state(pid, fn state ->
+        if is_reference(state.heartbeat_ref), do: Process.cancel_timer(state.heartbeat_ref)
+        %{state | heartbeat_ref: nil, heartbeat_disabled: true}
+      end)
+
+      :sys.resume(pid)
+      Process.sleep(50)
+
+      :sys.replace_state(pid, fn state ->
+        %{state | heartbeat_disabled: false, heartbeat_beat_count: 0}
+      end)
+
       send(pid, :heartbeat)
 
       assert_receive {:hb_values, values}, 2_000

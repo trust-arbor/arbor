@@ -245,11 +245,13 @@ defmodule Arbor.Orchestrator.HeartbeatService do
   @impl true
   def handle_info(:heartbeat, %{heartbeat_disabled: true} = state) do
     # Heartbeat was disabled after a terminal/repeated failure — do not run or reschedule.
-    {:noreply, state}
+    {:noreply, cancel_pending_heartbeat(state)}
   end
 
   def handle_info(:heartbeat, state) do
-    state = %{state | heartbeat_ref: nil}
+    # A manual beat must cancel the startup timer. Leaving that ref armed
+    # delivers a second :heartbeat and advances beat_count again.
+    state = cancel_pending_heartbeat(state)
 
     if state.identity_checker.(state.agent_id) do
       state =
@@ -501,6 +503,11 @@ defmodule Arbor.Orchestrator.HeartbeatService do
   # ===========================================================================
   # Timer management
   # ===========================================================================
+
+  defp cancel_pending_heartbeat(state) do
+    if is_reference(state.heartbeat_ref), do: Process.cancel_timer(state.heartbeat_ref)
+    %{state | heartbeat_ref: nil}
+  end
 
   defp schedule_heartbeat(state), do: schedule_heartbeat(state, state.heartbeat_interval)
 
