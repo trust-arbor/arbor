@@ -9,6 +9,9 @@ defmodule Arbor.Agent.Test.TrustTopology do
   ]
 
   def ensure_owned! do
+    # Store init subscribes before it returns. The bus has to be the supervised
+    # signals child first, or the subscription is :unauthorized and Store stops.
+    :ok = Arbor.Signals.restore_runtime_fixture()
     :ok = Arbor.Trust.restore_runtime_fixture()
 
     supervisor =

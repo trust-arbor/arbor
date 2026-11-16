@@ -103,6 +103,12 @@ if Process.whereis(Arbor.Shell.ExecutablePolicy) == nil and
   )
 end
 
+# Trust.Store's init subscribes on the supervised signals bus. Test config
+# leaves that bus empty, so the subscription returns :unauthorized and Store
+# fails closed. A full run only passes when some earlier test has started the
+# bus. Start the canonical fixture once, before any test.
+:ok = Arbor.Signals.restore_runtime_fixture()
+
 # Fixed production-name runtime-admission topology so public Lifecycle.start/2
 # callers (Manager, Bootstrap, Reconciler) resolve a ready TaskStore without
 # polling a missing store for the ordinary-start readiness deadline.

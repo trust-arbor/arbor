@@ -29,6 +29,10 @@ case System.get_env("ARBOR_TEST_MEMORY_AUTHORITY") do
 end
 
 :ok = Arbor.Security.TestBootstrap.start!()
+# Trust.Store init subscribes on the supervised signals bus. A single-file
+# orchestrator run does not load the kernel_runtime test helper that starts
+# that bus, so the subscription is :unauthorized and this match crashes.
+:ok = Arbor.Signals.restore_runtime_fixture()
 :ok = Arbor.Trust.restore_runtime_fixture()
 
 case Supervisor.start_child(Arbor.Trust.Supervisor, {Arbor.Trust.ConfirmationTracker, []}) do
