@@ -92,10 +92,19 @@ defmodule Arbor.Agent.IntentDispatcherPrincipalSecurityRegressionTest do
 
     context = verified_context(identity, resource)
 
-    assert {:ok, %Percept{outcome: :success} = success} =
-             IntentDispatcher.dispatch(agent_id, intent, context: context)
+    if match?({:unix, :darwin}, :os.type()) do
+      assert {:ok, %Percept{outcome: :success} = success} =
+               IntentDispatcher.dispatch(agent_id, intent, context: context)
 
-    assert success.data.result.stdout =~ "intent-dispatch-authorized"
+      assert success.data.result.stdout =~ "intent-dispatch-authorized"
+    else
+      # Agent containment admits a successful shell only on Darwin. Every other
+      # platform fails closed; the denial above and below still run.
+      assert {:ok, %Percept{outcome: :failure, error: error}} =
+               IntentDispatcher.dispatch(agent_id, intent, context: context)
+
+      assert inspect(error) =~ "platform_not_qualified"
+    end
 
     assert {:ok, %Percept{outcome: :failure, error: :authenticated_principal_required}} =
              IntentDispatcher.dispatch(agent_id, intent)
@@ -151,11 +160,15 @@ defmodule Arbor.Agent.IntentDispatcherPrincipalSecurityRegressionTest do
       )
 
     context = verified_context(identity, outer_resource)
+    result = IntentDispatcher.dispatch(identity.agent_id, intent, context: context)
 
-    assert {:ok, %Percept{outcome: :success} = percept} =
-             IntentDispatcher.dispatch(identity.agent_id, intent, context: context)
-
-    assert percept.data.result.stdout =~ "nested-coding-validation-authorized"
+    if match?({:unix, :darwin}, :os.type()) do
+      assert {:ok, %Percept{outcome: :success} = percept} = result
+      assert percept.data.result.stdout =~ "nested-coding-validation-authorized"
+    else
+      assert {:ok, %Percept{outcome: :failure, error: error}} = result
+      assert inspect(error) =~ "platform_not_qualified"
+    end
   end
 
   test "security regression: full ActionCycleServer maps shell execute and performs authorized side effect",
@@ -169,8 +182,17 @@ defmodule Arbor.Agent.IntentDispatcherPrincipalSecurityRegressionTest do
     assert :ok =
              ActionCycleServer.enqueue_percept(server, %{type: :test, content: "run shell intent"})
 
-    assert eventually(fn -> File.exists?(marker) end),
-           "the public ActionCycleServer cycle never executed its canonical shell/execute intent; stats=#{inspect(cycle_stats(server))}"
+    if match?({:unix, :darwin}, :os.type()) do
+      assert eventually(fn -> File.exists?(marker) end),
+             "the public ActionCycleServer cycle never executed its canonical shell/execute intent; stats=#{inspect(cycle_stats(server))}"
+    else
+      assert eventually(fn ->
+               stats = ActionCycleServer.stats(server)
+               stats.cycle_count >= 1 and not stats.cycle_in_flight
+             end)
+
+      refute File.exists?(marker)
+    end
 
     assert eventually(fn -> ActionCycleServer.stats(server).cycle_count >= 1 end)
 

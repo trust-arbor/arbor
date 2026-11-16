@@ -407,8 +407,15 @@ defmodule Arbor.Orchestrator.Handlers.CoreHandlersTest do
 
       outcome = ExecHandler.execute(node, make_context(), graph, opts)
 
-      assert outcome.status == :success,
-             "shell delegation failed: #{inspect(outcome.failure_reason)}"
+      if match?({:unix, :darwin}, :os.type()) do
+        assert outcome.status == :success,
+               "shell delegation failed: #{inspect(outcome.failure_reason)}"
+      else
+        # Delegation reached agent containment, which admits shell success only
+        # on Darwin and fails closed everywhere else.
+        assert outcome.status == :fail
+        assert inspect(outcome.failure_reason) =~ "platform_not_qualified"
+      end
     end
 
     test "function target with handler" do
