@@ -222,6 +222,9 @@ defmodule Arbor.Dashboard.Live.ConversationLiveTest do
     end
   end
 
+  defmodule Multimedia do
+  end
+
   defmodule Voice do
     def desk_recording_options, do: {:ok, %{default_ms: 12_000, min_ms: 100, max_ms: 30_000}}
 
@@ -236,7 +239,12 @@ defmodule Arbor.Dashboard.Live.ConversationLiveTest do
   end
 
   setup do
-    settings = [conversation_api: Host, voice_api: Voice, local_voice_controls: true]
+    settings = [
+      conversation_api: Host,
+      voice_api: Voice,
+      multimedia_api: Multimedia,
+      local_voice_controls: true
+    ]
 
     previous =
       Map.new(
