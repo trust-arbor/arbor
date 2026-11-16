@@ -240,7 +240,7 @@ defmodule Arbor.Agent.RuntimeAdmission.LivenessSettlementSecurityRegressionTest 
     assert intent.retire_barrier == :await_owner_down
     assert intent.terminal == {:error, :r7_terminal}
     assert is_map(store_intent(store, agent_id))
-    refute_receive {:admit, _}, 200
+    refute_final_admit()
     assert Process.alive?(owner_pid)
 
     # Only R7 completes via explicit authentic owner kill.
@@ -273,7 +273,7 @@ defmodule Arbor.Agent.RuntimeAdmission.LivenessSettlementSecurityRegressionTest 
     assert intent.phase == :settling
     assert intent.retire_barrier == :await_owner_down
     assert intent.terminal == {:error, :r8_terminal}
-    refute_receive {:admit, _}, 100
+    refute_final_admit()
 
     store_pid = Process.whereis(store)
     assert is_pid(store_pid)
@@ -864,6 +864,31 @@ defmodule Arbor.Agent.RuntimeAdmission.LivenessSettlementSecurityRegressionTest 
   defp release_worker_hold(worker_pid) when is_pid(worker_pid) do
     send(worker_pid, @release_hold)
     :ok
+  end
+
+  # An in-flight admit can answer {:error, :settling} after the barrier. That
+  # refusal is not finalization. A terminal or successful admit is.
+  defp refute_final_admit(timeout_ms \\ 200) do
+    drain_settling_admits(System.monotonic_time(:millisecond) + timeout_ms)
+  end
+
+  defp drain_settling_admits(deadline) do
+    remaining = deadline - System.monotonic_time(:millisecond)
+
+    if remaining <= 0 do
+      :ok
+    else
+      receive do
+        {:admit, {:error, :settling}} ->
+          drain_settling_admits(deadline)
+
+        {:admit, other} ->
+          flunk("runtime admission finalized while the owner was still up: #{inspect(other)}")
+      after
+        remaining ->
+          :ok
+      end
+    end
   end
 
   defp mailbox_messages(pid) when is_pid(pid) do
