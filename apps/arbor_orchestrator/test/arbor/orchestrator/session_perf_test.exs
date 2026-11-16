@@ -254,6 +254,16 @@ defmodule Arbor.Orchestrator.SessionPerfTest do
           start_session(ctx, "lat-#{i}", simulated_latency: simulated_llm_ms)
         end
 
+      # One session, measured, is the sequential cost. The old estimate counted
+      # only the simulated sleep and treated orchestration as free, so a busy
+      # or small VM reported a speedup below 1 even when the sessions overlapped.
+      {one_us, _} =
+        :timer.tc(fn ->
+          for i <- 1..turns do
+            {:ok, _} = Session.send_message(hd(pids), "Sequential #{i}")
+          end
+        end)
+
       {total_us, _} =
         :timer.tc(fn ->
           tasks =
@@ -270,7 +280,7 @@ defmodule Arbor.Orchestrator.SessionPerfTest do
 
       total_turns = n * turns
       throughput = total_turns / (total_us / 1_000_000)
-      sequential_time = n * turns * (simulated_llm_ms + simulated_llm_ms / 10)
+      sequential_time = n * (one_us / 1000)
       parallelism = sequential_time / (total_us / 1000)
 
       IO.puts("\n── Concurrent Sessions with Simulated LLM Latency ──")
