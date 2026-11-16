@@ -235,7 +235,16 @@ defmodule Arbor.Agent.SimpleAgentLLMBoundaryTest do
     SimpleAgent.run(
       "Test task",
       Keyword.merge(
-        [provider: :simple_agent_boundary, model: model, context_management: :none, tools: []],
+        [
+          provider: :simple_agent_boundary,
+          model: model,
+          context_management: :none,
+          tools: [],
+          # The default prompt embeds working_dir. A checkout under /Users or
+          # /home/<name> is classified :internal and the unguarded test adapter
+          # is then refused. Pin a path the classifier treats as public.
+          working_dir: "/tmp/arbor-simple-agent-boundary"
+        ],
         opts
       )
     )

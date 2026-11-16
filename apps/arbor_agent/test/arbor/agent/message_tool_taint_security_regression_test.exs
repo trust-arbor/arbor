@@ -164,6 +164,18 @@ defmodule Arbor.Agent.MessageToolTaintSecurityRegressionTest do
 
     :ok = Client.set_default_client(client)
 
+    # The scripted adapter stands in for LmStudio, which is already a guarded
+    # destination. Tool-loop taint defaults to :internal, so an unlisted module
+    # is refused before the model can answer. Production adapters stay listed
+    # as configured; this registration lasts for the test only.
+    previous_guarded = Application.get_env(:arbor_llm, :sensitivity_guarded_adapters, [])
+
+    Application.put_env(
+      :arbor_llm,
+      :sensitivity_guarded_adapters,
+      [__MODULE__.ScriptedAdapter | List.wrap(previous_guarded)]
+    )
+
     tmp_dir =
       Path.join(
         System.tmp_dir!(),
@@ -179,6 +191,13 @@ defmodule Arbor.Agent.MessageToolTaintSecurityRegressionTest do
       ScriptedAdapter.clear_test_parent()
       @action.clear_test_parent()
       Client.clear_default_client()
+
+      if previous_guarded == [] do
+        Application.delete_env(:arbor_llm, :sensitivity_guarded_adapters)
+      else
+        Application.put_env(:arbor_llm, :sensitivity_guarded_adapters, previous_guarded)
+      end
+
       :ok = ActionRegistry.restore(registry_snapshot)
 
       if registry_started_here? do
