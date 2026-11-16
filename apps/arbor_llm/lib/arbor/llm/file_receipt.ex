@@ -5,7 +5,10 @@ defmodule Arbor.LLM.FileReceipt do
 
   @hard_maximum 16_777_216
   @maximum_path_bytes 4_096
-  @read_timeout_ms 500
+  # Spawning the double-read helper and reading the bytes is well under this
+  # on an idle machine. A 500ms cap expired during a parallel `mix test` run
+  # (file_read_deadline_exceeded) even though the bytes had not changed.
+  @read_timeout_ms 5_000
   @write_timeout_ms 5_000
   @cleanup_grace_ms 250
   @stage_attempts 8
