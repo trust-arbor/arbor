@@ -29,6 +29,7 @@ case System.get_env("ARBOR_TEST_MEMORY_AUTHORITY") do
 end
 
 :ok = Arbor.Security.TestBootstrap.start!()
+:ok = Arbor.Signals.restore_runtime_fixture()
 :ok = Arbor.Trust.restore_runtime_fixture()
 
 case Supervisor.start_child(Arbor.Trust.Supervisor, {Arbor.Trust.ConfirmationTracker, []}) do
