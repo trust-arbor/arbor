@@ -2,30 +2,22 @@
 
 ## `source_coupling_baseline.v1.json`
 
-Reviewed K5 post-materialization source-coupling baseline, generated from the
-Git-tracked umbrella worktree and committed separately as `59a5c8f9f`. The
-authoritative source identity is the baseline's own `provenance.tree_oid`
-(`2d867fe0ac0f295f31e6d483196ba5119155c11e`), the Git **tree** object id of
-the scanned source (distinct from, and not equal to, the commit SHA). Every
-undeclared cross-app occurrence present at that scan is captured in `entries`,
-and every unresolved (dynamic-module) reference is captured in
-`unresolved_entries` with a reviewed disposition and rationale. Baseline drift
-- a new undeclared occurrence, a changed count, or a new unexplained unresolved
-reference - is a normal quality-gate failure, not an exception to work around.
+Reviewed source-coupling baseline, generated from the Git-tracked umbrella
+worktree. The authoritative source identity is the baseline's own
+`provenance.tree_oid`, the Git **tree** object id of the scanned source (not
+the commit SHA). Every undeclared cross-app occurrence present at that scan is
+captured in `entries`, and every unresolved (dynamic-module) reference is
+captured in `unresolved_entries` with a reviewed disposition and rationale.
+Baseline drift - a new undeclared occurrence, a changed count, or a new
+unexplained unresolved reference - is a normal quality-gate failure, not an
+exception to work around.
 
-The K4 package split changes how the direct-application census should be read.
-Consumers of active Common, Signals, or Monitor surfaces declare exactly one K
-edge to `:arbor_kernel_runtime`; they receive passive `:arbor_kernel`
-transitively and deliberately do not declare both applications. The scanner
-continues to grade direct application declarations, so 4,040 of the refreshed
-baseline's 4,228 undeclared occurrences are downward references to passive
-kernel modules through that package relationship. This is not new upward debt.
-The physical merge removes all six formerly undeclared K-to-K occurrences,
-while production upward findings fall from 57 occurrences in 46 aggregates to
-35 occurrences in 24 aggregates. A semantic comparison by source module,
-target, kind, and class found zero new upward findings. Eight dynamic references
-have explicit dispositions: three bounded registries/generators and five
-analyzer or submitted-code false positives.
+Refreshed on 2026-11-21 after the contracts split. Domain contracts now sit
+with their owning library and every app that uses kernel modules declares
+`arbor_kernel` directly, so undeclared occurrences fell from 5,165 to 132.
+The earlier convention of receiving the passive kernel transitively through
+`arbor_kernel_runtime` is retired; it accounted for about 4,000 of the old
+baseline's entries.
 
 The root `quality` alias runs check mode, so `./bin/mix quality` fails on
 drift:

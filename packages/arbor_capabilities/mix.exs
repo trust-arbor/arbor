@@ -34,7 +34,6 @@ defmodule Arbor.Capabilities.MixProject do
   defp deps do
     [
       {:arbor_kernel, "~> 2.0.0-dev", path: "../arbor_kernel"},
-      {:arbor_persistence, "~> 0.1.0-dev", path: "../arbor_persistence"},
       {:arbor_custody, "~> 0.1.0-dev", path: "../arbor_custody"},
       {:arbor_support, "~> 0.1.0-dev", path: "../arbor_support"},
       {:arbor_oauth, "~> 0.1.0-dev", path: "../arbor_oauth"},

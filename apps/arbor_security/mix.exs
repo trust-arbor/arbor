@@ -29,7 +29,6 @@ defmodule ArborSecurity.MixProject do
 
   defp deps do
     [
-      {:arbor_persistence, path: "../../packages/arbor_persistence", env: Mix.env()},
       # KernelRuntime must establish the product boot binding before Core starts.
       {:arbor_kernel_runtime, in_umbrella: true},
       {:arbor_capabilities, "~> 0.1.0-dev",

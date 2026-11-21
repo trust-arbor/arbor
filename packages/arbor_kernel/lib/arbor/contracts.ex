@@ -11,6 +11,8 @@ defmodule Arbor.Contracts do
   - `Arbor.Contracts.Security.Taint`, `TaintEnvelope`, `TaintedValue` and
     `Classification`
   - `Arbor.Contracts.Coding.CanonicalJson` and `SourceInventory`
+  - `Arbor.Contracts.Persistence.*`, the store port implemented by
+    Capabilities, Trust, Memory and the Persistence host
   - `Arbor.Contracts.Extension.Envelope`, verified at boot by Kernel Runtime
     and at activation by Capabilities
   """
@@ -32,6 +34,16 @@ defmodule Arbor.Contracts do
       Arbor.Contracts.Coding.CanonicalJson,
       Arbor.Contracts.Coding.SourceInventory,
       Arbor.Contracts.Extension.Envelope,
+      Arbor.Contracts.Persistence.AppendOperation,
+      Arbor.Contracts.Persistence.Filter,
+      Arbor.Contracts.Persistence.Record,
+      Arbor.Contracts.Persistence.Revision,
+      Arbor.Contracts.Persistence.Store,
+      Arbor.Contracts.Persistence.VectorMatch,
+      Arbor.Contracts.Persistence.VectorOperation,
+      Arbor.Contracts.Persistence.VectorReceipt,
+      Arbor.Contracts.Persistence.VectorRecord,
+      Arbor.Contracts.Persistence.VectorValidation,
       Arbor.Contracts.Security.Classification,
       Arbor.Contracts.Security.Taint,
       Arbor.Contracts.Security.TaintEnvelope,

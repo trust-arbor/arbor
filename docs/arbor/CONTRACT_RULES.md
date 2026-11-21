@@ -4,35 +4,34 @@ Rules for writing, updating, and consuming contracts in the Arbor ecosystem. Inc
 
 ---
 
-## 1. What Goes in Contracts
+## 1. Where a Contract Lives
 
-The `Arbor.Contracts` namespace in `packages/arbor_kernel` admits only three categories:
+A contract lives with the library that owns its domain. A behaviour lives with
+the library that defines the port; a struct lives with the library that
+produces it. When a lower library uses a contract, the lowest library that uses
+it owns it, or the consumer depends on the port's owner when it implements that
+port. The full ownership table is in
+`.arbor/decisions/2026-11-21-contracts-owned-by-their-library.md`.
 
-**Shared data types** — Structs referenced by two or more libraries
-other than `arbor_kernel`. Exactly one consuming library means the type
-belongs to that consumer, not here. The executable consumer census defined by
-[`AC-1.0`](../specs/arbor-contracts/AC-1.0.md) decides the question; run
-`./bin/mix arbor.contracts.census` rather than inferring consumers from
-dependency declarations.
-The census counts actual application owners in both `apps/` and `packages/`.
-```
-Security.Capability, Trust.Profile, Trust.Event
-Consensus.Protocol, Consensus.Proposal, Consensus.Evaluation,
-Consensus.CouncilDecision, Consensus.ConsensusEvent
+Moved contracts keep their `Arbor.Contracts.*` module names for now, under
+`lib/arbor/contracts/` in the owning app or package. Renames are a later,
+per-library decision, because some structs are persisted with
+`term_to_binary`.
+
+`packages/arbor_kernel` keeps only primitives that two or more unrelated
+libraries share: `Arbor.Types`, `Arbor.Identifiers`, the taint labels and
+classification, `CanonicalJson`, `SourceInventory`, the persistence store port
+and the extension envelope.
+The consumer census enforces this:
+
+```bash
+./bin/mix arbor.contracts.census --fail-on-violation
 ```
 
-**Facade behaviours** — Interfaces that define how the Arbor ecosystem consumes libraries. Located in `contracts/api/`.
-```
-API.Shell, API.Signals, API.Security, API.Trust,
-API.Consensus, API.Historian, API.Persistence
-```
-
-**Explicitly grandfathered modules** — Temporary exceptions exposed by
-`Arbor.Contracts.Census.default_grandfathered/0` and independently asserted by
-the admission test, with a justification and linked roadmap item. The shared
-runtime inventory ensures the Mix task and test enforce the same policy.
-Grandfathering is tracked debt, not an alternative admission path for new
-modules.
+It counts actual consumer libraries in `apps/` and `packages/`. A contract in
+the kernel with fewer than two consumer libraries fails the census. The
+grandfather list (`Arbor.Contracts.Census.default_grandfathered/0`) is empty;
+adding to it is tracked debt, not an admission path.
 
 ## 2. What Stays in Libraries
 
@@ -48,7 +47,7 @@ Library-owned contract modules use the AC-4 destination convention:
 `<AppRootNamespace>.Contracts.<Leaf>`, with a matching path under that app's
 `lib/` directory.
 
-**Rule of thumb**: If a developer can use the library without understanding the broader Arbor ecosystem, the behaviour belongs in the library. A contract moves to `Arbor.Contracts` in `arbor_kernel` only when two or more other libraries consume it, or when it is a facade behaviour under `contracts/api/`.
+**Rule of thumb**: If a developer can use the library without understanding the broader Arbor ecosystem, the behaviour belongs in the library. A contract belongs in `arbor_kernel` only when two or more libraries that cannot depend on each other consume it.
 
 ## 3. Contract Callback Naming
 
@@ -158,7 +157,7 @@ These triggers mean you should evaluate whether a contract needs to change:
 
 | Change | Risk | Process |
 |--------|------|---------|
-| Add newly admitted shared struct | None | Verify AC-1 with the census, then add it |
+| Add a shared struct to the kernel | None | Confirm two unrelated consumers with the census, then add it |
 | Add optional field (with `default:`) | None | Just do it |
 | Add required field | HIGH | Audit all `new/1` callers first |
 | Remove/rename field | HIGH | Compiler catches. Coordinated update across libraries. |
@@ -228,35 +227,24 @@ contracts-only consumers depend on: arbor_kernel
 active Common / Signals / Monitor consumers depend on: arbor_kernel_runtime
 ```
 
-Each consumer declares exactly one direct K edge; runtime consumers receive the
-passive kernel transitively and must not declare both applications. Contract
-modules must never depend on another Arbor application. If a contract needs to
-import from a higher-level library, the dependency direction is wrong.
+A library declares every library it references directly, including
+`arbor_kernel` when it uses kernel modules; it does not rely on receiving the
+kernel through `arbor_kernel_runtime`. Contract modules depend only on lower
+libraries. If a contract needs to import from a higher-level library, the
+dependency direction is wrong.
 
 ## 11. Organization
 
 ```
-packages/arbor_kernel/lib/arbor/contracts/
-  agent/
-  ai/
-  api/            # Facade behaviours; the only AC-1 multi-consumer exemption
-  coding/
-  commands/
-  comms/
-  consensus/
-  eval/
-  handler/
-  healing/
-  judge/
-  libraries/
-  llm/
-  memory/
-  persistence/
-  pipeline/
-  security/
-  session/
-  signal/
-  trust/
+packages/arbor_kernel/lib/arbor/contracts/     # shared primitives only
+  coding/      canonical_json.ex, source_inventory.ex
+  extension/   envelope.ex
+  persistence/ the store port: record.ex, store.ex, revision.ex, filter.ex, vector_*.ex
+  security/    taint.ex, taint_envelope.ex, tainted_value.ex, classification.ex
+
+<owner>/lib/arbor/contracts/<domain>/          # everything else, in its owning app or package
+<owner>/test/arbor/contracts/<domain>/         # its contract tests
 ```
 
-The `api/` directory contains facade behaviours that define how the Arbor ecosystem consumes libraries and is the only directory exempt from the two-consumer rule. Every module in the other directories must satisfy AC-1 or be explicitly grandfathered by the admission test.
+Facade behaviours (`contracts/api/*.ex`) live with the library whose facade
+they describe.

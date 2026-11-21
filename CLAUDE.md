@@ -99,9 +99,9 @@ runtime-false dependencies: 1 + the maximum dependency level. Libraries depend
 only on lower levels. Audited from each `mix.exs` on 2026-11-21.
 
 ```
-L0  arbor_kernel, arbor_custody, arbor_support, arbor_oauth, arbor_multimedia  (zero first-party deps)
-L1  arbor_signals, arbor_persistence, arbor_capabilities_oidc
-L2  arbor_capabilities, arbor_historian, arbor_persistence_sql, arbor_persistence_eventstore, arbor_cartographer, arbor_web
+L0  arbor_kernel, arbor_custody, arbor_support, arbor_oauth, arbor_multimedia, arbor_persistence  (zero first-party deps)
+L1  arbor_signals, arbor_historian, arbor_capabilities_oidc, arbor_persistence_sql, arbor_persistence_eventstore
+L2  arbor_capabilities, arbor_cartographer, arbor_web
 L3  arbor_capabilities_signals, arbor_kernel_runtime, arbor_trust
 L4  arbor_llm, arbor_security
 L5  arbor_persistence_host, arbor_shell, arbor_sandbox
@@ -117,12 +117,12 @@ L12 arbor_dashboard
 Notes (the levels are enforced by
 [dependency_hierarchy_test.exs](apps/arbor_commands/test/arbor/repo_guards/dependency_hierarchy_test.exs)):
 
-- **Kernel, Custody, Support, OAuth and Multimedia are L0.** Kernel holds only
-  shared primitives (types, identifiers, taint labels, canonical JSON). Other
-  `Arbor.Contracts.*` modules live with their owning library (2026-11-21). Kernel
+- **Kernel, Custody, Support, OAuth, Multimedia and Persistence are L0.** Kernel
+  holds only contracts two or more libraries share; the census enforces it.
+  Other `Arbor.Contracts.*` modules live with their owner (2026-11-21). Kernel
   Runtime (L3) composes Common, Signals and Monitor after boot admission.
   OAuth is caller-started; Common owns its pool. Support owns path, atom and
-  redaction guards. Multimedia owns device I/O. Persistence core (L1) and
+  redaction guards. Multimedia owns device I/O. Persistence core and
   adapters live in `packages/`; L5 Host retains product APIs and migrations.
 - [Capabilities Core](packages/arbor_capabilities/mix.exs) owns the preserved
   `Arbor.Security` facade, modules and complete authority application. Its

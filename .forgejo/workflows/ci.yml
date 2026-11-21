@@ -19,14 +19,6 @@ jobs:
       # non-gating "LLM Tests" lane below. That's what lets the big inference box
       # stay off without reddening the merge gate.
       ARBOR_DB: postgres
-      # Public package sources for every Core owning-suite invocation below.
-      ARBOR_KERNEL_PATH: ${{ github.workspace }}/packages/arbor_kernel
-      ARBOR_CUSTODY_PATH: ${{ github.workspace }}/packages/arbor_custody
-      ARBOR_SUPPORT_PATH: ${{ github.workspace }}/packages/arbor_support
-      ARBOR_OAUTH_PATH: ${{ github.workspace }}/packages/arbor_oauth
-      ARBOR_CAPABILITIES_OIDC_PATH: ${{ github.workspace }}/packages/arbor_capabilities_oidc
-      ARBOR_CAPABILITIES_PATH: ${{ github.workspace }}/packages/arbor_capabilities
-      ARBOR_PERSISTENCE_PATH: ${{ github.workspace }}/packages/arbor_persistence
 
     steps:
       - name: Checkout
@@ -132,11 +124,6 @@ jobs:
             ARBOR_MIX_CONTAINED=1 \
               ARBOR_ERLANG_ROOT="$ERLANG_ROOT" \
               ARBOR_ELIXIR_ROOT="$ELIXIR_ROOT" \
-              ARBOR_KERNEL_PATH="$REPO_ROOT/packages/arbor_kernel" \
-              ARBOR_CUSTODY_PATH="$REPO_ROOT/packages/arbor_custody" \
-              ARBOR_SUPPORT_PATH="$REPO_ROOT/packages/arbor_support" \
-              ARBOR_OAUTH_PATH="$REPO_ROOT/packages/arbor_oauth" \
-              ARBOR_CAPABILITIES_OIDC_PATH="$REPO_ROOT/packages/arbor_capabilities_oidc" \
               TMPDIR="$BUILD_PATH/tmp" \
               MIX_ENV=test \
               MIX_BUILD_PATH="$BUILD_PATH" \
@@ -332,7 +319,7 @@ jobs:
           ../../bin/mix format --check-formatted
           ../../bin/mix compile --warnings-as-errors
 
-      - name: Full Kernel package and monorepo conformance tests
+      - name: Full Kernel package tests
         working-directory: packages/arbor_kernel
         run: |
           runtime_root="$(mktemp -d)"
@@ -354,12 +341,6 @@ jobs:
         package: [arbor_trust, arbor_historian]
     env:
       MIX_ENV: test
-      ARBOR_KERNEL_PATH: ${{ github.workspace }}/packages/arbor_kernel
-      ARBOR_CUSTODY_PATH: ${{ github.workspace }}/packages/arbor_custody
-      ARBOR_SUPPORT_PATH: ${{ github.workspace }}/packages/arbor_support
-      ARBOR_OAUTH_PATH: ${{ github.workspace }}/packages/arbor_oauth
-      ARBOR_CAPABILITIES_PATH: ${{ github.workspace }}/packages/arbor_capabilities
-      ARBOR_PERSISTENCE_PATH: ${{ github.workspace }}/packages/arbor_persistence
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -402,7 +383,7 @@ jobs:
           export ERL_EPMD_PORT ERL_EPMD_ADDRESS=127.0.0.1
           export CUSTODY_QA_COOKIE="paired_ci_$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
           export CUSTODY_QA_COOKIE_SHA256="$(python3 -c 'import hashlib, os; print(hashlib.sha256(os.environ["CUSTODY_QA_COOKIE"].encode()).hexdigest())')"
-          unset ERL_AFLAGS ERL_ZFLAGS ELIXIR_ERL_OPTIONS ARBOR_CAPABILITIES_OIDC_PATH
+          unset ERL_AFLAGS ERL_ZFLAGS ELIXIR_ERL_OPTIONS
           export ERL_FLAGS="+S4:4 -setcookie $CUSTODY_QA_COOKIE -kernel inet_dist_use_interface {127,0,0,1}"
           "$ERLANG_ROOT/bin/epmd" -port "$ERL_EPMD_PORT" -address 127.0.0.1 >"$BUILD_PATH/epmd.log" 2>&1 &
           EPMD_PID=$!
@@ -519,7 +500,6 @@ jobs:
     runs-on: native
     env:
       MIX_ENV: test
-      ARBOR_OAUTH_PATH: ../arbor_oauth
 
     steps:
       - name: Checkout
@@ -555,13 +535,6 @@ jobs:
     runs-on: native
     env:
       MIX_ENV: test
-      ARBOR_CAPABILITIES_PATH: ${{ github.workspace }}/packages/arbor_capabilities
-      ARBOR_SIGNALS_PATH: ${{ github.workspace }}/packages/arbor_signals
-      ARBOR_KERNEL_PATH: ${{ github.workspace }}/packages/arbor_kernel
-      ARBOR_CUSTODY_PATH: ${{ github.workspace }}/packages/arbor_custody
-      ARBOR_SUPPORT_PATH: ${{ github.workspace }}/packages/arbor_support
-      ARBOR_OAUTH_PATH: ${{ github.workspace }}/packages/arbor_oauth
-      ARBOR_CAPABILITIES_OIDC_PATH: ${{ github.workspace }}/packages/arbor_capabilities_oidc
 
     steps:
       - name: Checkout

@@ -46,10 +46,6 @@ defmodule Arbor.Security do
     use Boundary,
       top_level?: true,
       deps: [
-        Arbor.Contracts.Persistence.Record,
-        Arbor.Contracts.Persistence.Revision,
-        Arbor.Contracts.Persistence.Store,
-        Arbor.Contracts.Persistence.VectorRecord,
         Arbor.Contracts.API.Identity,
         Arbor.Contracts.API.Security,
         Arbor.Contracts.Security,
@@ -73,10 +69,6 @@ defmodule Arbor.Security do
     use Boundary,
       top_level?: true,
       deps: [
-        Arbor.Contracts.Persistence.Record,
-        Arbor.Contracts.Persistence.Revision,
-        Arbor.Contracts.Persistence.Store,
-        Arbor.Contracts.Persistence.VectorRecord,
         Arbor.Contracts.API.Identity,
         Arbor.Contracts.API.Security,
         Arbor.Contracts.Security,
