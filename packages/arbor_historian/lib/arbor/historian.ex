@@ -41,6 +41,7 @@ defmodule Arbor.Historian do
   use Boundary,
     top_level?: true,
     deps: [
+      Arbor.Contracts.API.Historian,
       Arbor.Common.SafeAtom,
       Arbor.Contracts,
       Arbor.Persistence.Core,

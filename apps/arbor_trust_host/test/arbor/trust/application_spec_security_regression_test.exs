@@ -9,7 +9,6 @@ defmodule Arbor.Trust.ApplicationSpecSecurityRegressionTest do
 
   @omitted [
     :arbor_persistence_host,
-    :arbor_persistence,
     :arbor_persistence_sql,
     :arbor_persistence_eventstore,
     :phoenix_pubsub,

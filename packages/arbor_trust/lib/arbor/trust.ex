@@ -39,6 +39,12 @@ defmodule Arbor.Trust do
   use Boundary,
     top_level?: true,
     deps: [
+      Arbor.Contracts.Persistence.Record,
+      Arbor.Contracts.Security,
+      Arbor.Contracts.API.Trust,
+      Arbor.Contracts.Security.CapabilityProfile,
+      Arbor.Contracts.Security.TrustRule,
+      Arbor.Contracts.Trust,
       {Mix, :compile},
       Arbor.Contracts,
       Arbor.Security,

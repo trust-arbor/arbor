@@ -43,6 +43,8 @@ defmodule Arbor.LLM.MixProject do
 
   defp deps do
     [
+      {:arbor_capabilities, "~> 0.1.0-dev",
+       path: "../../packages/arbor_capabilities", runtime: false, env: Mix.env()},
       {:arbor_oauth, "~> 0.1.0-dev", path: "../../packages/arbor_oauth", env: Mix.env()},
       {:arbor_signals, path: "../../packages/arbor_signals", runtime: false, env: Mix.env()},
       # Session 2 (behavioral core): arbor_contracts for the Pipeline.Response

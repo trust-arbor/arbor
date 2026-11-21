@@ -29,28 +29,6 @@ defmodule Arbor.Kernel.PassiveStartupIsolationTest do
     end
   end
 
-  test "the passive package is the sole loaded owner of shared signing-authority modules" do
-    assert :ok = ensure_loaded(:arbor_kernel)
-
-    modules = [
-      Arbor.Contracts.Security.SigningAuthority,
-      Arbor.Contracts.Security.SigningAuthorityBootstrap,
-      Arbor.Contracts.Security.SigningAuthority.Validator
-    ]
-
-    for module <- modules do
-      owners =
-        for {app, _description, _version} <- Application.loaded_applications(),
-            module in (Application.spec(app, :modules) || []),
-            do: app
-
-      assert owners == [:arbor_kernel],
-             "unexpected owners for #{inspect(module)}: #{inspect(owners)}"
-
-      assert Application.get_application(module) == :arbor_kernel
-    end
-  end
-
   defp ensure_loaded(app) do
     case Application.load(app) do
       :ok -> :ok

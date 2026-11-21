@@ -89,8 +89,14 @@ defmodule Arbor.Persistence.PackageAdoptionSecurityRegressionTest do
     refute Process.whereis(Arbor.Persistence.SQL.Repo)
     assert Application.get_application(Arbor.Persistence.Repo) == :arbor_persistence_host
 
+    # The core may depend on the passive Kernel primitives (taint envelope,
+    # identifiers) its contracts use. Kernel owns no process, so the core still
+    # acquires no host lifetime through it.
+    refute match?({_, _}, Application.spec(:arbor_kernel, :mod))
+
     for dependency <- Application.spec(:arbor_persistence, :applications) do
-      refute String.starts_with?(Atom.to_string(dependency), "arbor_")
+      refute dependency != :arbor_kernel and
+               String.starts_with?(Atom.to_string(dependency), "arbor_")
     end
 
     for adapter <- [:arbor_persistence_sql, :arbor_persistence_eventstore] do

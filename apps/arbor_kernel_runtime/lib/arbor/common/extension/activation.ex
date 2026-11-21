@@ -10,7 +10,6 @@ defmodule Arbor.Common.Extension.Activation do
   alias Arbor.Common.Extension.ActivationCore
   alias Arbor.Common.ExtensionEnvelopes
   alias Arbor.Contracts.Extension.Envelope
-  alias Arbor.Contracts.Security.Identity
 
   @bound_opt_keys [:now, :consumed_nonces, :revoked]
   @sha256_re ~r/\A[0-9a-f]{64}\z/
@@ -207,7 +206,7 @@ defmodule Arbor.Common.Extension.Activation do
     with {:ok, public_key} <- decode_platform_key(snapshot["platform_public_key"]),
          key_id = lowercase_sha256(public_key),
          true <- key_id == snapshot["platform_key_id"],
-         principal_id = Identity.derive_agent_id(public_key) do
+         principal_id = Arbor.Identifiers.derive_agent_id_from_public_key(public_key) do
       {:ok, public_key, principal_id, key_id}
     else
       false -> {:error, "authorization_invalid"}

@@ -33,55 +33,18 @@ defmodule Arbor.Capabilities.MixProject do
 
   defp deps do
     [
-      kernel_dependency(),
-      custody_dependency(),
-      support_dependency(),
-      oauth_dependency(),
-      oidc_dependency(),
+      {:arbor_kernel, "~> 2.0.0-dev", path: "../arbor_kernel"},
+      {:arbor_persistence, "~> 0.1.0-dev", path: "../arbor_persistence"},
+      {:arbor_custody, "~> 0.1.0-dev", path: "../arbor_custody"},
+      {:arbor_support, "~> 0.1.0-dev", path: "../arbor_support"},
+      {:arbor_oauth, "~> 0.1.0-dev", path: "../arbor_oauth"},
+      {:arbor_capabilities_oidc, "~> 0.1.0-dev",
+       path: "../arbor_capabilities_oidc", optional: true, runtime: false},
       {:jason, "~> 1.4"},
       {:telemetry, "~> 1.0"},
       {:plug_crypto, "~> 2.0"},
       {:typed_struct, "~> 0.3", runtime: false},
       {:boundary, "~> 0.10", runtime: false}
     ]
-  end
-
-  defp kernel_dependency do
-    case System.get_env("ARBOR_KERNEL_PATH") do
-      nil -> {:arbor_kernel, "~> 2.0.0-dev"}
-      path -> {:arbor_kernel, "~> 2.0.0-dev", path: path, override: true}
-    end
-  end
-
-  defp custody_dependency do
-    case System.get_env("ARBOR_CUSTODY_PATH") do
-      nil -> {:arbor_custody, "~> 0.1.0-dev"}
-      path -> {:arbor_custody, "~> 0.1.0-dev", path: path, override: true}
-    end
-  end
-
-  defp support_dependency do
-    case System.get_env("ARBOR_SUPPORT_PATH") do
-      nil -> {:arbor_support, "~> 0.1.0-dev"}
-      path -> {:arbor_support, "~> 0.1.0-dev", path: path, override: true}
-    end
-  end
-
-  defp oauth_dependency do
-    case System.get_env("ARBOR_OAUTH_PATH") do
-      nil -> {:arbor_oauth, "~> 0.1.0-dev"}
-      path -> {:arbor_oauth, "~> 0.1.0-dev", path: path, override: true}
-    end
-  end
-
-  defp oidc_dependency do
-    case System.get_env("ARBOR_CAPABILITIES_OIDC_PATH") do
-      nil ->
-        {:arbor_capabilities_oidc, "~> 0.1.0-dev", optional: true, runtime: false}
-
-      path ->
-        {:arbor_capabilities_oidc, "~> 0.1.0-dev",
-         path: path, override: true, optional: true, runtime: false}
-    end
   end
 end

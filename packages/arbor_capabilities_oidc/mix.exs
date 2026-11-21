@@ -26,18 +26,11 @@ defmodule Arbor.CapabilitiesOIDC.MixProject do
 
   defp deps do
     [
-      oauth_dependency(),
+      {:arbor_oauth, "~> 0.1.0-dev", path: "../arbor_oauth"},
       {:jason, "~> 1.4"},
       {:joken, "~> 2.7", runtime: false},
       {:plug_crypto, "~> 2.0", runtime: false},
       {:boundary, "~> 0.10", runtime: false}
     ]
-  end
-
-  defp oauth_dependency do
-    case System.get_env("ARBOR_OAUTH_PATH") do
-      nil -> {:arbor_oauth, "~> 0.1.0-dev"}
-      path -> {:arbor_oauth, "~> 0.1.0-dev", path: path, override: true}
-    end
   end
 end

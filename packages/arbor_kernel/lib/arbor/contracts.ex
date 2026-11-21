@@ -1,74 +1,18 @@
 defmodule Arbor.Contracts do
   @moduledoc """
-  Contracts and type definitions for Arbor library boundaries.
+  Boundary root for the shared primitives that stay in `arbor_kernel`.
 
-  This module serves as the entry point for all Arbor contracts. Contracts define
-  the stable interfaces between Arbor libraries and external consumers.
+  Domain contracts no longer live here. Each package or app owns the
+  behaviours and structs for its own domain, under the same
+  `Arbor.Contracts.*` module names they had before the split. What remains is
+  the small set every layer shares:
 
-  ## Philosophy: Graduated Contracts
-
-  Arbor uses "contracts as graduation, not specification":
-
-  1. **Experimental phase** - Build rapidly, no contracts enforced
-  2. **Graduation** - Human confirms "this works" → generate contract from implementation
-  3. **Stable phase** - Contract enforced, drift detection enabled
-
-  Only interfaces that have proven themselves through real usage become contracts.
-  This prevents over-engineering and keeps the contract surface minimal.
-
-  ## Foundation Modules
-
-  - `Arbor.Types` - Shared type definitions and guards
-  - `Arbor.Identifiers` - ID generation, URI parsing, and validation
-
-  ## Contract Categories
-
-  ### Core Types
-  - `Arbor.Contracts.Security.Capability` - Permission tokens
-  - `Arbor.Contracts.Security.Identity` - Cryptographic agent identity
-  - `Arbor.Contracts.Security.SignedRequest` - Signed request envelope
-  - `Arbor.Contracts.Extension.Envelope` - Closed activation/invocation JSON envelopes
-
-  ### Consensus
-  - `Arbor.Contracts.Consensus.Protocol` - Consensus protocol types and helpers
-  - `Arbor.Contracts.Consensus.Proposal` - Change proposals
-  - `Arbor.Contracts.Consensus.Evaluation` - Evaluator assessments
-  - `Arbor.Contracts.Consensus.CodeReviewRequest` - Code-review council inputs
-  - `Arbor.Contracts.Consensus.CouncilDecision` - Council decisions
-  - `Arbor.Contracts.Consensus.ConsensusEvent` - Consensus audit trail
-
-  ### Trust
-  - `Arbor.Contracts.Trust.Profile` - Agent trust state
-  - `Arbor.Contracts.Trust.Event` - Trust-affecting events
-
-  ### Library Interfaces
-  - `Arbor.Contracts.API.Shell` - Command execution interface
-  - `Arbor.Contracts.API.Signals` - Event emission interface
-  - `Arbor.Contracts.API.Security` - Security facade interface
-  - `Arbor.Contracts.API.Identity` - Identity management interface
-  - `Arbor.Contracts.API.Trust` - Trust facade interface
-  - `Arbor.Contracts.API.Consensus` - Consensus engine interface
-  - `Arbor.Contracts.API.Historian` - Activity stream and audit log interface
-  - `Arbor.Contracts.API.Persistence` - Pluggable storage interface
-
-  ## Usage
-
-  Contracts are used via implementation of behaviours:
-
-      defmodule MyTrustManager do
-        @behaviour Arbor.Contracts.API.Trust
-
-        @impl true
-        def create_trust_profile_for_principal(agent_id) do
-          # Your implementation
-        end
-      end
-
-  ## What Doesn't Belong Here
-
-  - Internal implementation details (cluster coordination, etc.)
-  - Experimental features still evolving
-  - Dev tooling and code generation
+  - `Arbor.Types` and `Arbor.Identifiers`
+  - `Arbor.Contracts.Security.Taint`, `TaintEnvelope`, `TaintedValue` and
+    `Classification`
+  - `Arbor.Contracts.Coding.CanonicalJson` and `SourceInventory`
+  - `Arbor.Contracts.Extension.Envelope`, verified at boot by Kernel Runtime
+    and at activation by Capabilities
   """
 
   use Boundary,
@@ -77,41 +21,21 @@ defmodule Arbor.Contracts do
     exports: :all
 
   @doc """
-  Returns the version of the contracts package.
-  """
-  @spec version() :: String.t()
-  def version, do: "2.0.0-dev"
+  Lists the contract modules that remain in `arbor_kernel`.
 
-  @doc """
-  Lists all available contract modules.
+  `Arbor.Contracts.Census` reads this list from source to mark registry
+  membership, so keep it a literal list.
   """
   @spec list_contracts() :: [module()]
   def list_contracts do
     [
-      # Core types
-      Arbor.Contracts.Security.Capability,
-      Arbor.Contracts.Security.Identity,
-      Arbor.Contracts.Security.SignedRequest,
+      Arbor.Contracts.Coding.CanonicalJson,
+      Arbor.Contracts.Coding.SourceInventory,
       Arbor.Contracts.Extension.Envelope,
-      # Consensus
-      Arbor.Contracts.Consensus.Protocol,
-      Arbor.Contracts.Consensus.Proposal,
-      Arbor.Contracts.Consensus.Evaluation,
-      Arbor.Contracts.Consensus.CodeReviewRequest,
-      Arbor.Contracts.Consensus.CouncilDecision,
-      Arbor.Contracts.Consensus.ConsensusEvent,
-      # Trust
-      Arbor.Contracts.Trust.Profile,
-      Arbor.Contracts.Trust.Event,
-      # Library interfaces
-      Arbor.Contracts.API.Shell,
-      Arbor.Contracts.API.Signals,
-      Arbor.Contracts.API.Security,
-      Arbor.Contracts.API.Identity,
-      Arbor.Contracts.API.Trust,
-      Arbor.Contracts.API.Consensus,
-      Arbor.Contracts.API.Historian,
-      Arbor.Contracts.API.Persistence
+      Arbor.Contracts.Security.Classification,
+      Arbor.Contracts.Security.Taint,
+      Arbor.Contracts.Security.TaintEnvelope,
+      Arbor.Contracts.Security.TaintedValue
     ]
   end
 end

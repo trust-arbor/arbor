@@ -45,27 +45,6 @@ defmodule Arbor.Kernel.BoundaryConfigurationTest do
     end
   end
 
-  test "the contract Mix tasks are explicitly classified as development tooling" do
-    definition = boundary_definition(Arbor.Kernel.DevTools)
-
-    assert definition.app == :arbor_kernel
-    assert definition.opts[:top_level?] == true
-    assert definition.opts[:check] == [in: false, out: false]
-    assert definition.opts[:exports] == []
-    refute Keyword.has_key?(definition.opts, :dirty_xrefs)
-
-    assert {:ok, modules} = :application.get_key(:arbor_kernel, :modules)
-
-    tasks = Enum.filter(modules, &mix_task?/1)
-    assert tasks == [Mix.Tasks.Arbor.Contracts.Census, Mix.Tasks.Arbor.Contracts.Test]
-
-    for task <- tasks do
-      task_definition = boundary_definition(task)
-      assert task_definition.mix_task?
-      assert task_definition.opts == [classify_to: Arbor.Kernel.DevTools]
-    end
-  end
-
   defp boundary_definition(module) do
     [definition] = Keyword.fetch!(module.__info__(:attributes), Boundary)
     definition
@@ -75,8 +54,6 @@ defmodule Arbor.Kernel.BoundaryConfigurationTest do
     check = Keyword.get(opts, :check, [])
     Keyword.get(check, :in, true) == false or Keyword.get(check, :out, true) == false
   end
-
-  defp mix_task?(module), do: String.starts_with?(Atom.to_string(module), "Elixir.Mix.Tasks.")
 
   defp umbrella_root do
     Path.expand("../../../../..", __DIR__)

@@ -32,7 +32,7 @@ defmodule Arbor.Signals.MixProject do
 
   defp deps do
     [
-      {:arbor_kernel, "~> 2.0.0-dev"},
+      {:arbor_kernel, "~> 2.0.0-dev", path: "../arbor_kernel"},
       {:jason, "~> 1.4"},
       {:typed_struct, "~> 0.3", runtime: false},
       {:telemetry, "~> 1.0"},

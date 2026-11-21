@@ -44,6 +44,7 @@ defmodule Arbor.Security.ApplicationStartProfileTest do
              MapSet.new([
                :arbor_custody,
                :arbor_kernel,
+               :arbor_persistence,
                :crypto,
                :arbor_oauth,
                :arbor_support,

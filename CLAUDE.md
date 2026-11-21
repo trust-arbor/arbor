@@ -96,32 +96,34 @@ The harness periodically suggests TaskCreate / TaskUpdate. **Ignore them unless 
 
 Levels follow the **longest declared dependency path**, including optional and
 runtime-false dependencies: 1 + the maximum dependency level. Libraries depend
-only on lower levels. Audited from each `mix.exs` on 2026-10-30.
+only on lower levels. Audited from each `mix.exs` on 2026-11-21.
 
 ```
-L0  arbor_kernel, arbor_custody, arbor_support, arbor_oauth, arbor_multimedia, arbor_persistence  (zero first-party deps)
-L1  arbor_signals, arbor_historian, arbor_capabilities_oidc, arbor_persistence_sql, arbor_persistence_eventstore
-L2  arbor_capabilities, arbor_kernel_runtime, arbor_cartographer, arbor_web
-L3  arbor_capabilities_signals, arbor_llm, arbor_trust
-L4  arbor_security
+L0  arbor_kernel, arbor_custody, arbor_support, arbor_oauth, arbor_multimedia  (zero first-party deps)
+L1  arbor_signals, arbor_persistence, arbor_capabilities_oidc
+L2  arbor_capabilities, arbor_historian, arbor_persistence_sql, arbor_persistence_eventstore, arbor_cartographer, arbor_web
+L3  arbor_capabilities_signals, arbor_kernel_runtime, arbor_trust
+L4  arbor_llm, arbor_security
 L5  arbor_persistence_host, arbor_shell, arbor_sandbox
-L6  arbor_historian_host, arbor_trust_host, arbor_ai, arbor_comms, arbor_consensus
-L7  arbor_memory, arbor_scheduler
-L8  arbor_actions
-L9  arbor_orchestrator, arbor_agent, arbor_gateway
-L10 arbor_commands, arbor_voice
-L11 arbor_dashboard
+L6  arbor_comms, arbor_historian_host, arbor_trust_host
+L7  arbor_ai, arbor_consensus, arbor_scheduler
+L8  arbor_memory
+L9  arbor_actions
+L10 arbor_orchestrator, arbor_agent, arbor_gateway
+L11 arbor_commands, arbor_voice
+L12 arbor_dashboard
 ```
 
 Notes (the levels are enforced by
-[dependency_hierarchy_test.exs](packages/arbor_kernel/test/arbor/contracts/dependency_hierarchy_test.exs)):
+[dependency_hierarchy_test.exs](apps/arbor_commands/test/arbor/repo_guards/dependency_hierarchy_test.exs)):
 
-- **Kernel, Custody, Support, OAuth, Multimedia, and Persistence are L0.** Kernel
-  owns passive contracts, types and identifiers. Signals consumes Kernel taint.
-  Kernel Runtime (L2) composes Common, Signals and Monitor after boot admission.
+- **Kernel, Custody, Support, OAuth and Multimedia are L0.** Kernel holds only
+  shared primitives (types, identifiers, taint labels, canonical JSON). Other
+  `Arbor.Contracts.*` modules live with their owning library (2026-11-21). Kernel
+  Runtime (L3) composes Common, Signals and Monitor after boot admission.
   OAuth is caller-started; Common owns its pool. Support owns path, atom and
-  redaction guards. Multimedia owns device I/O. Persistence core and adapters
-  live in `packages/`; L5 Host retains product APIs and migrations.
+  redaction guards. Multimedia owns device I/O. Persistence core (L1) and
+  adapters live in `packages/`; L5 Host retains product APIs and migrations.
 - [Capabilities Core](packages/arbor_capabilities/mix.exs) owns the preserved
   `Arbor.Security` facade, modules and complete authority application. Its
   optional OIDC dependency makes it L2. The L3
@@ -130,9 +132,9 @@ Notes (the levels are enforced by
   [passive Security host](apps/arbor_security/mix.exs) composes these packages
   with KernelRuntime boot integration and SkillImporter adapters; it owns no
   second authority tree.
-- `arbor_orchestrator` is L9: actions, security, AI, memory, trust, shell and
+- `arbor_orchestrator` is L10: actions, security, AI, memory, trust, shell and
   comms sit below it; commands, dashboard and voice sit above it.
-- `arbor_consensus` is L6. Its `mix.exs` does not declare `arbor_ai`; a comment
+- `arbor_consensus` is L7. Its `mix.exs` does not declare `arbor_ai`; a comment
   or runtime DI seam does not add a dependency.
 - `apps/arbor_integrations/` is private and gitignored. The guard parses only
   tracked application/package manifests, so this local app stays outside the
@@ -142,7 +144,7 @@ No cycles. Check each library's `mix.exs` for current dependencies.
 
 ## Key Patterns
 
-- **Contract-First**: Shared types and behaviours in `arbor_kernel`. Read [CONTRACT_RULES.md](docs/arbor/CONTRACT_RULES.md) before modifying contracts.
+- **Contract-First**: Each library owns its contracts; only shared primitives sit in `arbor_kernel`. Read [CONTRACT_RULES.md](docs/arbor/CONTRACT_RULES.md) before modifying contracts.
 - **Facade Pattern**: Each library exposes one public facade (e.g., `Arbor.Security`). Never alias internal modules from another library.
 - **CRC (Construct-Reduce-Convert)**: Pure functional cores in `cores/` directories. Business logic with zero side effects — see Core Concepts above and [`.claude/skills/functional-core.md`](.claude/skills/functional-core.md). The core's counterpart — the thin impure boundary that performs the core's decided effects — is [`.claude/skills/imperative-shell.md`](.claude/skills/imperative-shell.md). Reducer cores return **effects as data**; the shell interprets them. Time/randomness are impure (inject them); purity is mechanically enforced by a lint test over `*_core.ex`. Extract a core when a pure decision lacks a unit test — not to chase coverage.
 - **Socket-First Components**: Dashboard components in `components/` directories with namespaced events — see [`.claude/skills/socket-component.md`](.claude/skills/socket-component.md).

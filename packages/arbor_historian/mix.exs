@@ -27,34 +27,13 @@ defmodule Arbor.Historian.MixProject do
 
   defp deps do
     [
-      kernel_dependency(),
-      support_dependency(),
-      persistence_dependency(),
+      {:arbor_kernel, "~> 2.0.0-dev", path: "../arbor_kernel"},
+      {:arbor_support, "~> 0.1.0-dev", path: "../arbor_support"},
+      {:arbor_persistence, "~> 0.1.0-dev", path: "../arbor_persistence"},
       {:jason, "~> 1.4"},
       {:telemetry, "~> 1.0"},
       {:typed_struct, "~> 0.3", runtime: false},
       {:boundary, "~> 0.10", runtime: false}
     ]
-  end
-
-  defp kernel_dependency do
-    case System.get_env("ARBOR_KERNEL_PATH") do
-      nil -> {:arbor_kernel, "~> 2.0.0-dev"}
-      path -> {:arbor_kernel, "~> 2.0.0-dev", path: path, override: true}
-    end
-  end
-
-  defp support_dependency do
-    case System.get_env("ARBOR_SUPPORT_PATH") do
-      nil -> {:arbor_support, "~> 0.1.0-dev"}
-      path -> {:arbor_support, "~> 0.1.0-dev", path: path, override: true}
-    end
-  end
-
-  defp persistence_dependency do
-    case System.get_env("ARBOR_PERSISTENCE_PATH") do
-      nil -> {:arbor_persistence, "~> 0.1.0-dev"}
-      path -> {:arbor_persistence, "~> 0.1.0-dev", path: path, override: true}
-    end
   end
 end
