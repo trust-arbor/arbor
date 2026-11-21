@@ -43,6 +43,7 @@ defmodule Arbor.Commands.Test.SessionLifecycleHelpers do
     {:ok, _} = Application.ensure_all_started(:arbor_agent)
     {:ok, _} = Application.ensure_all_started(:arbor_orchestrator)
     :ok = Arbor.Security.TestBootstrap.start!()
+    :ok = Arbor.Signals.restore_runtime_fixture()
     :ok = Arbor.Historian.TestAuditRuntime.start_default_lane!()
     Arbor.Memory.TestBootstrap.start!()
     Arbor.Agent.Test.TrustTopology.ensure_owned!()
