@@ -30,8 +30,9 @@ The consumer census enforces this:
 
 It counts actual consumer libraries in `apps/` and `packages/`. A contract in
 the kernel with fewer than two consumer libraries fails the census. The
-grandfather list (`Arbor.Contracts.Census.default_grandfathered/0`) is empty;
-adding to it is tracked debt, not an admission path.
+grandfather list (`Arbor.Contracts.Census.default_grandfathered/0`) holds one
+internal helper of the shared vector contracts; adding to it is tracked debt,
+not an admission path.
 
 ## 2. What Stays in Libraries
 

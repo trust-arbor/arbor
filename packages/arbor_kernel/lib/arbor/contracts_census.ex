@@ -50,7 +50,10 @@ defmodule Arbor.Contracts.Census do
 
   # This inventory is runtime policy, not test-only fixture data: the Mix task
   # needs the same exceptions as the admission test when enforce mode is used.
-  @default_grandfathered %{}
+  @default_grandfathered %{
+    "lib/arbor/contracts/persistence/vector_validation.ex" =>
+      "internal helper of the shared vector contracts; no consumer of its own"
+  }
 
   @type tier :: :a | :a2 | :b | :c | :d | :shared
 
