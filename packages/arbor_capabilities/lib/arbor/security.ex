@@ -138,7 +138,6 @@ defmodule Arbor.Security do
         Store.JSONFile,
         SupervisedOwner,
         SystemAuthority,
-        TestAuditConsumer,
         UriRegistry
       ]
   end
