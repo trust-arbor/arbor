@@ -890,7 +890,7 @@ defmodule Arbor.Shell do
   @doc """
   Run one fixed Mix phase on a live trusted-build lease.
 
-  Mix cwd is the fixed child `source/apps/arbor_trust` under the reconstructed
+  Mix cwd is the fixed child `source/packages/arbor_trust` under the reconstructed
   source root. Accepts only `\"deps_get\"`, `\"compile\"`, or `\"release\"` in
   that order, once. Compile is admitted only after native staging and deps
   inventory. After a failed or cancelled phase only

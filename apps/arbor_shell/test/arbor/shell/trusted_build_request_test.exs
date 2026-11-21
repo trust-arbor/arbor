@@ -136,7 +136,7 @@ defmodule Arbor.Shell.TrustedBuildRequestTest do
   end
 
   test "plan admits only the three phases in order" do
-    assert Plan.project_root_segments() == ["apps", "arbor_trust"]
+    assert Plan.project_root_segments() == ["packages", "arbor_trust"]
     assert {:ok, :deps_get} = Plan.admit_phase("deps_get")
     assert {:ok, :compile} = Plan.admit_phase("compile")
     assert {:ok, :release} = Plan.admit_phase("release")
@@ -191,7 +191,8 @@ defmodule Arbor.Shell.TrustedBuildRequestTest do
       elixir_root: %{path: "/pinned/elixir"}
     }
 
-    env = Plan.closed_env(roots, binding)
+    source = %{:path => "/pinned/source", "ARBOR_KERNEL_PATH" => "/caller/kernel"}
+    env = Plan.closed_env(roots, binding, source)
     toolchain = "/pinned/erlang/bin:/pinned/elixir/bin"
 
     expected_path =
@@ -202,6 +203,18 @@ defmodule Arbor.Shell.TrustedBuildRequestTest do
 
     assert env["PATH"] == expected_path
     assert env["MIX_OS_CONCURRENCY_LOCK"] == "0"
+
+    package_paths = %{
+      "ARBOR_KERNEL_PATH" => "/pinned/source/packages/arbor_kernel",
+      "ARBOR_CAPABILITIES_PATH" => "/pinned/source/packages/arbor_capabilities",
+      "ARBOR_SUPPORT_PATH" => "/pinned/source/packages/arbor_support",
+      "ARBOR_PERSISTENCE_PATH" => "/pinned/source/packages/arbor_persistence",
+      "ARBOR_CUSTODY_PATH" => "/pinned/source/packages/arbor_custody",
+      "ARBOR_OAUTH_PATH" => "/pinned/source/packages/arbor_oauth"
+    }
+
+    assert Map.take(env, Map.keys(package_paths)) == package_paths
+    refute Map.has_key?(env, "ARBOR_CAPABILITIES_OIDC_PATH")
     assert Enum.sort(Map.keys(env)) == Enum.sort(Plan.env_keys())
     refute env["PATH"] == System.get_env("PATH")
     refute String.contains?(env["PATH"], "/evil/bin")
@@ -234,7 +247,7 @@ defmodule Arbor.Shell.TrustedBuildRequestTest do
       elixir_root: %{path: "/pinned/elixir"}
     }
 
-    env = Plan.closed_env(roots, binding)
+    env = Plan.closed_env(roots, binding, %{path: "/pinned/source"})
     assert env["MIX_OS_CONCURRENCY_LOCK"] == "0"
     refute env["MIX_OS_CONCURRENCY_LOCK"] == "1"
     assert Enum.sort(Map.keys(env)) == Enum.sort(Plan.env_keys())

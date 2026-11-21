@@ -24,6 +24,10 @@
       },
       {
         "path": "mix.lock",
+        "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      },
+      {
+        "path": "packages/arbor_trust/mix.lock",
         "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
       }
     ]
@@ -48,10 +52,8 @@
     "lib",
     "lib/arbor_kernel-0.1.0",
     "lib/arbor_kernel-0.1.0/ebin",
-    "lib/arbor_kernel_runtime-0.1.0",
-    "lib/arbor_kernel_runtime-0.1.0/ebin",
-    "lib/arbor_security-0.1.0",
-    "lib/arbor_security-0.1.0/ebin",
+    "lib/arbor_support-0.1.0",
+    "lib/arbor_support-0.1.0/ebin",
     "lib/arbor_trust-0.1.0",
     "lib/arbor_trust-0.1.0/ebin",
     "lib/jason-1.0.0",
@@ -64,12 +66,11 @@
   "files": [
     {"path": "bin/erlexec", "bytes": "ERLEXEC-NOT-NATIVE", "mode": 493},
     {"path": "lib/arbor_kernel-0.1.0/ebin/arbor_kernel.app", "bytes": "{application,arbor_kernel,[{description,\"arbor_kernel\"},{vsn,\"0.1.0\"},{modules,[]},{registered,[]},{applications,[kernel]},{mod,{'Elixir.App',[]}},{env,[]}]}."},
-    {"path": "lib/arbor_kernel_runtime-0.1.0/ebin/arbor_kernel_runtime.app", "bytes": "{application,arbor_kernel_runtime,[{description,\"arbor_kernel_runtime\"},{vsn,\"0.1.0\"},{modules,[]},{registered,[]},{applications,[kernel]},{mod,{'Elixir.App',[]}},{env,[]}]}."},
-    {"path": "lib/arbor_security-0.1.0/ebin/arbor_security.app", "bytes": "{application,arbor_security,[{description,\"arbor_security\"},{vsn,\"0.1.0\"},{modules,[]},{registered,[]},{applications,[kernel]},{mod,{'Elixir.App',[]}},{env,[]}]}."},
+    {"path": "lib/arbor_support-0.1.0/ebin/arbor_support.app", "bytes": "{application,arbor_support,[{description,\"arbor_support\"},{vsn,\"0.1.0\"},{modules,[]},{registered,[]},{applications,[kernel]},{mod,{'Elixir.App',[]}},{env,[]}]}."},
     {"path": "lib/arbor_trust-0.1.0/ebin/Elixir.Arbor.Trust.beam", "bytes_hex": "464f5231000000044245414d"},
     {"path": "lib/arbor_trust-0.1.0/ebin/arbor_trust.app", "bytes": "{application,arbor_trust,[{description,\"arbor_trust\"},{vsn,\"0.1.0\"},{modules,[]},{registered,[]},{applications,[kernel]},{mod,{'Elixir.App',[]}},{env,[]}]}."},
     {"path": "lib/jason-1.0.0/ebin/jason.app", "bytes": "{application,jason,[{description,\"jason\"},{vsn,\"1.0.0\"},{modules,[]},{registered,[]},{applications,[kernel]},{mod,{'Elixir.App',[]}},{env,[]}]}."},
     {"path": "lib/kernel-1.0.0/ebin/kernel.app", "bytes": "{application,kernel,[{description,\"kernel\"},{vsn,\"1.0.0\"},{modules,[]},{registered,[]},{applications,[]},{env,[]}]}."},
-    {"path": "releases/0.1.0/arbor_trust.rel", "bytes": "{release,<<\"arbor_trust\">>,<<\"0.1.0\">>,<<\"16.3\">>,[{arbor_kernel,<<\"0.1.0\">>},{arbor_kernel_runtime,<<\"0.1.0\">>},{arbor_security,<<\"0.1.0\">>},{arbor_trust,<<\"0.1.0\">>},{jason,<<\"1.0.0\">>},{kernel,<<\"1.0.0\">>}]}."}
+    {"path": "releases/0.1.0/arbor_trust.rel", "bytes": "{release,<<\"arbor_trust\">>,<<\"0.1.0\">>,<<\"16.3\">>,[{arbor_kernel,<<\"0.1.0\">>},{arbor_support,<<\"0.1.0\">>},{arbor_trust,<<\"0.1.0\">>},{jason,<<\"1.0.0\">>},{kernel,<<\"1.0.0\">>}]}."}
   ]
 }

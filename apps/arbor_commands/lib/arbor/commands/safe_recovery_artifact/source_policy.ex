@@ -27,6 +27,7 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourcePolicy do
     arbor_persistence arbor_persistence_sql
   )
   @ignored_generated_dirs ~w(.elixir_ls cover)
+  @package_lock_path "packages/arbor_trust/mix.lock"
 
   @required_files [
     "packages/arbor_kernel/mix.exs",
@@ -44,6 +45,8 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourcePolicy do
     "apps/arbor_security/mix.exs",
     "apps/arbor_persistence_host/mix.exs",
     "packages/arbor_trust/mix.exs",
+    @package_lock_path,
+    "packages/arbor_trust/config/config.exs",
     "packages/arbor_historian/mix.exs",
     "apps/arbor_trust_host/mix.exs",
     "apps/arbor_historian_host/mix.exs",
@@ -74,6 +77,9 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourcePolicy do
 
   @spec required_files() :: [String.t()]
   def required_files, do: @required_files
+
+  @spec package_lock_path() :: String.t()
+  def package_lock_path, do: @package_lock_path
 
   @spec excluded_paths() :: MapSet.t(String.t())
   def excluded_paths, do: @excluded_paths

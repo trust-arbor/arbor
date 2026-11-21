@@ -8,6 +8,15 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.CoreTest do
   @moduletag :fast
 
   describe "project/1 golden fixture" do
+    test "selects exactly the canonical Trust release applications" do
+      assert Encode.selected_first_party_names() ==
+               MapSet.new(["arbor_kernel", "arbor_support", "arbor_trust"])
+
+      for app <- ["arbor_kernel_runtime", "arbor_security", "arbor_capabilities"] do
+        assert Derive.application_class(app) == "unexpected_first_party"
+      end
+    end
+
     test "projects closed fields, classes, findings, and identical reproducibility" do
       candidate = Fixture.candidate()
       assert {:ok, manifest} = Core.project(candidate)
@@ -33,8 +42,7 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.CoreTest do
 
       assert names == [
                "arbor_kernel",
-               "arbor_kernel_runtime",
-               "arbor_security",
+               "arbor_support",
                "arbor_trust",
                "jason",
                "kernel"
@@ -53,7 +61,7 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.CoreTest do
       assert kinds["bin/erlexec"] == "executable"
 
       assert manifest["release"]["entry_count"] == length(manifest["entries"])
-      assert manifest["release"]["application_count"] == 6
+      assert manifest["release"]["application_count"] == 5
       assert manifest["reproducibility"]["status"] == "identical"
       assert manifest["reproducibility"]["differing_paths"] == []
       assert manifest["reproducibility"]["rule"] == "remove_exact_releases_cookie_before_scan"
@@ -104,13 +112,14 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.CoreTest do
   end
 
   describe "project/1 closed candidate" do
-    test "security regression: canonical Capabilities stays unexpected under frozen v1" do
+    test "security regression: Capabilities and its host stay unexpected in the Trust release" do
       Code.ensure_loaded!(Arbor.Security)
       assert {:ok, :arbor_capabilities} = :application.get_application(Arbor.Security)
 
       core_root = "lib/arbor_capabilities-0.1.0-dev/ebin/"
       core_app = core_root <> "arbor_capabilities.app"
       core_beam = core_root <> "Elixir.Arbor.Security.beam"
+      host_app = "lib/arbor_security-0.1.0/ebin/arbor_security.app"
 
       passive_host =
         Fixture.app_body("arbor_security")
@@ -118,11 +127,12 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.CoreTest do
         |> String.replace("{applications,[kernel]}", "{applications,[kernel,arbor_capabilities]}")
 
       release =
-        String.replace(
-          Fixture.rel_body(),
+        Fixture.rel_body()
+        |> String.replace(
           "[{arbor_kernel,",
           "[{arbor_capabilities,<<\"0.1.0-dev\">>},{arbor_kernel,"
         )
+        |> String.replace("{arbor_support,", "{arbor_security,<<\"0.1.0\">>},{arbor_support,")
 
       snapshot =
         Fixture.golden_snapshot()
@@ -132,11 +142,7 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.CoreTest do
           0o644
         )
         |> Fixture.replace_file(core_beam, Fixture.beam_bytes(), 0o644)
-        |> Fixture.replace_file(
-          "lib/arbor_security-0.1.0/ebin/arbor_security.app",
-          passive_host,
-          0o644
-        )
+        |> Fixture.replace_file(host_app, passive_host, 0o644)
         |> put_rel(release)
 
       assert {:ok, manifest} = Core.project(Fixture.candidate(snapshot: snapshot))
@@ -146,15 +152,15 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.CoreTest do
       assert manifest["schema"] == "arbor.packaging.safe_recovery_artifact.payload.v1"
       assert manifest["version"] == 1
       assert applications["arbor_capabilities"]["class"] == "unexpected_first_party"
-      assert applications["arbor_security"]["class"] == "selected_first_party"
+      assert applications["arbor_security"]["class"] == "unexpected_first_party"
       assert entries[core_beam]["owner_application"] == "arbor_capabilities"
 
       finding =
         Enum.find(manifest["findings"], &(&1["id"] == "unexpected_first_party_applications"))
 
       assert finding["severity"] == "blocker"
-      assert finding["applications"] == ["arbor_capabilities"]
-      assert finding["paths"] == Enum.sort([core_app, core_beam])
+      assert finding["applications"] == ["arbor_capabilities", "arbor_security"]
+      assert finding["paths"] == Enum.sort([core_app, core_beam, host_app])
       assert :ok = Encode.validate_manifest(manifest)
 
       relabelled =

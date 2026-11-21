@@ -824,7 +824,7 @@ defmodule Arbor.Shell.TrustedBuild.Lease do
       archives: identities.archives,
       archives_digest: identities.archives_digest,
       roots: Map.put(roots, :archives, identities.archives),
-      env: Plan.closed_env(roots, binding),
+      env: Plan.closed_env(roots, binding, identities.source),
       argv: Plan.argv(phase),
       timeout_ms: phase_timeout_ms(state, phase),
       max_output_bytes: phase_max_output_bytes(state),

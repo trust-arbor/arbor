@@ -12,6 +12,14 @@ defmodule Arbor.Shell.TrustedBuildDarwinTest do
   alias Arbor.Shell.TrustedBuildTestHelpers, as: Helpers
 
   @darwin? match?({:unix, :darwin}, :os.type())
+  @package_paths %{
+    "ARBOR_KERNEL_PATH" => "arbor_kernel",
+    "ARBOR_CAPABILITIES_PATH" => "arbor_capabilities",
+    "ARBOR_SUPPORT_PATH" => "arbor_support",
+    "ARBOR_PERSISTENCE_PATH" => "arbor_persistence",
+    "ARBOR_CUSTODY_PATH" => "arbor_custody",
+    "ARBOR_OAUTH_PATH" => "arbor_oauth"
+  }
 
   setup do
     if @darwin? do
@@ -34,14 +42,23 @@ defmodule Arbor.Shell.TrustedBuildDarwinTest do
     if @darwin? do
       lease = context.lease
       source = context.source
+      inherited = System.get_env("ARBOR_KERNEL_PATH")
+      System.put_env("ARBOR_KERNEL_PATH", "/caller/kernel")
+
+      on_exit(fn ->
+        if inherited,
+          do: System.put_env("ARBOR_KERNEL_PATH", inherited),
+          else: System.delete_env("ARBOR_KERNEL_PATH")
+      end)
+
       assert {:ok, deps} = Shell.execute_trusted_build(lease, "deps_get")
       assert deps.exit_code == 0
       :ok = Helpers.after_deps_get!(lease)
       assert {:ok, result} = Shell.execute_trusted_build(lease, "compile")
       assert result.exit_code == 0
       refute File.exists?(Path.join(source, "SHOULD_NOT_WRITE"))
-      refute File.exists?(Path.join(source, "apps/arbor_trust/SHOULD_NOT_WRITE"))
-      assert File.exists?(Path.join(source, "apps/arbor_trust/lib/trusted_build_fixture.ex"))
+      refute File.exists?(Path.join(source, "packages/arbor_trust/SHOULD_NOT_WRITE"))
+      assert File.exists?(Path.join(source, "packages/arbor_trust/lib/trusted_build_fixture.ex"))
 
       state = :sys.get_state(lease.worker)
       assert File.exists?(Path.join(state.roots.build.path, "HEX_TMP_WRITE"))
@@ -52,6 +69,13 @@ defmodule Arbor.Shell.TrustedBuildDarwinTest do
       Enum.each(Plan.env_keys(), fn key -> assert key in keys end)
       refute "USER" in keys
       refute "SHELL" in keys
+      refute "ARBOR_CAPABILITIES_OIDC_PATH" in keys
+
+      for {key, package} <- @package_paths do
+        assert File.read!(Path.join(state.roots.build.path, key)) ==
+                 Path.join([state.identities.source.path, "packages", package])
+      end
+
       lock_file = Path.join(state.roots.build.path, "mix_os_concurrency_lock.txt")
       assert File.exists?(lock_file)
       assert String.trim(File.read!(lock_file)) == "0"
@@ -206,6 +230,9 @@ defmodule Arbor.Shell.TrustedBuildDarwinTest do
                 Path.join(build, "env_keys.txt"),
                 System.get_env() |> Map.keys() |> Enum.sort() |> Enum.join("\\n")
               )
+              for key <- #{inspect(Map.keys(@package_paths))} do
+                File.write!(Path.join(build, key), System.get_env(key) || "")
+              end
               File.write!(
                 Path.join(build, "mix_os_concurrency_lock.txt"),
                 System.get_env("MIX_OS_CONCURRENCY_LOCK") || ""

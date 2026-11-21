@@ -7,7 +7,7 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.ComposeCore do
   # step is ever observed, so error precedence is a direct function of this
   # order.
 
-  alias Arbor.Commands.SafeRecoveryArtifact.{Core, Encode, TrustedInventory}
+  alias Arbor.Commands.SafeRecoveryArtifact.{Core, Encode, SourcePolicy, TrustedInventory}
 
   @steps [
     {:stage_source, :a},
@@ -204,7 +204,8 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.ComposeCore do
     build_inputs = source_a["build_inputs"]
 
     with {:ok, tool_versions_sha256} <- fetch_input_digest(build_inputs, ".tool-versions"),
-         {:ok, mix_lock_sha256} <- fetch_input_digest(build_inputs, "mix.lock") do
+         {:ok, mix_lock_sha256} <-
+           fetch_input_digest(build_inputs, SourcePolicy.package_lock_path()) do
       candidate = %{
         "profile" => profile(),
         "source" => source(source_a),

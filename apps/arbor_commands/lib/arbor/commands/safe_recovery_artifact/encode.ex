@@ -39,8 +39,7 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.Encode do
   # and still produce blocker findings.
   @selected_first_party MapSet.new([
                           "arbor_kernel",
-                          "arbor_kernel_runtime",
-                          "arbor_security",
+                          "arbor_support",
                           "arbor_trust"
                         ])
 

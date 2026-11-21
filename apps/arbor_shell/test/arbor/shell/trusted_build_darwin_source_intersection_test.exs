@@ -56,8 +56,8 @@ defmodule Arbor.Shell.TrustedBuildDarwinSourceIntersectionTest do
         refute within?(outside_tmp, root)
       end)
 
-      refute File.exists?(Path.join([source, "apps", "arbor_trust", "SHOULD_NOT_WRITE"]))
-      refute File.exists?(Path.join([source, "apps", "arbor_trust", @tmp_name]))
+      refute File.exists?(Path.join([source, "packages", "arbor_trust", "SHOULD_NOT_WRITE"]))
+      refute File.exists?(Path.join([source, "packages", "arbor_trust", @tmp_name]))
       refute File.exists?(outside_tmp)
       {:ok, lease: lease, build: state.roots.build.path}
     else
