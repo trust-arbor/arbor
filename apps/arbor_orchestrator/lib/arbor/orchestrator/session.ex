@@ -4052,15 +4052,23 @@ defmodule Arbor.Orchestrator.Session do
     :ok
   end
 
-  # Subscribe to trust profile change signals for reactive tool updates.
-  # arbor_signals is a hard dep; the rescue/catch guards only against the
-  # signal bus process not being alive (standalone/test slices).
+  # Subscribe to trust profile changes so a tightened profile revokes this
+  # session's session-scoped capabilities. A session can still run without the
+  # subscription (standalone slices have no signal bus), but then it keeps
+  # those capabilities until it ends, so the failure is logged, not swallowed.
   defp safe_subscribe_profile_signals(agent_id) do
-    Arbor.Signals.subscribe("trust.profile_updated", %{agent_id: agent_id})
-  rescue
-    _ -> :ok
-  catch
-    :exit, _ -> :ok
+    case Arbor.Orchestrator.Session.TrustProfileSignals.subscribe() do
+      {:ok, _subscription_id} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "[Session] not subscribed to trust profile changes for #{agent_id}: " <>
+            "#{inspect(reason)}. Session capabilities will not be revoked on a profile change."
+        )
+
+        :ok
+    end
   end
 
   # Revoke session-scoped capabilities (cleanup after profile change or
