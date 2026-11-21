@@ -50,10 +50,7 @@ defmodule Arbor.Contracts.Census do
 
   # This inventory is runtime policy, not test-only fixture data: the Mix task
   # needs the same exceptions as the admission test when enforce mode is used.
-  @default_grandfathered Map.new([
-                           {"lib/arbor/contracts/coding/source_inventory.ex",
-                            "input contract of this census; stays beside it"}
-                         ])
+  @default_grandfathered %{}
 
   @type tier :: :a | :a2 | :b | :c | :d | :shared
 

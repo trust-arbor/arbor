@@ -34,6 +34,7 @@ defmodule Arbor.Actions.MixProject do
 
   defp deps do
     [
+      {:arbor_kernel, "~> 2.0.0-dev", path: "../../packages/arbor_kernel", env: Mix.env()},
       {:arbor_capabilities, "~> 0.1.0-dev",
        path: "../../packages/arbor_capabilities", runtime: false, env: Mix.env()},
       {:arbor_support, "~> 0.1.0-dev", path: "../../packages/arbor_support", env: Mix.env()},
