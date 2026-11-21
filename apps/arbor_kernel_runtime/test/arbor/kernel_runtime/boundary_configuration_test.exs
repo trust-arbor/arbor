@@ -66,7 +66,23 @@ defmodule Arbor.KernelRuntime.BoundaryConfigurationTest do
     Arbor.Signals => %{
       app: :arbor_signals,
       deps: [Arbor.Contracts, Jason, Logger, TypedStruct],
-      exports: :all
+      exports: [
+        Adapters.CapabilityAuthorizer,
+        Application,
+        Bus,
+        Channels,
+        Config,
+        Contracts.Authorization,
+        Contracts.AuthorizationContext,
+        Contracts.Crypto,
+        Contracts.DurableSink,
+        Contracts.IdentityKeys,
+        Relay,
+        Store,
+        Taint,
+        Telemetry,
+        TopicKeys
+      ]
     },
     Arbor.Monitor => %{
       deps: [Arbor.Common, Arbor.Contracts, Arbor.Signals, Logger],
