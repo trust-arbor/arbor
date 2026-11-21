@@ -27,7 +27,7 @@ defmodule Arbor.Shell.TrustedBuildDarwinSourceIntersectionTest do
       end)
 
       source = Path.join(identity.path, "source")
-      outside_parent = Path.join([identity.path, "outside", "apps", "arbor_trust"])
+      outside_parent = Path.join([identity.path, "outside", "packages", "arbor_trust"])
       outside_tmp = Path.join(outside_parent, @tmp_name)
       File.mkdir_p!(outside_parent)
 
