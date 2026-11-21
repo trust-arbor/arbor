@@ -30,8 +30,7 @@ defmodule Arbor.Trust.MixProject do
   defp deps do
     [
       {:arbor_kernel, "~> 2.0.0-dev", path: "../arbor_kernel"},
-      {:arbor_capabilities, "~> 0.1.0-dev",
-       path: "../arbor_capabilities", env: Mix.env(), runtime: false},
+      {:arbor_capabilities, "~> 0.1.0-dev", path: "../arbor_capabilities", env: Mix.env()},
       {:arbor_support, "~> 0.1.0-dev", path: "../arbor_support"},
       {:arbor_persistence, "~> 0.1.0-dev", path: "../arbor_persistence", runtime: false},
       {:phoenix_pubsub, "~> 2.1", optional: true, runtime: false},

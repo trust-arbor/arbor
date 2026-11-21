@@ -9,6 +9,10 @@ defmodule Arbor.Agent.Test.TrustTopology do
   ]
 
   def ensure_owned! do
+    # The Trust store subscribes to profile invalidation through Signals when it
+    # starts. An earlier test may have left the Signals runtime fixture torn
+    # down, which makes that subscription :unauthorized and the store fail.
+    :ok = Arbor.Signals.restore_runtime_fixture()
     :ok = Arbor.Trust.restore_runtime_fixture()
 
     supervisor =

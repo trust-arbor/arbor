@@ -416,6 +416,7 @@ defmodule Arbor.Trust.ApplicationStartProfileSecurityRegressionTest do
 
     assert MapSet.new(applications) ==
              MapSet.new([
+               :arbor_capabilities,
                :arbor_kernel,
                :arbor_support,
                :elixir,

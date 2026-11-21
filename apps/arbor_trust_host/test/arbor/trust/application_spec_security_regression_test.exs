@@ -18,6 +18,7 @@ defmodule Arbor.Trust.ApplicationSpecSecurityRegressionTest do
     :postgrex
   ]
   @required MapSet.new([
+              :arbor_capabilities,
               :arbor_kernel,
               :arbor_support,
               :elixir,
