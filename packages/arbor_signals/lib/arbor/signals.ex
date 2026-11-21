@@ -51,7 +51,23 @@ defmodule Arbor.Signals do
   use Boundary,
     top_level?: true,
     deps: [Arbor.Contracts, Jason, Logger, TypedStruct],
-    exports: :all
+    exports: [
+      Adapters.CapabilityAuthorizer,
+      Application,
+      Bus,
+      Channels,
+      Config,
+      Contracts.Authorization,
+      Contracts.AuthorizationContext,
+      Contracts.Crypto,
+      Contracts.DurableSink,
+      Contracts.IdentityKeys,
+      Relay,
+      Store,
+      Taint,
+      Telemetry,
+      TopicKeys
+    ]
 
   @behaviour Arbor.Signals.Contracts.API
 

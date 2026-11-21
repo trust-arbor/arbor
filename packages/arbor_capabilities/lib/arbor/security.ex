@@ -64,7 +64,34 @@ defmodule Arbor.Security do
         {TypedStruct, :compile},
         ExUnit
       ],
-      exports: :all
+      exports: [
+        AuthDecision,
+        ChannelAuthorityBroker,
+        Config,
+        Contracts.EventLogAdapter,
+        Contracts.NativeNoticeSourceAuthorizer,
+        Contracts.OperatorResolver,
+        Contracts.RuntimeHost,
+        Contracts.SignalTransport,
+        Contracts.UriPrefixProvider,
+        Crypto,
+        EgressGate,
+        Escalation,
+        Events,
+        FileGuard,
+        Identity.Registry,
+        Identity.ReplayPeers,
+        IdentityAlias,
+        IssuerRegistry,
+        OIDC,
+        OIDC.IdentityStore,
+        SigningAuthorityBroker,
+        Store.JSONFile,
+        SupervisedOwner,
+        SystemAuthority,
+        TestAuditConsumer,
+        UriRegistry
+      ]
   else
     use Boundary,
       top_level?: true,
@@ -86,7 +113,34 @@ defmodule Arbor.Security do
         {Mix, :compile},
         {TypedStruct, :compile}
       ],
-      exports: :all
+      exports: [
+        AuthDecision,
+        ChannelAuthorityBroker,
+        Config,
+        Contracts.EventLogAdapter,
+        Contracts.NativeNoticeSourceAuthorizer,
+        Contracts.OperatorResolver,
+        Contracts.RuntimeHost,
+        Contracts.SignalTransport,
+        Contracts.UriPrefixProvider,
+        Crypto,
+        EgressGate,
+        Escalation,
+        Events,
+        FileGuard,
+        Identity.Registry,
+        Identity.ReplayPeers,
+        IdentityAlias,
+        IssuerRegistry,
+        OIDC,
+        OIDC.IdentityStore,
+        SigningAuthorityBroker,
+        Store.JSONFile,
+        SupervisedOwner,
+        SystemAuthority,
+        TestAuditConsumer,
+        UriRegistry
+      ]
   end
 
   @behaviour Arbor.Contracts.API.Security
@@ -570,6 +624,17 @@ defmodule Arbor.Security do
   catch
     _, _ -> {:error, :unauthorized}
   end
+
+  @doc """
+  Lowercase hex SHA-256 of a capability's canonical signing payload.
+
+  Callers that pin an approval to one exact capability (skill version approval
+  in Kernel Runtime) compare this digest. It is a facade function so that
+  those callers, which may only depend on this library at compile time, never
+  call the capability contract module directly.
+  """
+  @spec capability_approval_digest(Capability.t()) :: String.t()
+  def capability_approval_digest(%Capability{} = cap), do: capability_notice_digest(cap)
 
   defp capability_notice_digest(cap),
     do: Base.encode16(:crypto.hash(:sha256, Capability.signing_payload(cap)), case: :lower)

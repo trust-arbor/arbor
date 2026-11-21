@@ -16,7 +16,7 @@ defmodule Arbor.Common.SkillLibrary.Versions do
     with {:ok, version} <- prepare(name),
          :ok <- expected_version(version, reference),
          {:ok, cap} <- selected_cap(principal, version, reference),
-         digest <- VersionCore.sha256(Capability.signing_payload(cap)),
+         {:ok, digest} <- approval_digest(cap),
          :ok <- expected_cap(cap, digest, reference),
          {:ok, :authorized} <- authorize(principal, version.resource_uri, cap.id, digest) do
       {:ok, Map.put(version, :approval, VersionCore.reference(version, cap.id, digest))}
@@ -181,6 +181,19 @@ defmodule Arbor.Common.SkillLibrary.Versions do
   end
 
   defp selected_cap(_, _, _), do: {:error, :skill_not_approved}
+
+  # The digest comes from the configured security module, the same port that
+  # supplied the capability. Kernel Runtime depends on Capabilities at compile
+  # time only, so it must not call the capability contract module itself.
+  defp approval_digest(cap) do
+    with module when is_atom(module) and not is_nil(module) <- Config.skill_security_module(),
+         digest when is_binary(digest) <- apply(module, :capability_approval_digest, [cap]),
+         true <- VersionCore.digest?(digest) do
+      {:ok, digest}
+    else
+      _ -> {:error, :skill_approval_unavailable}
+    end
+  end
 
   defp authorize(principal, uri, id, digest) do
     case Config.skill_security_module() do

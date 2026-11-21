@@ -56,7 +56,19 @@ defmodule Arbor.Trust do
       Logger,
       Phoenix.PubSub
     ],
-    exports: :all
+    exports: [
+      Authority,
+      CapabilityGrantOwner,
+      Config,
+      Contracts.ApprovalEvidenceProvider,
+      Contracts.Observation,
+      Contracts.ProfileSync,
+      Contracts.RuntimeHost,
+      Manager,
+      Policy,
+      Store,
+      Supervisor
+    ]
 
   @behaviour Arbor.Contracts.API.Trust
 

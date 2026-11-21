@@ -52,7 +52,15 @@ defmodule Arbor.Historian do
       {Mix, :compile},
       {TypedStruct, :compile}
     ],
-    exports: :all
+    exports: [
+      Application,
+      AuthorityAuditPuller,
+      Config,
+      Contracts.AuthoritySource,
+      Contracts.Authorizer,
+      Contracts.Observation,
+      StreamIds
+    ]
 
   @behaviour Arbor.Contracts.API.Historian
 
