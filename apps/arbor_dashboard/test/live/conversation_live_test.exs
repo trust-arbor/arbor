@@ -236,7 +236,13 @@ defmodule Arbor.Dashboard.Live.ConversationLiveTest do
   end
 
   setup do
-    settings = [conversation_api: Host, voice_api: Voice, local_voice_controls: true]
+    # This suite uses the voice fixture and only checks multimedia availability.
+    settings = [
+      conversation_api: Host,
+      voice_api: Voice,
+      multimedia_api: __MODULE__,
+      local_voice_controls: true
+    ]
 
     previous =
       Map.new(
