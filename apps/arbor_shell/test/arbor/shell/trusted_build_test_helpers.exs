@@ -119,6 +119,78 @@ defmodule Arbor.Shell.TrustedBuildTestHelpers do
 
   def stop_retained_worker(_pid), do: :ok
 
+  # Observe only the authenticated lease's own native Port child. Never scan
+  # global processes or print the captured command line.
+  def trusted_build_argv_observed?(lease) do
+    with {:ok, binding} <- trusted_build_native_binding(lease),
+         {:ok, identity} <- trusted_build_native_identity(binding),
+         {:ok, ^binding} <- trusted_build_native_binding(lease),
+         {command, 0} <-
+           System.cmd("/bin/ps", [
+             "-ww",
+             "-p",
+             Integer.to_string(binding.os_pid),
+             "-o",
+             "command="
+           ]),
+         {:ok, ^identity} <- trusted_build_native_identity(binding),
+         {:ok, ^binding} <- trusted_build_native_binding(lease) do
+      String.contains?(command, "arbor_shell_launcher trusted-build") and
+        String.contains?(command, "compile --warnings-as-errors")
+    else
+      _ -> false
+    end
+  rescue
+    _ -> false
+  catch
+    :exit, _ -> false
+  end
+
+  defp trusted_build_native_binding(lease) do
+    state = :sys.get_state(lease.worker)
+    owner = state.port_owner_pid
+    launcher = Path.join(to_string(:code.priv_dir(:arbor_shell)), "arbor_shell_launcher")
+
+    with true <- state.owner == lease.owner and state.in_flight == :compile,
+         true <- state.port_owner_registered and not state.port_owner_exhausted,
+         true <- is_pid(owner) and Process.alive?(owner),
+         true <- is_pid(state.phase_pid) and Process.alive?(state.phase_pid),
+         {:links, links} <- Process.info(owner, :links),
+         [port] <-
+           Enum.filter(links, fn port ->
+             is_port(port) and Port.info(port, :connected) == {:connected, owner} and
+               Port.info(port, :name) == {:name, String.to_charlist(launcher)}
+           end),
+         {:os_pid, os_pid} when is_integer(os_pid) and os_pid > 0 <- Port.info(port, :os_pid),
+         {:ok, %{type: :regular, uid: uid}} <- File.lstat(launcher) do
+      {:ok, %{owner: owner, phase: state.phase_pid, port: port, os_pid: os_pid, uid: uid}}
+    else
+      _ -> :not_observable
+    end
+  end
+
+  defp trusted_build_native_identity(binding) do
+    # Metadata first: this query never asks ps for command arguments.
+    with {output, 0} <-
+           System.cmd("/bin/ps", [
+             "-p",
+             Integer.to_string(binding.os_pid),
+             "-o",
+             "pid=,ppid=,uid=,lstart="
+           ]),
+         [row] <- String.split(output, "\n", trim: true),
+         [pid, ppid, uid, started] <- String.split(String.trim(row), ~r/\s+/, parts: 4),
+         {os_pid, ""} <- Integer.parse(pid),
+         {parent_pid, ""} <- Integer.parse(ppid),
+         {owner_uid, ""} <- Integer.parse(uid),
+         true <- os_pid == binding.os_pid and parent_pid > 0 and owner_uid == binding.uid,
+         true <- started != "" do
+      {:ok, {os_pid, parent_pid, owner_uid, started}}
+    else
+      _ -> :not_observable
+    end
+  end
+
   def plant_production_child_project!(source_path, mix_exs, lib_source)
       when is_binary(source_path) and is_binary(mix_exs) and is_binary(lib_source) do
     project = Path.join([source_path, "apps", "arbor_trust"])
