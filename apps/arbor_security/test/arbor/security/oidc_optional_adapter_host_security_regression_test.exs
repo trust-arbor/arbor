@@ -241,7 +241,17 @@ defmodule Arbor.Security.OIDCOptionalAdapterHostSecurityRegressionTest do
     File.mkdir!(authority_root)
     File.chmod!(authority_root, 0o700)
 
+    json_file_opts =
+      peer_call(control, Application, :get_env, [
+        :arbor_capabilities,
+        Arbor.Security.Store.JSONFile,
+        []
+      ])
+
+    assert Keyword.keyword?(json_file_opts)
+
     for {key, value} <- [
+          {Arbor.Security.Store.JSONFile, Keyword.put(json_file_opts, :base_dir, authority_root)},
           start_children: true,
           storage_backend: Arbor.Security.Store.JSONFile,
           authority_state_root: authority_root,

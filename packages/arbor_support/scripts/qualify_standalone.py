@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Cold, offline single-Hex-archive safety-support consumer and source-hidden release qualification.
+"""Cold, offline Kernel-and-Support Hex-archive consumer and source-hidden release qualification.
 
 Writes only a new private evidence directory. Uses explicit pinned tools and
 private dependency source copies; never fetches, publishes, seeds application
@@ -23,12 +23,19 @@ import time
 
 
 PACKAGES = {
+    "arbor_kernel": {
+        "version": "2.0.0-dev",
+        "files": ("lib", "mix.exs", "README.md", "LICENSE", "docs/ADOPTION.md"),
+        "requirements": {"boundary": "~> 0.10", "jason": "~> 1.4", "typed_struct": "~> 0.3"},
+    },
     "arbor_support": {
         "version": "0.1.0-dev",
         "files": ("lib", "c_src", "mix.exs", "README.md", "LICENSE"),
+        "requirements": {"arbor_kernel": "~> 2.0.0-dev", "boundary": "~> 0.10"},
     },
 }
-DEPENDENCIES = ("boundary",)
+DEPENDENCIES = ("boundary", "jason", "typed_struct")
+PUBLIC_SOURCE_URL = "https://github.com/trust-arbor/arbor"
 CONSUMER_FILES = ("lib", "config", "mix.exs", "mix.lock", "README.md")
 CACHE_EXCLUDES = frozenset(("_build", "deps", ".git", ".elixir_ls", "cover", "doc", "ebin"))
 MAX_ARCHIVE_BYTES = 100_000_000
@@ -44,25 +51,26 @@ true = System.version() == System.fetch_env!("SUPPORT_COLD_ELIXIR_VERSION")
 true = List.to_string(:erlang.system_info(:otp_release)) == System.fetch_env!("SUPPORT_COLD_OTP_MAJOR")
 
 metadata_root = System.fetch_env!("SUPPORT_COLD_METADATA_ROOT")
-{:ok, terms} = :file.consult(String.to_charlist(Path.join(metadata_root, "arbor_support.config")))
-properties = Map.new(terms)
-"arbor_support" = Map.fetch!(properties, "name")
-"arbor_support" = Map.fetch!(properties, "app")
-"0.1.0-dev" = Map.fetch!(properties, "version")
-["MIT"] = Map.fetch!(properties, "licenses")
-true = is_binary(properties["description"]) and byte_size(properties["description"]) > 0
-true = map_size(Map.new(properties["links"])) > 0
-requirements = properties |> Map.fetch!("requirements") |> Enum.map(&Map.new/1)
-expected = %{"boundary" => "~> 0.10"}
-true = length(requirements) == map_size(expected)
-^expected = Map.new(requirements, &{Map.fetch!(&1, "name"), Map.fetch!(&1, "requirement")})
-true = Enum.all?(requirements, fn requirement ->
-  requirement["repository"] == "hexpm" and requirement["optional"] == false and not Map.has_key?(requirement, "path")
+archive_metadata = Map.new(["arbor_kernel", "arbor_support"], fn name ->
+  {:ok, terms} = :file.consult(String.to_charlist(Path.join(metadata_root, name <> ".config")))
+  properties = Map.new(terms)
+  requirements = properties |> Map.fetch!("requirements") |> Enum.map(&Map.new/1)
+  {name, %{
+    "name" => Map.fetch!(properties, "name"),
+    "app" => Map.fetch!(properties, "app"),
+    "version" => Map.fetch!(properties, "version"),
+    "licenses" => Map.fetch!(properties, "licenses"),
+    "description" => Map.fetch!(properties, "description"),
+    "links" => Map.new(Map.fetch!(properties, "links")),
+    "requirements" => requirements
+  }}
 end)
-false = Enum.any?(requirements, &String.starts_with?(&1["name"], "arbor_"))
 result = SupportStandaloneConsumer.verify!()
 7 = Map.fetch!(result, "cursor_check_groups")
-root = Path.expand(System.fetch_env!("ARBOR_SUPPORT_PATH")) <> "/"
+roots = %{
+  :arbor_kernel => Path.expand(System.fetch_env!("ARBOR_KERNEL_PATH")) <> "/",
+  :arbor_support => Path.expand(System.fetch_env!("ARBOR_SUPPORT_PATH")) <> "/"
+}
 sources = Map.new(Map.fetch!(result, "code_paths"), fn {name, _beam} ->
   module = String.to_existing_atom(name)
   source = module.module_info(:compile) |> Keyword.fetch!(:source) |> List.to_string() |> Path.expand()
@@ -70,7 +78,8 @@ sources = Map.new(Map.fetch!(result, "code_paths"), fn {name, _beam} ->
     true = String.starts_with?(source, Path.expand(System.fetch_env!("SUPPORT_COLD_BUILD_ROOT")) <> "/")
     true = String.ends_with?(source, "/generated/arbor_support/native_reader_artifact.ex")
   else
-    true = String.starts_with?(source, root)
+    owner = Application.get_application(module)
+    true = String.starts_with?(source, Map.fetch!(roots, owner))
   end
   {name, source}
 end)
@@ -79,7 +88,7 @@ true = Enum.all?(:code.get_path(), fn path ->
   path = path |> List.to_string() |> Path.expand()
   Enum.any?(allowed_roots, &String.starts_with?(path <> "/", &1 <> "/"))
 end)
-result = Map.merge(result, %{source_paths: sources, archive_metadata: %{requirements: requirements}})
+result = Map.merge(result, %{source_paths: sources, archive_metadata: archive_metadata})
 IO.puts("SUPPORT_QUALIFICATION_RESULT=" <> IO.iodata_to_binary(:json.encode(result)))
 '''
 
@@ -260,21 +269,92 @@ def unpack_archive(archive, destination, expected, metadata_path):
     }
 
 
+def selected_public_lock(root_lock):
+    """Keep the exact reviewed Root records needed by both private projects."""
+    text = root_lock.decode("utf-8")
+    records = {}
+    for line in text.splitlines():
+        match = re.match(r'^  "([^"\n]+)":', line)
+        if match and match.group(1) in DEPENDENCIES:
+            name = match.group(1)
+            require(name not in records, "Duplicate selected public lock record")
+            require(line.startswith(f'  "{name}": {{:hex, :{name}, ') and
+                    re.search(r', "hexpm", "[0-9a-f]{64}"\},$', line),
+                    "Selected lock dependency is not public Hex")
+            records[name] = line
+    require(set(records) == set(DEPENDENCIES), "Missing selected public lock dependency")
+    return ("%{\n" + "\n".join(records[name] for name in DEPENDENCIES) + "\n}\n").encode()
+
+
+def check_project_lock(project, expected):
+    path = project / "mix.lock"
+    require(project.is_dir() and not project.is_symlink(), "Unsafe private project root")
+    require(path.is_file() and not path.is_symlink(), "Missing or unsafe private project lock")
+    info = path.lstat()
+    require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1, "Private lock must be regular and single-link")
+    require(path.read_bytes() == expected, "Private project public lock changed; HOLD")
+
+
+def install_project_lock(project, expected):
+    require(project.is_dir() and not project.is_symlink(), "Unsafe private project root")
+    with (project / "mix.lock").open("xb") as output:
+        output.write(expected)
+    check_project_lock(project, expected)
+
+
+def check_project_locks(work, projects, expected):
+    for relative in projects:
+        normal = work / relative
+        hidden = work / "source-hidden" / relative
+        present = [path for path in (normal, hidden) if path.exists() or path.is_symlink()]
+        require(len(present) == 1, "Private project lock root disappeared or is ambiguous; HOLD")
+        check_project_lock(present[0], expected)
+
+
+def validate_archive_metadata(metadata):
+    require(isinstance(metadata, dict) and set(metadata) == set(PACKAGES),
+            "Archive metadata must describe exactly Kernel and Support")
+    for name, spec in PACKAGES.items():
+        item = metadata[name]
+        require(isinstance(item, dict) and item.get("name") == name and item.get("app") == name and
+                item.get("version") == spec["version"], "Archive application/version identity mismatch")
+        require(item.get("licenses") == ["MIT"] and
+                isinstance(item.get("description"), str) and item["description"].strip() and
+                item.get("links") == {"GitHub": PUBLIC_SOURCE_URL}, "Archive public package metadata mismatch")
+        requirements = item.get("requirements")
+        require(isinstance(requirements, list) and len(requirements) == len(spec["requirements"]),
+                "Archive public dependency set mismatch")
+        actual = {}
+        for requirement in requirements:
+            require(isinstance(requirement, dict) and
+                    set(requirement) <= {"name", "app", "requirement", "repository", "optional"},
+                    "Archive dependency contains path/private/unknown metadata")
+            dependency = requirement.get("name")
+            require(isinstance(dependency, str) and dependency not in actual and
+                    requirement.get("repository") == "hexpm" and requirement.get("optional") is False and
+                    requirement.get("app", dependency) == dependency,
+                    "Archive dependency is duplicate, optional or not public Hex")
+            actual[dependency] = requirement.get("requirement")
+        require(actual == spec["requirements"], "Archive public version requirements differ")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for option in ("work-dir", "mix", "erlang-root", "elixir-root", "hex-archive",
-                   "cc", "deps-source-cache", "main-root", "repository"):
+                   "cc", "sdk-root", "developer-dir", "deps-source-cache", "main-root", "repository"):
         parser.add_argument("--" + option, type=Path, required=True)
     for option in ("head", "main-head", "branch"):
         parser.add_argument("--" + option, required=True)
     parser.add_argument("--timeout", type=int, default=900, help="Maximum seconds per command")
     args = parser.parse_args()
     for option in ("work_dir", "mix", "erlang_root", "elixir_root", "hex_archive",
-                   "cc", "deps_source_cache", "main_root", "repository"):
+                   "cc", "sdk_root", "developer_dir", "deps_source_cache", "main_root", "repository"):
         path = getattr(args, option).expanduser()
         require(path.is_absolute(), f"--{option.replace('_', '-')} must be an absolute pinned path")
         setattr(args, option, path.resolve())
     require(args.timeout > 0, "Timeout must be positive")
+    require(args.sdk_root.is_dir() and args.developer_dir.is_dir(), "Pinned SDK/developer roots must exist")
+    native_environment = {"SDKROOT": str(args.sdk_root), "DEVELOPER_DIR": str(args.developer_dir)}
     require(re.fullmatch(r"[0-9a-f]{40}", args.head) and re.fullmatch(r"[0-9a-f]{40}", args.main_head),
             "Supply full reviewed Main and branch commit IDs")
     repository = args.repository
@@ -312,7 +392,9 @@ def main():
                  for name, spec in PACKAGES.items()}
     consumer_source = package_source / "examples/standalone"
     consumer_files = source_files(consumer_source, CONSUMER_FILES)
-    lock = (consumer_source / "mix.lock").read_bytes()
+    lock = selected_public_lock((repository / "mix.lock").read_bytes())
+    require((consumer_source / "mix.lock").read_bytes() == lock,
+            "Consumer lock must match the exact selected public Root records")
     dependency_files = {}
     for name in DEPENDENCIES:
         require(re.search(rb'(?m)^\s*"' + name.encode() + rb'":', lock), f"Missing locked production dependency: {name}")
@@ -338,6 +420,9 @@ def main():
         "hex_tool_archive": hex_files,
         "tool_sha256": {name: sha(path.read_bytes()) for name, path in tools.items()},
         "tool_versions_sha256": sha(tool_versions),
+        "public_lock_sha256": sha(lock),
+        "native_environment": native_environment,
+        "native_sdk_preflight": "Required enclosing family proof; environment values alone are not SDK/header proof.",
     }
 
     def repository_state():
@@ -350,9 +435,13 @@ def main():
         }
 
     before = repository_state()
+    project_locks = []
 
     def guard():
         require(sha(runner_path.read_bytes()) == runner_sha256, "Qualification runner changed; HOLD")
+        require(selected_public_lock((repository / "mix.lock").read_bytes()) == lock,
+                "Selected public Root lock records changed; HOLD")
+        check_project_locks(work, project_locks, lock)
         require(repository_state() == before, "Repository, Main build, stash or operator guard changed; HOLD")
         require((repository / ".tool-versions").read_bytes() == tool_versions, "Tool pins changed; HOLD")
         require({name: source_files(repository / "packages" / name, spec["files"])
@@ -374,6 +463,7 @@ def main():
         "third_party_cache_seeded": 0,
         "producer_packages_compiled": False,
         "offline": True,
+        "private_project_locks": project_locks,
     }
     save = lambda: save_json(work / "results.json", state)
     save()
@@ -387,9 +477,12 @@ def main():
         for name in PACKAGES:
             producer = work / ("producer-" + name)
             copy_files(repository / "packages" / name, producer, published[name])
-            (producer / "mix.lock").write_bytes(lock)
+            install_project_lock(producer, lock)
+            project_locks.append("producer-" + name)
             (work / ("producer-deps-" + name)).mkdir(mode=0o700)
         copy_files(consumer_source, work / "consumer", consumer_files)
+        check_project_lock(work / "consumer", lock)
+        project_locks.append("consumer")
         for name in DEPENDENCIES:
             copy_files(args.deps_source_cache / name, work / "consumer-deps" / name, dependency_files[name])
         (work / ".tool-versions").write_bytes(tool_versions)
@@ -432,6 +525,8 @@ def main():
                 "HOME": str(Path.home()),
                 "LANG": "C.UTF-8",
                 "PATH": f"{args.erlang_root}/bin:{args.elixir_root}/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+                "SDKROOT": native_environment["SDKROOT"],
+                "DEVELOPER_DIR": native_environment["DEVELOPER_DIR"],
                 "MIX_ENV": "prod", "MIX_BUILD_PATH": str(work / (label + "-build/prod")),
                 "MIX_DEPS_PATH": str(deps), "MIX_HOME": str(work / "mix-home"),
                 "MIX_ARCHIVES": str(work / "tool-archives"),
@@ -446,6 +541,7 @@ def main():
                 "ERL_EPMD_PORT": str(port), "ERL_EPMD_ADDRESS": "127.0.0.1",
                 # Exactly one synthetic -setcookie for ordinary Mix invocations.
                 "ERL_FLAGS": f"+S 4:4 -setcookie {cookie} -kernel inet_dist_use_interface {{127,0,0,1}}",
+                "ARBOR_KERNEL_PATH": str(work / "unpacked/arbor_kernel"),
                 "ARBOR_SUPPORT_PATH": str(work / "unpacked/arbor_support"),
                 "SUPPORT_COLD_COOKIE_SHA256": cookie_sha256,
                 "SUPPORT_COLD_C_SHA256": published["arbor_support"][c_source],
@@ -485,6 +581,7 @@ def main():
         for name, spec in PACKAGES.items():
             producer = work / ("producer-" + name)
             env = environment("producer-" + name, work / ("producer-deps-" + name))
+            env.pop("ARBOR_KERNEL_PATH", None)
             env.pop("ARBOR_SUPPORT_PATH", None)
             archive = work / "hex-output" / f"{name}-{spec['version']}.tar"
             # Hex builds publication inputs/metadata, not producer BEAM outputs.
@@ -493,6 +590,8 @@ def main():
             state.setdefault("hex_archives", {})[name] = unpack_archive(
                 archive, work / "unpacked" / name, published[name], work / "metadata" / (name + ".config")
             )
+            install_project_lock(work / "unpacked" / name, lock)
+            project_locks.append("unpacked/" + name)
             save()
         consumer = work / "consumer"
         env = environment("consumer", work / "consumer-deps")
@@ -505,6 +604,11 @@ def main():
                     ["compile", "--no-deps-check", "--force", "--warnings-as-errors"])
         command("consumer-strict-compile", consumer, env, ["compile", "--warnings-as-errors"])
         command("consumer-verify", consumer, env, ["run", "--no-compile", "-e", CONSUMER_PROBE])
+        metadata_results = [json.loads(line.split("=", 1)[1])
+                            for line in (work / "consumer-verify.stdout.log").read_text().splitlines()
+                            if line.startswith("SUPPORT_QUALIFICATION_RESULT=")]
+        require(len(metadata_results) == 1, "Missing/ambiguous archive metadata proof")
+        validate_archive_metadata(metadata_results[0].get("archive_metadata"))
         release = work / "release"
         command("release-build", consumer, env,
                 ["release", "support_standalone_consumer", "--path", str(release)])
@@ -514,7 +618,9 @@ def main():
             require(not re.search(r"-(?:setcookie|name|sname)\b", active), "Unqualified release VM identity flags")
         hidden = work / "source-hidden"
         hidden.mkdir(mode=0o700)
-        for name in ("producer-arbor_support", "producer-deps-arbor_support", "unpacked", "consumer", "consumer-deps",
+        hidden_inputs = [item for name in PACKAGES
+                         for item in ("producer-" + name, "producer-deps-" + name)]
+        for name in (*hidden_inputs, "unpacked", "consumer", "consumer-deps",
                      "tool-archives", "mix-home", "hex-home"):
             (work / name).rename(hidden / name)
         release_env = environment("release", work / "unused-release-deps")
@@ -539,6 +645,8 @@ def main():
             require(len(results) == 1, f"Missing/ambiguous qualification result: {label}")
             state[label] = results[0]
             require(results[0].get("cursor_check_groups") == 7, f"Missing public Cursor acceptance groups: {label}")
+            require(results[0].get("prerequisite_check_groups") == 3,
+                    f"Missing public prerequisite acceptance groups: {label}")
             require("Elixir.Arbor.Common.Pagination.Cursor" in results[0]["code_paths"],
                     f"Missing support-owned Cursor module proof: {label}")
         require(state["source-hidden-release-verify"]["mix_available"] is False, "Mix is present in release")

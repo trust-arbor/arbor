@@ -25,7 +25,71 @@ defmodule ArborAgent.MixProject do
   def application do
     [
       extra_applications: [:logger],
-      mod: {Arbor.Agent.Application, []}
+      mod: {Arbor.Agent.Application, []},
+      env: [
+        arbor_feature: Arbor.Agent.Feature,
+        arbor_feature_metadata: %{
+          id: :agent,
+          requires: [:core],
+          dependency_role: :fixed_host_prerequisite,
+          contribution_scope: :direct_application_entrypoint,
+          snapshot_required_keys: [:start_children],
+          snapshot_conditional_required_keys: %{
+            start_children: %{
+              true => [
+                :profile_backend,
+                :user_config_backend,
+                :recovery_backend,
+                :recovery_durability,
+                :reconciliation_backend,
+                :reconciliation_durability,
+                :system_lifecycle_token
+              ],
+              false => []
+            }
+          },
+          public_child_ids: [
+            :arbor_agents_pg,
+            Arbor.Agent.ExecutorRegistry,
+            Arbor.Agent.ReasoningLoopRegistry,
+            Arbor.Agent.MonitorLoopRegistry,
+            Arbor.Agent.ActionCycleRegistry,
+            Arbor.Agent.MaintenanceRegistry,
+            Arbor.Agent.RuntimeAdmissionRegistry,
+            Arbor.Agent.RuntimeAdmission.Supervisor,
+            :arbor_agent_profiles,
+            Arbor.Agent.ProfileAuthorityOwner,
+            :arbor_user_config,
+            Arbor.Agent.Registry,
+            Arbor.Agent.SummaryCache,
+            Arbor.Agent.Fitness,
+            Arbor.Agent.SessionManager,
+            Arbor.Agent.Orchestration.TaskSupervisor,
+            :arbor_agent_task_control_recovery,
+            :arbor_agent_template_authority_reconciliation,
+            Arbor.Agent.Orchestration.TaskStore,
+            Arbor.Agent.Orchestration.LeaseGrantOwner,
+            Arbor.Agent.ActionCycleSupervisor,
+            Arbor.Agent.MaintenanceSupervisor,
+            Arbor.Agent.Supervisor,
+            Arbor.Agent.UserSupervisor,
+            Arbor.Agent.SystemLifecycleAuthority,
+            Arbor.Agent.Bootstrap,
+            Arbor.Agent.Reconciler
+          ],
+          sources: %{
+            application: Arbor.Agent.Application,
+            action_catalog: :no_additional_direct_global_contribution_declared,
+            uri_provider: :no_additional_direct_global_contribution_declared,
+            startup_effects: [
+              :identity_alias_resolver_registration,
+              :lifecycle_reference_creation,
+              :post_start_migration,
+              :post_start_template_warmup
+            ]
+          }
+        }
+      ]
     ]
   end
 
@@ -61,7 +125,7 @@ defmodule ArborAgent.MixProject do
       # L3 — public spawn-capable timeout ceiling for legacy coding envelope bounds.
       {:arbor_shell, in_umbrella: true},
       {:arbor_ai, in_umbrella: true},
-      {:arbor_llm, in_umbrella: true},
+      {:arbor_llm, "~> 0.1.0", path: "../../packages/arbor_llm", env: Mix.env()},
       {:yaml_elixir, "~> 2.0"},
       {:jido, override: true},
       {:jido_action, override: true},

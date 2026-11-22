@@ -312,7 +312,7 @@ if config_env() != :test do
 
     url when is_binary(url) and byte_size(url) in 1..4_096 ->
       if String.valid?(url) and String.trim(url) == url do
-        config :arbor_orchestrator, :lm_studio, base_url: url
+        config :arbor_llm, :lm_studio, base_url: url
       else
         raise "ARBOR_LM_STUDIO_BASE_URL must be a nonempty UTF-8 URL without surrounding whitespace (at most 4096 bytes)"
       end
@@ -954,7 +954,7 @@ ollama_base_url = System.get_env("ARBOR_OLLAMA_BASE_URL") || "http://localhost:1
 # and calls "#{base_url}/api/embed" — bare URL, no /v1.
 config :arbor_ai, :ollama, base_url: ollama_base_url
 
-# Text-gen path: ProviderRegistry reads `config :arbor_orchestrator, :ollama,
+# Text-gen path: ProviderRegistry reads `config :arbor_llm, :ollama,
 # base_url` for the OpenAI-compatible endpoint — needs the /v1 suffix.
 # A cloud council must not silently move the embedding path off-host.
 ollama_chat_base_url =
@@ -970,7 +970,7 @@ ollama_v1_base_url =
 
 # OLLAMA_API_KEY is only needed when the text-generation URL points at a hosted
 # endpoint (https://ollama.com); a local daemon ignores the bearer entirely.
-config :arbor_orchestrator, :ollama,
+config :arbor_llm, :ollama,
   base_url: ollama_v1_base_url,
   api_key: System.get_env("OLLAMA_API_KEY")
 

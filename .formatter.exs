@@ -18,6 +18,7 @@ breeze_locals =
     "packages/arbor_custody",
     "packages/arbor_support",
     "packages/arbor_oauth",
+    "packages/arbor_llm",
     "packages/arbor_capabilities",
     "packages/arbor_capabilities_signals",
     "packages/arbor_capabilities_oidc",

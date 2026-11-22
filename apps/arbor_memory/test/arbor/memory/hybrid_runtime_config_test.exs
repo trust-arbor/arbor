@@ -19,7 +19,7 @@ defmodule Arbor.Memory.HybridRuntimeConfigTest do
 
     app_previous =
       Enum.map(
-        [{:arbor_orchestrator, :lm_studio}, {:arbor_llm, :trusted_proxy_endpoints}],
+        [{:arbor_llm, :lm_studio}, {:arbor_llm, :trusted_proxy_endpoints}],
         fn {app, key} -> {app, key, Application.fetch_env(app, key)} end
       )
 
@@ -310,7 +310,7 @@ defmodule Arbor.Memory.HybridRuntimeConfigTest do
     assert runtime[:arbor_orchestrator][:private_conversation_memory][:base_url] ==
              "http://127.0.0.2:11434/v1"
 
-    assert runtime[:arbor_orchestrator][:ollama][:base_url] == "http://127.0.0.3:11434/v1"
+    assert runtime[:arbor_llm][:ollama][:base_url] == "http://127.0.0.3:11434/v1"
     assert Keyword.fetch(runtime[:arbor_llm] || [], :trusted_proxy_endpoints) == :error
   end
 
@@ -318,17 +318,17 @@ defmodule Arbor.Memory.HybridRuntimeConfigTest do
        %{root: root} do
     put_enabled()
     Application.delete_env(:arbor_llm, :trusted_proxy_endpoints)
-    Application.delete_env(:arbor_orchestrator, :lm_studio)
+    Application.delete_env(:arbor_llm, :lm_studio)
     runtime = read_runtime(root)
-    assert Keyword.fetch(runtime[:arbor_orchestrator] || [], :lm_studio) == :error
+    assert Keyword.fetch(runtime[:arbor_llm] || [], :lm_studio) == :error
 
     assert {:error, :endpoint_origin_not_trusted} =
              Arbor.LLM.validate_endpoint(@selector_base, {:req_llm_base, "lm_studio"})
 
     System.put_env("ARBOR_LM_STUDIO_BASE_URL", @selector_base)
     runtime = read_runtime(root)
-    assert runtime[:arbor_orchestrator][:lm_studio] == [base_url: @selector_base]
-    Application.put_env(:arbor_orchestrator, :lm_studio, runtime[:arbor_orchestrator][:lm_studio])
+    assert runtime[:arbor_llm][:lm_studio] == [base_url: @selector_base]
+    Application.put_env(:arbor_llm, :lm_studio, runtime[:arbor_llm][:lm_studio])
 
     assert {:ok, @selector_base} =
              Arbor.LLM.validate_endpoint(@selector_base, {:req_llm_base, "lm_studio"})
@@ -341,15 +341,15 @@ defmodule Arbor.Memory.HybridRuntimeConfigTest do
 
   test "LM Studio endpoint bridge preserves unset and test configuration and refuses malformed labels",
        %{root: root} do
-    existing = [arbor_orchestrator: [lm_studio: [base_url: "http://127.0.0.2:1234/v1"]]]
+    existing = [arbor_llm: [lm_studio: [base_url: "http://127.0.0.2:1234/v1"]]]
 
-    assert Reader.merge(existing, read_runtime(root))[:arbor_orchestrator][:lm_studio] ==
-             existing[:arbor_orchestrator][:lm_studio]
+    assert Reader.merge(existing, read_runtime(root))[:arbor_llm][:lm_studio] ==
+             existing[:arbor_llm][:lm_studio]
 
     System.put_env("ARBOR_LM_STUDIO_BASE_URL", @selector_base)
 
-    assert Reader.merge(existing, read_runtime(root, :test))[:arbor_orchestrator][:lm_studio] ==
-             existing[:arbor_orchestrator][:lm_studio]
+    assert Reader.merge(existing, read_runtime(root, :test))[:arbor_llm][:lm_studio] ==
+             existing[:arbor_llm][:lm_studio]
 
     for value <- ["", " leading", "trailing ", String.duplicate("x", 4097)] do
       System.put_env("ARBOR_LM_STUDIO_BASE_URL", value)

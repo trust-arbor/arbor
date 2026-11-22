@@ -1,0 +1,154 @@
+defmodule Arbor.LLM.Conformance81Test do
+  use ExUnit.Case, async: false
+
+  alias Arbor.LLM.TestSupport.TransportContract
+  @moduletag :fast
+
+  alias Arbor.LLM.Client
+
+  alias Arbor.LLM.ConfigurationError
+
+  alias Arbor.LLM.Request
+
+  alias Arbor.LLM.Response
+
+  defmodule Conformance81Adapter do
+    @behaviour Arbor.LLM.ProviderAdapter
+
+    @impl true
+    def provider, do: "conformance81"
+
+    @impl true
+    def complete(%Request{} = request, _opts) do
+      {:ok, %Response{text: "ok:" <> request.model, finish_reason: :stop, raw: %{}}}
+    end
+  end
+
+  test "8.1 from_env raises when neither default provider nor provider credentials exist" do
+    # Clear every cloud provider's env key (derived from ProviderRegistry
+    # so the test stays correct as req_llm adds providers — Session 6.6
+    # exposed ~19 cloud providers vs the historical 7).
+    env =
+      Arbor.LLM.ProviderRegistry.list_cloud()
+      |> Enum.map(&Arbor.LLM.ProviderRegistry.default_env_key/1)
+      |> Enum.reject(&is_nil/1)
+      |> Enum.into(%{"UNIFIED_LLM_DEFAULT_PROVIDER" => nil}, &{&1, nil})
+
+    without_config_default_provider(fn ->
+      with_env(env, fn ->
+        assert_raise ConfigurationError, fn ->
+          Client.from_env(
+            discover_cli: false,
+            discover_local: false,
+            discover_oauth: false,
+            discover_acp: false,
+            discover_keyless: false
+          )
+        end
+      end)
+    end)
+  end
+
+  # The hermetic gating lane sets `config :arbor_llm, default_provider:` so
+  # `Client.from_env/1` can construct without UNIFIED_LLM_DEFAULT_PROVIDER.
+  # The 8.1 "nothing configured" contract must clear that config source too.
+  defp without_config_default_provider(fun) do
+    previous = Application.get_env(:arbor_llm, :default_provider)
+    Application.delete_env(:arbor_llm, :default_provider)
+
+    try do
+      fun.()
+    after
+      if previous != nil do
+        Application.put_env(:arbor_llm, :default_provider, previous)
+      end
+    end
+  end
+
+  test "8.1 supports default client storage and model catalog inspection" do
+    :ok = Client.clear_default_client()
+    on_exit(fn -> Client.clear_default_client() end)
+
+    catalog = %{
+      "conformance81" => [
+        %{id: "gpt-5", family: "gpt-5", modalities: [:text, :tools]}
+      ]
+    }
+
+    client =
+      Client.new(default_provider: "conformance81", model_catalog: catalog)
+      |> Client.register_adapter(Conformance81Adapter)
+
+    assert :ok = Client.set_default_client(client)
+    assert %Client{default_provider: "conformance81"} = Client.default_client()
+
+    models = Client.list_models(client)
+    assert Enum.any?(models, &(&1.id == "gpt-5"))
+    assert {:ok, info} = Client.get_model_info(client, "gpt-5")
+    assert info.family == "gpt-5"
+  end
+
+  test "8.1 complete middleware wraps adapter calls in declared order" do
+    TransportContract.setup([
+      TransportContract.route("conformance81", "demo-mw", :public, nil)
+    ])
+
+    middleware = fn req, next ->
+      req = %{req | model: req.model <> "-mw"}
+      next.(req)
+    end
+
+    client =
+      Client.new(default_provider: "conformance81", middleware: [middleware])
+      |> Client.register_adapter(Conformance81Adapter)
+
+    request = %Request{provider: "conformance81", model: "demo", messages: []}
+    assert {:ok, response} = Client.complete(client, request)
+    assert response.text == "ok:demo-mw"
+  end
+
+  defp with_env(overrides, fun) do
+    keys = Map.keys(overrides)
+    previous = Enum.into(keys, %{}, fn key -> {key, System.get_env(key)} end)
+
+    try do
+      Enum.each(overrides, fn {key, value} ->
+        if value == nil, do: System.delete_env(key), else: System.put_env(key, value)
+      end)
+
+      without_configured_provider_keys(fun)
+    after
+      Enum.each(previous, fn {key, value} ->
+        if value == nil, do: System.delete_env(key), else: System.put_env(key, value)
+      end)
+    end
+  end
+
+  # `ProviderRegistry.env_available?/1` is satisfied by an OS env var OR a key
+  # in ReqLLM's config store (`Application.get_env(:req_llm, :<p>_api_key)`),
+  # which `.env` populates at boot. Clearing only the env vars therefore leaves
+  # providers "available" and no ConfigurationError is raised — this test then
+  # passes or fails on whether the developer happens to have keys loaded.
+  # Clear both, and restore both.
+  defp without_configured_provider_keys(fun) do
+    config_keys =
+      Arbor.LLM.ProviderRegistry.list_cloud()
+      |> Enum.map(&Arbor.LLM.ProviderRegistry.req_llm_atom/1)
+      |> Enum.reject(&is_nil/1)
+      |> Enum.map(&ReqLLM.Keys.config_key/1)
+
+    previous =
+      Enum.into(config_keys, %{}, fn key -> {key, Application.get_env(:req_llm, key)} end)
+
+    try do
+      Enum.each(config_keys, &Application.delete_env(:req_llm, &1))
+      fun.()
+    after
+      Enum.each(previous, fn {key, value} ->
+        if is_nil(value),
+          do: Application.delete_env(:req_llm, key),
+          else: Application.put_env(:req_llm, key, value)
+      end)
+    end
+  end
+end

@@ -17,6 +17,7 @@ defmodule Arbor.KernelRuntime do
     deps: [
       Arbor.Contracts.Security,
       Arbor.Common,
+      Arbor.Common.SafePath,
       Arbor.Contracts,
       Arbor.Signals,
       Arbor.Monitor,

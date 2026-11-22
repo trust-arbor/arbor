@@ -41,7 +41,7 @@ defmodule Arbor.Orchestrator.CodeReviewCouncilExampleTest do
   @default_key "~/.claude/arbor-personal/claude_cli_mbp.arbor.key"
 
   setup_all do
-    Application.put_env(:arbor_orchestrator, :discover_local_providers, true)
+    Application.put_env(:arbor_llm, :discover_local_providers, true)
     Arbor.LLM.Client.clear_default_client()
 
     case Process.whereis(Arbor.Security.Identity.Registry) do

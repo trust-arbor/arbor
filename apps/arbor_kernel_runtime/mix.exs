@@ -54,7 +54,41 @@ defmodule Arbor.KernelRuntime.MixProject do
     [
       extra_applications: [:logger, :crypto],
       included_applications: [:arbor_signals],
-      mod: {Arbor.KernelRuntime.Application, []}
+      mod: {Arbor.KernelRuntime.Application, []},
+      env: [
+        arbor_feature: Arbor.KernelRuntime.Feature,
+        arbor_feature_metadata: %{
+          id: :core,
+          requires: [],
+          dependency_role: :fixed_host,
+          contribution_scope: :direct_application_entrypoint,
+          snapshot_required_keys: [:start_profile, :profile_admission],
+          public_child_ids: [
+            Arbor.KernelRuntime.BootProfileBinding,
+            Arbor.KernelRuntime.ProviderGate,
+            Arbor.Common.Application,
+            Arbor.Signals.Application,
+            Arbor.Monitor.Application
+          ],
+          sources: %{
+            application: %{
+              path: "apps/arbor_kernel_runtime/lib/arbor/kernel_runtime/application.ex",
+              sha256: "6f2a075b1f38b82fdb64e9ee3941b312bbc5c832c497749c58a244e800884255"
+            },
+            gate_builder: %{
+              path: "apps/arbor_kernel_runtime/lib/arbor/kernel_runtime.ex",
+              sha256: "c76e75f02d094cdfecd50c4bad169976185e00ba996a2cc99e14da87ab9c4210"
+            },
+            gate_declaration: %{
+              path: "apps/arbor_kernel_runtime/lib/arbor/kernel_runtime/provider_gate.ex",
+              sha256: "46bfd8ba88739f26756fd7004b2d2f5ab20db85e44f66b6e8f5f456a138d66f7"
+            },
+            direct_global_action_catalog: :no_additional_contribution_declared_here,
+            direct_global_uri_provider: :no_additional_contribution_declared_here,
+            observation: :source_declaration
+          }
+        }
+      ]
     ]
   end
 

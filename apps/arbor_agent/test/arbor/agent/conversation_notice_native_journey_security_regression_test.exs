@@ -167,16 +167,6 @@ defmodule Arbor.Agent.ConversationNoticeNativeJourneySecurityRegressionTest do
       )
     end
 
-    if Process.whereis(Arbor.Trust.Store) == nil do
-      start_supervised!(
-        {Arbor.Trust.Store,
-         persistence: :durable,
-         durable_backend: Arbor.Persistence.QueryableStore.Postgres,
-         durable_backend_opts: [repo: AuditRepo],
-         durable_collection: "native_notice_trust_profiles"}
-      )
-    end
-
     # The default test namespace permits OpenAuthorizer and starts no Bus. Use
     # the real capability subscription authorizer for the unprivileged witness.
     for {key, value} <- [
@@ -195,6 +185,17 @@ defmodule Arbor.Agent.ConversationNoticeNativeJourneySecurityRegressionTest do
     # unrestricted; security.* still requires a principal.
     assert :ok = Arbor.Signals.ensure_supervised_local_runtime!()
     assert Arbor.Signals.healthy?()
+
+    if Process.whereis(Arbor.Trust.Store) == nil do
+      start_supervised!(
+        {Arbor.Trust.Store,
+         persistence: :durable,
+         durable_backend: Arbor.Persistence.QueryableStore.Postgres,
+         durable_backend_opts: [repo: AuditRepo],
+         durable_collection: "native_notice_trust_profiles"}
+      )
+    end
+
     on_exit(fn -> File.rm_rf!(root) end)
     {:ok, root: root}
   end

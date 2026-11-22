@@ -39,8 +39,8 @@ defmodule Arbor.Orchestrator.HelloWorldExampleTest do
     # registered as an adapter, so flip the flag back on and clear the
     # cached default client so the next call to Client.default_client/1
     # rebuilds with local providers in the adapter map.
-    original_flag = Application.get_env(:arbor_orchestrator, :discover_local_providers, true)
-    Application.put_env(:arbor_orchestrator, :discover_local_providers, true)
+    original_flag = Application.get_env(:arbor_llm, :discover_local_providers, true)
+    Application.put_env(:arbor_llm, :discover_local_providers, true)
     Arbor.LLM.Client.clear_default_client()
 
     # IdentityRegistry is normally started by the arbor_security supervision
@@ -59,7 +59,7 @@ defmodule Arbor.Orchestrator.HelloWorldExampleTest do
     end
 
     on_exit(fn ->
-      Application.put_env(:arbor_orchestrator, :discover_local_providers, original_flag)
+      Application.put_env(:arbor_llm, :discover_local_providers, original_flag)
       Arbor.LLM.Client.clear_default_client()
     end)
 

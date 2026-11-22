@@ -1,4 +1,5 @@
 Code.require_file("trusted_build_test_helpers.exs", __DIR__)
+Code.require_file("owned_native_test_observer.exs", __DIR__)
 
 defmodule Arbor.Shell.TrustedBuildSecurityRegressionTest do
   use ExUnit.Case, async: false
@@ -8,6 +9,13 @@ defmodule Arbor.Shell.TrustedBuildSecurityRegressionTest do
 
   alias Arbor.Shell
   alias Arbor.Shell.TrustedBuildTestHelpers, as: Helpers
+  alias Arbor.Shell.OwnedNativeTestObserver, as: NativeObserver
+
+  setup do
+    NativeObserver.start!(__MODULE__, self())
+    on_exit(fn -> NativeObserver.stop!(__MODULE__) end)
+    :ok
+  end
 
   test "security regression: the test-only lease facade is not exposed on Arbor.Shell" do
     refute function_exported?(Shell, :acquire_trusted_build_lease_for_test, 2)
@@ -34,6 +42,8 @@ defmodule Arbor.Shell.TrustedBuildSecurityRegressionTest do
     assert result.exit_code != 0
     refute File.exists?(marker)
 
+    NativeObserver.expect_ready!(__MODULE__, 1)
+
     refute Enum.any?(
              os_processes(),
              &String.contains?(&1.command, "arbor_shell_launcher trusted-build")
@@ -58,6 +68,8 @@ defmodule Arbor.Shell.TrustedBuildSecurityRegressionTest do
         assert {:ok, compile} = Shell.execute_trusted_build(lease, "compile")
         assert compile.exit_code == 0
         assert Task.await(watcher, 15_000) == true
+
+        NativeObserver.expect_ready!(__MODULE__, 3)
 
         refute Enum.any?(
                  os_processes(),
@@ -138,21 +150,7 @@ defmodule Arbor.Shell.TrustedBuildSecurityRegressionTest do
     """
   end
 
-  defp os_processes do
-    {output, 0} = System.cmd("ps", os_process_args(:os.type()))
-
-    output
-    |> String.split("\n", trim: true)
-    |> Enum.map(fn line ->
-      case String.split(String.trim(line), " ", parts: 2) do
-        [pid, command] -> %{pid: pid, command: command}
-        _other -> %{pid: "", command: line}
-      end
-    end)
-  end
-
-  defp os_process_args({:unix, :darwin}), do: ["-axww", "-o", "pid=,command="]
-  defp os_process_args(_other), do: ["-o", "pid=,args="]
+  defp os_processes, do: NativeObserver.processes(__MODULE__)
 
   defp compile_replace_environ_harness! do
     root = Path.join(System.tmp_dir!(), "arbor-tb-env-#{System.unique_integer([:positive])}")

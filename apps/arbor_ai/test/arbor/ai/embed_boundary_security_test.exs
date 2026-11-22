@@ -10,7 +10,7 @@ defmodule Arbor.AI.EmbedBoundarySecurityTest do
     original_bridge_client = :persistent_term.get(@bridge_client_key, :missing)
     original_openai = Application.get_env(:arbor_ai, :openai)
     original_ollama = Application.get_env(:arbor_ai, :ollama)
-    original_orchestrator_ollama = Application.get_env(:arbor_orchestrator, :ollama)
+    original_orchestrator_ollama = Application.get_env(:arbor_llm, :ollama)
     original_trusted = Application.get_env(:arbor_llm, :trusted_proxy_endpoints)
 
     :persistent_term.put(@bridge_client_key, Client.new())
@@ -18,7 +18,7 @@ defmodule Arbor.AI.EmbedBoundarySecurityTest do
     on_exit(fn ->
       restore_env(:arbor_ai, :openai, original_openai)
       restore_env(:arbor_ai, :ollama, original_ollama)
-      restore_env(:arbor_orchestrator, :ollama, original_orchestrator_ollama)
+      restore_env(:arbor_llm, :ollama, original_orchestrator_ollama)
       restore_env(:arbor_llm, :trusted_proxy_endpoints, original_trusted)
 
       case original_bridge_client do
@@ -86,7 +86,7 @@ defmodule Arbor.AI.EmbedBoundarySecurityTest do
 
     {base_url, server} = start_json_server(body)
     Application.put_env(:arbor_ai, :ollama, base_url: base_url)
-    Application.put_env(:arbor_orchestrator, :ollama, base_url: base_url <> "/v1")
+    Application.put_env(:arbor_llm, :ollama, base_url: base_url <> "/v1")
 
     assert {:error, reason} =
              Arbor.AI.embed_batch(["first", "second"],

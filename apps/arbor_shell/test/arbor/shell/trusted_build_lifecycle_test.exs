@@ -1,4 +1,5 @@
 Code.require_file("trusted_build_test_helpers.exs", __DIR__)
+Code.require_file("owned_native_test_observer.exs", __DIR__)
 
 defmodule Arbor.Shell.TrustedBuildLifecycleTest do
   use ExUnit.Case, async: false
@@ -10,6 +11,18 @@ defmodule Arbor.Shell.TrustedBuildLifecycleTest do
   alias Arbor.Shell.TrustedBuild
   alias Arbor.Shell.TrustedBuild.Lease
   alias Arbor.Shell.TrustedBuildTestHelpers, as: Helpers
+  alias Arbor.Shell.OwnedNativeTestObserver, as: NativeObserver
+
+  setup context do
+    if context[:metadata_launcher_absence_only] == true and match?({:unix, :darwin}, :os.type()) do
+      checkpoint = NativeObserver.metadata_launcher_absence_checkpoint!()
+      {:ok, metadata_launcher_absence_checkpoint: checkpoint}
+    else
+      NativeObserver.start!(__MODULE__, self())
+      on_exit(fn -> NativeObserver.stop!(__MODULE__) end)
+      :ok
+    end
+  end
 
   @darwin? match?({:unix, :darwin}, :os.type())
 
@@ -97,6 +110,7 @@ defmodule Arbor.Shell.TrustedBuildLifecycleTest do
         assert {:ok, result} = Shell.execute_trusted_build(lease, "compile")
         assert result.exit_code == 0
         assert result.timed_out == false
+        NativeObserver.expect_ready!(__MODULE__, 2)
         refute trusted_build_running?()
         {:ok, view} = Lease.view(lease)
         assert view["completed_phases"] == ["deps_get", "compile"]
@@ -115,6 +129,7 @@ defmodule Arbor.Shell.TrustedBuildLifecycleTest do
       try do
         assert {:ok, result} = Shell.execute_trusted_build(lease, "deps_get")
         assert result.exit_code != 0
+        NativeObserver.expect_ready!(__MODULE__, 1)
         refute trusted_build_running?()
 
         assert {:error, :trusted_build_phase_locked} =
@@ -127,14 +142,20 @@ defmodule Arbor.Shell.TrustedBuildLifecycleTest do
     end
   end
 
-  test "timeout and overflow lock and exhaust" do
+  @tag metadata_launcher_absence_only: true
+  test "timeout locks and exhausts without a surviving native launcher", context do
     if @darwin? do
       {timeout_lease, timeout_id, timeout_handle} = acquire_source!(:ok, :force_phase_timeout)
 
       try do
         assert {:ok, result} = Shell.execute_trusted_build(timeout_lease, "deps_get")
         assert result.timed_out == true or result.killed == true
-        refute trusted_build_running?()
+
+        assert :ok =
+                 NativeObserver.assert_metadata_launcher_absent!(
+                   context.metadata_launcher_absence_checkpoint
+                 )
+
         {:ok, view} = Lease.view(timeout_lease)
         assert view["locked"] == true
       after
@@ -142,7 +163,11 @@ defmodule Arbor.Shell.TrustedBuildLifecycleTest do
         _ = Shell.remove_owned_tree(timeout_id)
         assert :ok = Helpers.rm_fixture!(timeout_handle)
       end
+    end
+  end
 
+  test "overflow locks and exhausts" do
+    if @darwin? do
       {overflow_lease, overflow_id, overflow_handle} =
         acquire_source!(:ok, :force_output_overflow)
 
@@ -152,6 +177,7 @@ defmodule Arbor.Shell.TrustedBuildLifecycleTest do
         assert result.output_limit_exceeded == true or result.killed == true or
                  result.exit_code != 0
 
+        NativeObserver.expect_ready!(__MODULE__, 1)
         refute trusted_build_running?()
       after
         _ = Shell.release_trusted_build_lease(overflow_lease)
@@ -173,7 +199,9 @@ defmodule Arbor.Shell.TrustedBuildLifecycleTest do
           spawn(fn ->
             wait_until(fn ->
               state = :sys.get_state(lease.worker)
-              is_reference(state.cancel_id) and is_pid(state.port_owner_pid)
+
+              is_reference(state.cancel_id) and is_pid(state.port_owner_pid) and
+                NativeObserver.ready?(__MODULE__, 2)
             end)
 
             state = :sys.get_state(lease.worker)
@@ -189,6 +217,7 @@ defmodule Arbor.Shell.TrustedBuildLifecycleTest do
         assert match?({:ok, %{killed: true}}, result) or match?({:ok, %{cancelled: true}}, result) or
                  match?({:ok, %{exit_code: 137}}, result)
 
+        NativeObserver.expect_ready!(__MODULE__, 2)
         refute trusted_build_running?()
       after
         _ = Shell.release_trusted_build_lease(lease)
@@ -259,14 +288,17 @@ defmodule Arbor.Shell.TrustedBuildLifecycleTest do
 
       assert wait_until(fn ->
                case safe_worker_state(worker) do
-                 {:ok, st} -> st.in_flight == :compile
-                 :down -> false
+                 {:ok, st} ->
+                   st.in_flight == :compile and NativeObserver.ready?(__MODULE__, 2)
+
+                 :down ->
+                   false
                end
              end)
 
       Process.exit(owner, :kill)
       wait_until(fn -> not Process.alive?(owner) end)
-      refute trusted_build_running?()
+      NativeObserver.expect_ready!(__MODULE__, 2)
 
       assert wait_until(
                fn ->
@@ -284,11 +316,13 @@ defmodule Arbor.Shell.TrustedBuildLifecycleTest do
                        :down ->
                          true
                      end
-                 end
+                 end and not trusted_build_running?()
                end,
                10_000
              ),
              "owner-death settlement stalled: #{inspect(owner_death_state(worker))}"
+
+      refute trusted_build_running?()
 
       case Process.alive?(worker) && safe_worker_state(worker) do
         {:ok, st} ->
@@ -315,6 +349,7 @@ defmodule Arbor.Shell.TrustedBuildLifecycleTest do
       try do
         result = Shell.execute_trusted_build(lease, "deps_get")
         assert match?({:ok, _}, result) or match?({:error, _}, result)
+        NativeObserver.expect_ready!(__MODULE__, 1)
         refute trusted_build_running?()
         refute Enum.any?(os_processes(), &String.contains?(&1.command, "arbor-tb-fork-marker"))
       after
@@ -423,18 +458,7 @@ defmodule Arbor.Shell.TrustedBuildLifecycleTest do
     Enum.any?(os_processes(), &String.contains?(&1.command, "arbor_shell_launcher trusted-build"))
   end
 
-  defp os_processes do
-    {output, 0} = System.cmd("ps", ["-ax", "-o", "pid=,command="])
-
-    output
-    |> String.split("\n", trim: true)
-    |> Enum.map(fn line ->
-      case String.split(String.trim(line), " ", parts: 2) do
-        [pid, command] -> %{pid: pid, command: command}
-        _other -> %{pid: "", command: line}
-      end
-    end)
-  end
+  defp os_processes, do: NativeObserver.processes(__MODULE__)
 
   defp safe_worker_state(worker) do
     {:ok, :sys.get_state(worker)}

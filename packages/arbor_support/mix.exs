@@ -11,9 +11,12 @@ defmodule Arbor.Support.MixProject do
       start_permanent: Mix.env() == :prod,
       compilers: [:arbor_safe_path_reader, :boundary] ++ Mix.compilers(),
       boundary: [default: [type: :strict, check: [aliases: true]]],
-      deps: [{:boundary, "~> 0.10", runtime: false}],
+      deps: [
+        {:arbor_kernel, "~> 2.0.0-dev", path: "../arbor_kernel"},
+        {:boundary, "~> 0.10", runtime: false}
+      ],
       description:
-        "Filesystem safety, atom conversion, redaction and pagination cursors for Elixir",
+        "Filesystem safety, prompt sanitization, sensitivity screening and pagination for Elixir",
       source_url: @source_url,
       package: [
         licenses: ["MIT"],

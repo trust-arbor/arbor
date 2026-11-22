@@ -1,12 +1,21 @@
+Code.require_file("owned_native_test_observer.exs", __DIR__)
+
 defmodule Arbor.Shell.ReviewerSecurityRegressionTest do
   use ExUnit.Case, async: false
 
   alias Arbor.Shell
+  alias Arbor.Shell.OwnedNativeTestObserver, as: OwnedNative
   alias Arbor.Shell.ExecutablePolicy
   alias Arbor.Shell.ExecutionRegistry
 
   @moduletag :fast
   @moduletag :security_regression
+
+  setup do
+    OwnedNative.start!(__MODULE__, self())
+    on_exit(fn -> OwnedNative.stop!(__MODULE__) end)
+    :ok
+  end
 
   test "security regression: runtime PATH cannot substitute an executable identity" do
     root = fixture_root("path")
@@ -139,6 +148,7 @@ defmodule Arbor.Shell.ReviewerSecurityRegressionTest do
 
     ref = Process.monitor(caller)
     assert_receive {:async_started, {:ok, execution_id}}, 2_000
+    OwnedNative.adopt_session!(__MODULE__, {:execution, execution_id, caller})
 
     on_exit(fn -> _ = Shell.kill(execution_id) end)
 
@@ -169,6 +179,8 @@ defmodule Arbor.Shell.ReviewerSecurityRegressionTest do
                timeout: 5_000
              )
 
+    OwnedNative.adopt_session!(__MODULE__, {:execution, session_id, self()})
+
     on_exit(fn -> _ = Shell.stop_session(session_id) end)
     Process.exit(consumer, :kill)
 
@@ -186,6 +198,8 @@ defmodule Arbor.Shell.ReviewerSecurityRegressionTest do
                sandbox: :none,
                timeout: 30_000
              )
+
+    OwnedNative.adopt_session!(__MODULE__, {:execution, session_id, self()})
 
     on_exit(fn -> _ = Shell.stop_session(session_id) end)
 
@@ -205,7 +219,7 @@ defmodule Arbor.Shell.ReviewerSecurityRegressionTest do
                end)
              end)
 
-    assert {_output, 0} = System.cmd("/bin/kill", ["-KILL", Integer.to_string(launcher_pid)])
+    assert {_output, 0} = OwnedNative.kill!(__MODULE__, launcher_pid)
 
     assert eventually?(
              fn ->
@@ -232,6 +246,7 @@ defmodule Arbor.Shell.ReviewerSecurityRegressionTest do
                timeout: 5_000
              )
 
+    OwnedNative.expect_ready!(__MODULE__, 1)
     refute Enum.any?(os_processes(), &String.contains?(&1.command, "sleep #{duration}"))
   end
 
@@ -298,6 +313,8 @@ defmodule Arbor.Shell.ReviewerSecurityRegressionTest do
         assert map.exit_code != 0 or map.timed_out or Map.get(map, :killed) == true or
                  Map.get(map, :containment_failure) == true
 
+        OwnedNative.expect_ready!(__MODULE__, 1)
+
         # Match only a real git target with this unique base-path; never count
         # arbor_shell_launcher whose argv embeds the same flag during teardown.
         assert eventually?(fn ->
@@ -331,7 +348,7 @@ defmodule Arbor.Shell.ReviewerSecurityRegressionTest do
       end)
 
     assert launcher
-    assert {_out, 0} = System.cmd("/bin/kill", ["-KILL", Integer.to_string(launcher.pid)])
+    assert {_out, 0} = OwnedNative.kill!(__MODULE__, launcher.pid)
 
     assert {:ok, result} = Task.await(task, 15_000)
     assert result.exit_code == 137
@@ -463,28 +480,7 @@ defmodule Arbor.Shell.ReviewerSecurityRegressionTest do
     end
   end
 
-  defp os_processes do
-    {output, 0} = System.cmd("ps", ["-axo", "pid=,ppid=,pgid=,command="])
-
-    output
-    |> String.split("\n", trim: true)
-    |> Enum.flat_map(fn line ->
-      case Regex.run(~r/^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.+)$/, line) do
-        [_, pid, ppid, pgid, command] ->
-          [
-            %{
-              pid: String.to_integer(pid),
-              ppid: String.to_integer(ppid),
-              pgid: String.to_integer(pgid),
-              command: command
-            }
-          ]
-
-        _other ->
-          []
-      end
-    end)
-  end
+  defp os_processes, do: OwnedNative.processes(__MODULE__)
 
   defp os_process_alive?(pid), do: Enum.any?(os_processes(), &(&1.pid == pid))
 

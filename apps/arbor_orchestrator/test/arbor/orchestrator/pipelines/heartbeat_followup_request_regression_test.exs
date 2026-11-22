@@ -51,10 +51,10 @@ defmodule Arbor.Orchestrator.Pipelines.HeartbeatFollowupRequestRegressionTest do
   end
 
   setup do
-    prior_dispatcher = Application.get_env(:arbor_orchestrator, :llm_dispatcher)
+    prior_dispatcher = Application.get_env(:arbor_llm, :llm_dispatcher)
     prior_profile = Application.get_env(:arbor_ai, :provider_route_profile)
 
-    Application.put_env(:arbor_orchestrator, :llm_dispatcher, CapturingDispatcher)
+    Application.put_env(:arbor_llm, :llm_dispatcher, CapturingDispatcher)
     Application.put_env(:arbor_orchestrator, :heartbeat_followup_test_pid, self())
     Application.put_env(:arbor_ai, :provider_route_profile, %{enabled: false})
 
@@ -62,7 +62,7 @@ defmodule Arbor.Orchestrator.Pipelines.HeartbeatFollowupRequestRegressionTest do
       Path.join(System.tmp_dir!(), "hb-followup-#{System.unique_integer([:positive])}")
 
     on_exit(fn ->
-      restore_env(:arbor_orchestrator, :llm_dispatcher, prior_dispatcher)
+      restore_env(:arbor_llm, :llm_dispatcher, prior_dispatcher)
       Application.delete_env(:arbor_orchestrator, :heartbeat_followup_test_pid)
       restore_env(:arbor_ai, :provider_route_profile, prior_profile)
       File.rm_rf(logs_root)

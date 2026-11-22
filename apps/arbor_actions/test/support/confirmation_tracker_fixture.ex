@@ -22,7 +22,12 @@ defmodule Arbor.Actions.ConfirmationTrackerFixture do
 
       nil ->
         {:ok, _} = Application.ensure_all_started(:arbor_trust)
-        {:ok, _} = Arbor.Trust.ConfirmationTracker.start_link(test_isolated_owner: true)
+        {:ok, pid} = Arbor.Trust.ConfirmationTracker.start_link(test_isolated_owner: true)
+
+        ExUnit.after_suite(fn _ ->
+          if Process.alive?(pid), do: GenServer.stop(pid)
+        end)
+
         :ok
     end
   end

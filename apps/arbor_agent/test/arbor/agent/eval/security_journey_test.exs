@@ -17,7 +17,7 @@ defmodule Arbor.Agent.Eval.SecurityJourneyTest do
       {:arbor_historian, :durable_event_log_target},
       {:arbor_llm, :tool_invocation_auditor},
       {:arbor_llm, :pipeline},
-      {:arbor_orchestrator, :lm_studio}
+      {:arbor_llm, :lm_studio}
     ]
 
     prior = Map.new(env, fn {app, key} -> {{app, key}, Application.fetch_env(app, key)} end)
@@ -403,7 +403,7 @@ defmodule Arbor.Agent.Eval.SecurityJourneyTest do
       :gen_tcp.listen(0, [:binary, active: false, reuseaddr: true, ip: {127, 0, 0, 1}])
 
     {:ok, {_, port}} = :inet.sockname(listener)
-    Application.put_env(:arbor_orchestrator, :lm_studio, base_url: "http://127.0.0.1:#{port}/v1")
+    Application.put_env(:arbor_llm, :lm_studio, base_url: "http://127.0.0.1:#{port}/v1")
     pid = spawn_link(fn -> serve(listener, owner, c, mode, 0) end)
 
     on_exit(fn ->

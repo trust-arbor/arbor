@@ -23,7 +23,9 @@ defmodule Arbor.Consensus.SensitivityPropagationSecurityRegressionTest do
     )
 
     on_exit(fn ->
-      if previous, do: Client.set_default_client(previous), else: Client.clear_default_client()
+      if previous,
+        do: :persistent_term.put({Client, :default_client}, previous),
+        else: Client.clear_default_client()
     end)
 
     :ok

@@ -69,6 +69,8 @@ defmodule Arbor.Dashboard.Live.GraduationSecurityRegressionTest do
 
     if Process.whereis(InteractionRegistry) == nil, do: start_supervised!(InteractionRegistry)
 
+    release_shared_trust_children!()
+
     start_supervised!({Agent, fn -> %{rows: %{}, fail: false} end}, id: Backend)
     |> Process.register(Backend)
 
@@ -199,6 +201,47 @@ defmodule Arbor.Dashboard.Live.GraduationSecurityRegressionTest do
     html = view |> element("[phx-click='graduation:accept']") |> render_click()
     assert html =~ "The automatic-execution rule was saved"
     assert_mode(ctx, :auto)
+  end
+
+  # Match the shared TrustTopology release/restore pattern, but include the
+  # tracker this fixture replaces. Only authenticated known supervisor children
+  # are stopped; their existing specs remain in place for exact restoration.
+  defp release_shared_trust_children! do
+    children = [ConfirmationTracker, Arbor.Trust.Manager, Store]
+
+    case Process.whereis(Arbor.Trust.Supervisor) do
+      nil ->
+        Enum.each(children, fn child -> assert Process.whereis(child) == nil end)
+
+      supervisor ->
+        Enum.each(children, fn child ->
+          case List.keyfind(Supervisor.which_children(supervisor), child, 0) do
+            {^child, pid, :worker, _modules} when is_pid(pid) ->
+              assert Process.whereis(child) == pid
+
+              assert {:ok, %{start: {^child, :start_link, [_opts]}} = spec} =
+                       :supervisor.get_childspec(supervisor, child)
+
+              on_exit(fn ->
+                assert Process.whereis(Arbor.Trust.Supervisor) == supervisor
+                assert {:ok, ^spec} = :supervisor.get_childspec(supervisor, child)
+                assert {:ok, restored} = Supervisor.restart_child(supervisor, child)
+                assert Process.whereis(child) == restored
+              end)
+
+              assert :ok = Supervisor.terminate_child(supervisor, child)
+
+            {^child, :undefined, :worker, _modules} ->
+              assert Process.whereis(child) == nil
+
+            nil ->
+              assert Process.whereis(child) == nil
+
+            _unexpected ->
+              flunk("shared Trust child ownership is unavailable")
+          end
+        end)
+    end
   end
 
   defp request!(ctx) do

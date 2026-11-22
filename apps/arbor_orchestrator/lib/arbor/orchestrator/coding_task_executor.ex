@@ -65,6 +65,7 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   alias Arbor.Contracts.Coding.{
     AdmissionFailure,
     BranchLifecycleDescriptor,
+    CanonicalJson,
     Diagnostic,
     Plan,
     ReadinessReport,
@@ -2913,19 +2914,9 @@ defmodule Arbor.Orchestrator.CodingTaskExecutor do
   end
 
   defp json_evidence_ref(value) do
-    encoded = value |> canonical_json() |> Jason.encode!()
+    encoded = CanonicalJson.encode!(value)
     "sha256:" <> sha256(encoded)
   end
-
-  defp canonical_json(value) when is_map(value) do
-    value
-    |> Enum.sort_by(fn {key, _value} -> key end)
-    |> Enum.map(fn {key, nested} -> {key, canonical_json(nested)} end)
-    |> Jason.OrderedObject.new()
-  end
-
-  defp canonical_json(value) when is_list(value), do: Enum.map(value, &canonical_json/1)
-  defp canonical_json(value), do: value
 
   defp resolve_template_path do
     path = Config.coding_pipeline_path()

@@ -1,0 +1,1599 @@
+defmodule Arbor.LLM.Adapter.ReqLLM do
+  @moduledoc """
+  Generic LLM adapter that delegates transport to the upstream
+  `req_llm` library.
+
+  Replaces — eventually, in Session 4 — the 12 per-provider HTTP
+  adapter modules under `Arbor.Orchestrator.UnifiedLLM.Adapters.*`.
+  Provider routing happens inside req_llm via the model-spec string
+  (`"anthropic:claude-3-5-sonnet"`, `"openai:gpt-4o"`,
+  `"openai:llama-3.2-3b-instruct"` with `base_url:` override for
+  local LMs), so a single adapter module covers everything req_llm
+  knows about — currently 19 providers including Bedrock, Vertex,
+  Azure, OpenRouter, the cloud usuals, and OpenAI-compatible
+  endpoints behind `base_url`.
+
+  ## Session 4 status
+
+  This module reached capability parity with the per-provider adapters
+  it will replace. **It is NOT yet wired into `Arbor.LLM.Client`
+  routing** — the existing per-provider adapters still handle live
+  traffic. The next session will:
+
+    1. Teach `Client.discover_env_adapters/1` to map provider strings
+       to this adapter as the default when no per-provider override
+       is registered, and
+    2. Delete the 11 cloud/local adapter modules and
+       `openai_compatible.ex` from arbor_orchestrator.
+
+  Until then, exercise this adapter directly:
+
+      iex> req = %Arbor.LLM.Request{provider: "anthropic", model: "claude-3-5-sonnet", messages: [...]}
+      iex> Arbor.LLM.Adapter.ReqLLM.complete(req, [])
+
+  ## What this adapter handles
+
+  | Concern | Where |
+  |---|---|
+  | Provider routing | model-spec string `provider:model` → req_llm provider registry |
+  | HTTP, auth, retry, SSE parsing | req_llm |
+  | `base_url:` override (Ollama, LM Studio, vLLM) | passed through `opts` |
+  | `provider_options:` passthrough (`num_ctx`, `repeat_penalty`, etc.) | passed through `opts` |
+  | Tool calls (encode + decode) | `translate_tools/1` + `extract_tool_call_parts/1` here |
+  | Streaming (`stream/2`) | `ReqLLM.stream_text/3` + `translate_stream_chunk/1` |
+  | Embeddings (`embed/3`) | `ReqLLM.Embedding.embed/3` |
+  | `reasoning_content` field extraction | `Arbor.LLM.PostProcessors` |
+  | Wrapped-JSON envelope extraction (gpt-oss-heretic et al) | `Arbor.LLM.PostProcessors` |
+  | `Arbor.LLM.Request` ↔ `ReqLLM.Message` translation | `translate_messages/1` here |
+  | `ReqLLM.Response` → `Arbor.LLM.Response` translation | `translate_response/2` here |
+
+  Structured output (`Arbor.LLM.generate_object/1`) is built on top of
+  `complete/2` at the facade layer, so it works for free.
+  """
+
+  @behaviour Arbor.LLM.ProviderAdapter
+
+  alias Arbor.Contracts.AI.{Capabilities, RuntimeContract}
+  alias Arbor.LLM.Boundary
+  alias Arbor.LLM.ContentPart
+  alias Arbor.LLM.Deadline
+  alias Arbor.LLM.Endpoint
+  alias Arbor.LLM.Eval.FixtureSet
+  alias Arbor.LLM.Adapter.ReqLLM.BoundedStream
+  alias Arbor.LLM.Message
+  alias Arbor.LLM.PostProcessors
+  alias Arbor.LLM.Call
+  alias Arbor.LLM.Pipeline
+  alias Arbor.LLM.OpenCodeZen
+  alias Arbor.LLM.ProviderRegistry
+  alias Arbor.LLM.Plugs.Usage
+  alias Arbor.LLM.Request
+  alias Arbor.LLM.LiveCompletionFormat
+  alias Arbor.LLM.Response
+  alias Arbor.LLM.RequestTimeoutError
+
+  @sentinel_provider "req_llm_generic"
+  @max_embedding_inputs 2_048
+  @max_embedding_input_bytes 4_194_304
+  @max_embedding_text_bytes 2_097_152
+  @max_model_bytes 512
+
+  # ── Behaviour callbacks ─────────────────────────────────────────────
+
+  @impl true
+  def provider, do: @sentinel_provider
+
+  @impl true
+  def runtime_contract do
+    # The generic adapter inherits whatever capabilities req_llm's
+    # provider for the model_spec actually supports. We advertise the
+    # union of what every provider req_llm currently knows about
+    # supports — callers that need provider-specific capability checks
+    # should consult `Arbor.LLM.ProviderCatalog` for the resolved
+    # capability map per provider, not this aggregate.
+    {:ok, contract} =
+      RuntimeContract.new(
+        provider: @sentinel_provider,
+        display_name: "ReqLLM (generic)",
+        type: :api,
+        capabilities:
+          Capabilities.new(
+            streaming: true,
+            tool_calls: true,
+            thinking: true,
+            vision: true,
+            structured_output: true,
+            embeddings: true
+          )
+      )
+
+    contract
+  end
+
+  @default_pipeline [
+    Arbor.LLM.Plugs.ResponseLimit,
+    Arbor.LLM.Plugs.EvalReplay,
+    Arbor.LLM.Plugs.Dispatch,
+    Arbor.LLM.Plugs.RateLimitBackoff,
+    Arbor.LLM.Plugs.EvalRecord,
+    Arbor.LLM.Plugs.Usage
+  ]
+
+  @doc false
+  def validate_eval_fixture_pipeline do
+    if pipeline() == @default_pipeline,
+      do: :ok,
+      else: {:error, :eval_fixture_unsupported_pipeline}
+  end
+
+  @doc false
+  def validate_live_completion_pipeline do
+    if pipeline() == @default_pipeline,
+      do: :ok,
+      else: {:error, :live_completion_pipeline_unsupported}
+  end
+
+  @impl true
+  @spec complete(Request.t(), keyword()) :: {:ok, Response.t()} | {:error, term()}
+  def complete(request, opts \\ [])
+
+  def complete(%Request{} = request, opts) do
+    opts = OpenCodeZen.carry_probe_authorization(opts)
+
+    with {:ok, opts, _timeout} <-
+           Deadline.normalize_transport_options(opts, request.receive_timeout),
+         {:ok, receipt} <- Deadline.receipt(opts) do
+      Deadline.run(
+        fn -> do_complete(request, opts) |> Boundary.completion(opts) end,
+        receipt,
+        RequestTimeoutError.exception(timeout_ms: receipt.timeout_ms)
+      )
+    end
+  end
+
+  def complete(_request, _opts), do: {:error, :invalid_req_llm_completion_request}
+
+  @doc """
+  Single-attempt completion: at most one real outbound Req after provider prepare.
+  """
+  @impl true
+  @spec complete_single_attempt(Request.t(), keyword()) :: {:ok, Response.t()} | {:error, term()}
+  def complete_single_attempt(request, opts \\ [])
+
+  def complete_single_attempt(%Request{} = request, opts) do
+    opts = OpenCodeZen.carry_probe_authorization(opts)
+
+    with {:ok, opts, _timeout} <-
+           Deadline.normalize_transport_options(opts, request.receive_timeout),
+         {:ok, receipt} <- Deadline.receipt(opts) do
+      Deadline.run(
+        fn -> do_complete(request, opts, true) |> Boundary.completion(opts) end,
+        receipt,
+        RequestTimeoutError.exception(timeout_ms: receipt.timeout_ms)
+      )
+    end
+  end
+
+  def complete_single_attempt(_request, _opts), do: {:error, :invalid_req_llm_completion_request}
+
+  defp do_complete(request, opts, single_attempt? \\ false) do
+    {usage_context, opts} = pop_provider_usage_context(opts)
+    {fixture_name, opts} = Keyword.pop(opts, :eval_fixture_set)
+    {live_requirement, opts} = Keyword.pop(opts, :require_live_pipeline)
+
+    with {:ok, live_pipeline} <-
+           admit_live_completion_pipeline(live_requirement, request, fixture_name, opts),
+         request <- normalize_live_completion_format(request, live_pipeline),
+         {:ok, fixture_scope} <- resolve_fixture_scope(fixture_name, request.provider),
+         {:ok, model_spec} <- build_model_spec(request),
+         messages <- translate_messages(request.messages),
+         {:ok, req_opts} <- completion_req_opts(request, opts, fixture_scope),
+         {:ok, %ReqLLM.Response{} = resp} <-
+           call_req_llm(
+             model_spec,
+             messages,
+             req_opts,
+             usage_context,
+             single_attempt?,
+             fixture_scope,
+             live_pipeline
+           ),
+         :ok <- validate_live_completion_result(resp, live_pipeline) do
+      {:ok, translate_response(resp, request)}
+    end
+  end
+
+  defp admit_live_completion_pipeline(nil, _request, _fixture, _opts), do: {:ok, nil}
+
+  defp admit_live_completion_pipeline(
+         true,
+         %Request{tools: [], tool_choice: nil} = request,
+         nil,
+         opts
+       ) do
+    if LiveCompletionFormat.valid?(request.provider_options) and
+         not Keyword.has_key?(opts, :provider_options) do
+      case pipeline() do
+        @default_pipeline -> {:ok, @default_pipeline}
+        _ -> {:error, :live_completion_pipeline_unsupported}
+      end
+    else
+      {:error, :live_completion_configuration_unsupported}
+    end
+  end
+
+  defp admit_live_completion_pipeline(true, _request, _fixture, _opts),
+    do: {:error, :live_completion_configuration_unsupported}
+
+  defp admit_live_completion_pipeline(_invalid, _request, _fixture, _opts),
+    do: {:error, :invalid_live_completion_requirement}
+
+  defp normalize_live_completion_format(request, nil), do: request
+
+  defp normalize_live_completion_format(request, _pipeline),
+    do: %{request | provider_options: LiveCompletionFormat.req_options(request.provider_options)}
+
+  defp validate_live_completion_result(_response, nil), do: :ok
+
+  defp validate_live_completion_result(%ReqLLM.Response{finish_reason: :stop} = response, _live) do
+    if ReqLLM.Response.tool_calls(response) == [],
+      do: :ok,
+      else: {:error, :invalid_live_completion_result}
+  end
+
+  defp validate_live_completion_result(_response, _live),
+    do: {:error, :invalid_live_completion_result}
+
+  @impl true
+  @spec stream(Request.t(), keyword()) :: Enumerable.t() | {:error, term()}
+  def stream(request, opts \\ [])
+
+  def stream(%Request{} = request, opts) do
+    opts = OpenCodeZen.carry_probe_authorization(opts)
+
+    with {:ok, opts, _timeout} <-
+           Deadline.normalize_transport_options(opts, request.receive_timeout),
+         {:ok, receipt} <- Deadline.receipt(opts) do
+      Deadline.run(
+        fn ->
+          {usage_context, opts} = pop_provider_usage_context(opts)
+
+          with {:ok, model_spec} <- build_model_spec(request),
+               messages <- translate_messages(request.messages),
+               {:ok, req_opts} <- validated_stream_opts(request, opts),
+               pipeline_call =
+                 run_pipeline_call(:stream, {model_spec, messages, req_opts}, usage_context),
+               {:ok, %BoundedStream{stream: stream}} <- pipeline_call.result do
+            translated = Stream.map(stream, &translate_bounded_stream_chunk/1)
+
+            # Internal provenance wrapper only — public Enumerable contract
+            # stays ordinary events for middleware/callers. Client.collect_stream/2
+            # peels provenance and finalizes exactly once after acceptance.
+            Usage.accounted_stream(
+              translated,
+              Usage.streaming_provenance(pipeline_call)
+            )
+          else
+            {:ok, _unowned_stream} -> {:error, :unowned_stream_producer}
+            {:error, _reason} = error -> error
+          end
+        end,
+        receipt,
+        RequestTimeoutError.exception(timeout_ms: receipt.timeout_ms)
+      )
+    end
+  end
+
+  def stream(_request, _opts), do: {:error, :invalid_req_llm_stream_request}
+
+  @doc """
+  Stream tokens via `callback` AND return the fully-assembled response.
+
+  The lazy `stream/2` path surfaces tool-call *names* but not their *arguments*
+  (in streaming, ReqLLM emits the tool-call chunk without assembled args — they
+  only land in `StreamResponse`'s reconstructed message). So a tool loop that
+  streams would get empty-argument tool calls.
+
+  `ReqLLM.StreamResponse.process_stream/2` consumes the stream exactly once,
+  fires `on_result`/`on_thinking` for real-time deltas, and returns a complete
+  `%ReqLLM.Response{}` whose `message.tool_calls` carry full arguments — which
+  `translate_response/2` turns into proper tool_call content parts. `callback`
+  receives `%Arbor.LLM.StreamEvent{}` values, matching the lazy-stream contract.
+  """
+  @spec complete_streaming(Request.t(), (Arbor.LLM.StreamEvent.t() -> any()), keyword()) ::
+          {:ok, Response.t()} | {:error, term()}
+  def complete_streaming(request, callback, opts \\ [])
+
+  def complete_streaming(%Request{} = request, callback, opts)
+      when is_function(callback, 1) do
+    opts = OpenCodeZen.carry_probe_authorization(opts)
+
+    with {:ok, opts, _timeout} <-
+           Deadline.normalize_transport_options(opts, request.receive_timeout),
+         {:ok, receipt} <- Deadline.receipt(opts) do
+      Deadline.run(
+        fn -> complete_streaming_result(request, callback, opts) end,
+        receipt,
+        RequestTimeoutError.exception(timeout_ms: receipt.timeout_ms)
+      )
+    end
+  end
+
+  def complete_streaming(_request, _callback, _opts),
+    do: {:error, :invalid_req_llm_streaming_request}
+
+  @doc """
+  Single-attempt stream-and-assemble. Finch streaming already one request;
+  policy is carried as a private boolean + Call.assign, never generic opts.
+  """
+  @impl true
+  @spec complete_streaming_single_attempt(
+          Request.t(),
+          (Arbor.LLM.StreamEvent.t() -> any()),
+          keyword()
+        ) :: {:ok, Response.t()} | {:error, term()}
+  def complete_streaming_single_attempt(request, callback, opts \\ [])
+
+  def complete_streaming_single_attempt(%Request{} = request, callback, opts)
+      when is_function(callback, 1) do
+    opts = OpenCodeZen.carry_probe_authorization(opts)
+
+    with {:ok, opts, _timeout} <-
+           Deadline.normalize_transport_options(opts, request.receive_timeout),
+         {:ok, receipt} <- Deadline.receipt(opts) do
+      Deadline.run(
+        fn -> complete_streaming_result(request, callback, opts, true) end,
+        receipt,
+        RequestTimeoutError.exception(timeout_ms: receipt.timeout_ms)
+      )
+    end
+  end
+
+  def complete_streaming_single_attempt(_request, _callback, _opts),
+    do: {:error, :invalid_req_llm_streaming_request}
+
+  defp complete_streaming_result(request, callback, opts, single_attempt? \\ false) do
+    case do_complete_streaming(request, callback, opts, single_attempt?) do
+      {:ok, response, provenance} ->
+        case Boundary.completion({:ok, response}, opts) do
+          {:ok, accepted} = result ->
+            _ = Usage.finalize_streaming(accepted, provenance)
+            result
+
+          {:error, _reason} = error ->
+            error
+        end
+
+      result ->
+        Boundary.completion(result, opts)
+    end
+  end
+
+  defp do_complete_streaming(request, callback, opts, single_attempt?) do
+    # Accumulate the thinking deltas: ReqLLM's process_stream forwards them to
+    # on_thinking but does NOT retain the full chain-of-thought on the assembled
+    # response (streaming captured only the first fragment, e.g. "Thinking"),
+    # whereas the non-streaming path returns it in full. Collect via the mailbox
+    # (process_stream is synchronous, so all deltas have arrived by the time it
+    # returns) and restore the full reasoning below.
+    collector = self()
+    {usage_context, opts} = pop_provider_usage_context(opts)
+
+    with {:ok, model_spec} <- build_model_spec(request),
+         messages <- translate_messages(request.messages),
+         {:ok, req_opts} <- validated_stream_opts(request, opts),
+         pipeline_call =
+           run_pipeline_call(
+             :stream,
+             {model_spec, messages, req_opts},
+             usage_context,
+             single_attempt?
+           ),
+         {:ok, %BoundedStream{} = stream_response} <-
+           pipeline_call.result,
+         {:ok, %ReqLLM.Response{} = resp} <-
+           BoundedStream.process(stream_response,
+             on_result: fn text ->
+               callback.(%Arbor.LLM.StreamEvent{type: :delta, data: %{text: text}})
+             end,
+             on_thinking: fn text ->
+               send(collector, {:arbor_reasoning_delta, text})
+               callback.(%Arbor.LLM.StreamEvent{type: :delta, data: %{thinking: text}})
+             end
+           ) do
+      reasoning = flush_reasoning_deltas([])
+      translated = translate_response(resp, request)
+
+      translated =
+        if String.length(reasoning) > String.length(translated.reasoning_content || "") do
+          %{translated | reasoning_content: reasoning}
+        else
+          translated
+        end
+
+      {:ok, translated, Usage.streaming_provenance(pipeline_call)}
+    end
+  end
+
+  # Drain accumulated thinking deltas from the mailbox (all present once
+  # process_stream has returned). Unique tag so it can't collide with other
+  # messages in the calling process.
+  defp flush_reasoning_deltas(acc) do
+    receive do
+      {:arbor_reasoning_delta, text} -> flush_reasoning_deltas([text | acc])
+    after
+      0 -> acc |> Enum.reverse() |> Enum.join("")
+    end
+  end
+
+  @doc false
+  def validate_live_embedding_pipeline do
+    case admit_live_embedding_pipeline(true) do
+      {:ok, _pipeline} -> :ok
+      {:error, _} = error -> error
+    end
+  end
+
+  defp admit_live_embedding_pipeline(nil), do: {:ok, nil}
+
+  defp admit_live_embedding_pipeline(true) do
+    case pipeline() do
+      @default_pipeline -> {:ok, @default_pipeline}
+      _ -> {:error, :live_embedding_pipeline_unsupported}
+    end
+  end
+
+  defp admit_live_embedding_pipeline(_), do: {:error, :invalid_live_embedding_requirement}
+
+  @impl true
+  @spec embed(texts :: [String.t()], model :: String.t(), opts :: keyword()) ::
+          {:ok, Arbor.LLM.ProviderAdapter.embed_batch_result()} | {:error, term()}
+  def embed(texts, model, opts) do
+    opts = OpenCodeZen.carry_probe_authorization(opts)
+
+    with {:ok, opts, _timeout} <- Deadline.normalize_transport_options(opts),
+         {:ok, receipt} <- Deadline.receipt(opts),
+         {require_live, opts} = Keyword.pop(opts, :require_live_pipeline),
+         {:ok, frozen_pipeline} <- admit_live_embedding_pipeline(require_live) do
+      Deadline.run(
+        fn ->
+          with :ok <- Boundary.embedding_inputs(texts) do
+            do_embed_request(texts, model, opts, frozen_pipeline)
+          end
+        end,
+        receipt,
+        RequestTimeoutError.exception(timeout_ms: receipt.timeout_ms)
+      )
+    end
+  end
+
+  defp do_embed_request(texts, model, opts, frozen_pipeline) do
+    with :ok <- validate_embedding_ingress(texts, model, opts) do
+      arbor_provider = resolve_embed_provider(opts, model)
+
+      cond do
+        arbor_provider == nil ->
+          {:error, {:invalid_request, :missing_provider_for_embedding}}
+
+        true ->
+          case build_embed_model_spec(arbor_provider, model) do
+            {:ok, model_spec} ->
+              do_embed(arbor_provider, model_spec, texts, opts, model, frozen_pipeline)
+
+            {:error, _} = err ->
+              err
+          end
+      end
+    end
+  end
+
+  # Normalize the embed provider to its canonical arbor_llm string (e.g. the
+  # `:lmstudio` atom from the arbor_ai option format → "lm_studio") BEFORE it
+  # flows to `ProviderRegistry` / `default_base_url_for/1`, which are binary-only.
+  # The generate_text path normalizes at its dispatch boundary; the embed path
+  # read `opts[:provider]` raw, so an atom provider crashed
+  # `default_base_url_for/1` with a FunctionClauseError — flooding the log on
+  # every memory embed. `nil` stays `nil` so the missing-provider branch fires.
+  defp resolve_embed_provider(opts, model) do
+    case Keyword.get(opts, :provider) || infer_provider_for_embedding(model) do
+      nil -> nil
+      provider -> ProviderRegistry.normalize(provider)
+    end
+  end
+
+  defp build_embed_model_spec(arbor_provider, model) do
+    if ProviderRegistry.local?(arbor_provider) or ProviderRegistry.keyless?(arbor_provider) do
+      build_local_model_struct(arbor_provider, model)
+    else
+      case ProviderRegistry.req_llm_atom(arbor_provider) do
+        nil -> {:error, {:unknown_provider, arbor_provider}}
+        atom when is_atom(atom) -> {:ok, Atom.to_string(atom) <> ":" <> model}
+      end
+    end
+  end
+
+  defp do_embed(arbor_provider, model_spec, texts, opts, model, frozen_pipeline) do
+    {usage_context, opts} = pop_provider_usage_context(opts)
+
+    usage_context =
+      if frozen_pipeline,
+        do: Map.put(usage_context || %{}, :live_embedding_pipeline, frozen_pipeline),
+        else: usage_context
+
+    with {:ok, req_opts} <- validated_embed_opts(arbor_provider, model, opts) do
+      input = %{
+        provider: arbor_provider,
+        model: model,
+        content: texts,
+        opts: sensitivity_opts(opts)
+      }
+
+      req_opts = Keyword.put(req_opts, :arbor_sensitivity, input)
+
+      case call_req_llm_embed(model_spec, texts, req_opts, usage_context) do
+        {:ok, indexed, usage} when is_list(indexed) ->
+          case Boundary.embedding_response_with_indices(
+                 %{indexed_embeddings: indexed, usage: usage || %{}},
+                 length(texts)
+               ) do
+            {:ok, authoritative, validated_usage} ->
+              embeddings = Enum.map(authoritative, & &1.embedding)
+
+              {:ok,
+               %{
+                 association_version: 1,
+                 embeddings: embeddings,
+                 indexed_embeddings: authoritative,
+                 model: embedding_model_id(model_spec),
+                 usage: validated_usage,
+                 dimensions: dimensions_of(embeddings)
+               }}
+
+            {:error, _reason} = error ->
+              error
+          end
+
+        {:error, _} = err ->
+          err
+
+        _invalid ->
+          {:error, :indexed_embedding_associations_required}
+      end
+    end
+  end
+
+  defp build_embed_opts(arbor_provider, opts) do
+    # Same local-LM base_url defaulting as build_req_opts/2 — Ollama
+    # serves embeddings at the OpenAI-compatible /v1/embeddings endpoint
+    # so the openai-via-base_url-override routing applies identically.
+    caller_base_url = Keyword.get(opts, :base_url)
+    inferred_base_url = caller_base_url || default_base_url_for(arbor_provider)
+
+    receive_timeout = Keyword.fetch!(opts, :receive_timeout)
+
+    # ReqLLM 1.25 rejects a top-level embedding :receive_timeout. The private
+    # cap still wins over any caller HTTP option and overrides the provider
+    # default of 30s inside prepare_embedding_request/4.
+    http_options =
+      arbor_provider
+      |> local_req_http_options(opts)
+      |> embed_http_options(receive_timeout)
+
+    []
+    |> maybe_merge(:base_url, inferred_base_url)
+    |> maybe_merge(:api_key, local_api_key(arbor_provider, opts))
+    |> maybe_merge(:provider_options, Keyword.get(opts, :provider_options))
+    |> maybe_merge(:dimensions, Keyword.get(opts, :dimensions))
+    |> maybe_merge(:req_http_options, http_options)
+    |> maybe_merge(:max_response_bytes, Keyword.get(opts, :max_response_bytes))
+  end
+
+  defp embed_http_options(nil, receive_timeout), do: [receive_timeout: receive_timeout]
+
+  defp embed_http_options(options, receive_timeout) when is_list(options),
+    do: Keyword.put(options, :receive_timeout, receive_timeout)
+
+  defp embed_http_options(options, receive_timeout) when is_map(options),
+    do: Map.put(options, :receive_timeout, receive_timeout)
+
+  defp call_req_llm_embed(%LLMDB.Model{} = model, texts, opts, usage_context) do
+    run_pipeline(:embed_local, {model, texts, opts}, usage_context)
+  end
+
+  defp call_req_llm_embed(model_spec, texts, opts, usage_context)
+       when is_binary(model_spec) do
+    run_pipeline(:embed_cloud, {model_spec, texts, opts}, usage_context)
+  end
+
+  defp dimensions_of([first | _]) when is_list(first), do: length(first)
+  defp dimensions_of(_), do: 0
+
+  defp embedding_model_id(%LLMDB.Model{id: id}) when is_binary(id), do: id
+  defp embedding_model_id(model_spec) when is_binary(model_spec), do: model_spec
+  defp embedding_model_id(_model_spec), do: "unknown"
+
+  # The embedding endpoint requires a provider, but `Arbor.LLM.Request`
+  # isn't used here (the ProviderAdapter behaviour passes texts + model
+  # directly). For OpenAI-compatible local servers, callers should pass
+  # `provider:` in opts; for cloud providers, the model_id often
+  # encodes the provider (e.g. `voyage-large-2`) — leave that to a
+  # future improvement and require explicit `provider:` for now.
+  defp infer_provider_for_embedding(_model), do: nil
+
+  defp validate_embedding_ingress(texts, model, opts) do
+    cond do
+      not is_binary(model) or model == "" or byte_size(model) > @max_model_bytes or
+          not String.valid?(model) ->
+        {:error, {:invalid_request, :bounded_model_required}}
+
+      not is_list(opts) or not Keyword.keyword?(opts) ->
+        {:error, {:invalid_request, :keyword_options_required}}
+
+      true ->
+        validate_embedding_texts(texts, 0, 0)
+    end
+  end
+
+  defp validate_embedding_texts([], 0, _bytes), do: {:error, {:invalid_request, :empty_input}}
+  defp validate_embedding_texts([], _count, _bytes), do: :ok
+
+  defp validate_embedding_texts(_texts, count, _bytes) when count >= @max_embedding_inputs,
+    do: {:error, {:invalid_request, {:input_count_exceeded, @max_embedding_inputs}}}
+
+  defp validate_embedding_texts([text | rest], count, bytes) when is_binary(text) do
+    next_bytes = bytes + byte_size(text)
+
+    cond do
+      byte_size(text) > @max_embedding_text_bytes ->
+        {:error, {:invalid_request, {:input_text_bytes_exceeded, @max_embedding_text_bytes}}}
+
+      next_bytes > @max_embedding_input_bytes ->
+        {:error, {:invalid_request, {:input_bytes_exceeded, @max_embedding_input_bytes}}}
+
+      not String.valid?(text) ->
+        {:error, {:invalid_request, :valid_utf8_input_required}}
+
+      true ->
+        validate_embedding_texts(rest, count + 1, next_bytes)
+    end
+  end
+
+  defp validate_embedding_texts(_improper_or_non_list, _count, _bytes),
+    do: {:error, {:invalid_request, :proper_string_list_required}}
+
+  # ── Streaming translation ──────────────────────────────────────────
+
+  @doc """
+  Translate a single `%ReqLLM.StreamChunk{}` into an
+  `%Arbor.LLM.StreamEvent{}`. Public for testability.
+  """
+  @spec translate_stream_chunk(ReqLLM.StreamChunk.t()) :: Arbor.LLM.StreamEvent.t()
+  def translate_stream_chunk(%ReqLLM.StreamChunk{} = chunk) do
+    case chunk.type do
+      :content ->
+        %Arbor.LLM.StreamEvent{type: :delta, data: %{text: chunk.text || ""}}
+
+      :thinking ->
+        %Arbor.LLM.StreamEvent{type: :delta, data: %{thinking: chunk.text || ""}}
+
+      :tool_call ->
+        %Arbor.LLM.StreamEvent{
+          type: :tool_call,
+          data: %{name: chunk.name, arguments: chunk.arguments || %{}}
+        }
+
+      :meta ->
+        %Arbor.LLM.StreamEvent{type: :step_finish, data: chunk.metadata || %{}}
+
+      _ ->
+        %Arbor.LLM.StreamEvent{type: :delta, data: %{raw: chunk}}
+    end
+  end
+
+  defp translate_bounded_stream_chunk(%ReqLLM.StreamChunk{} = chunk),
+    do: translate_stream_chunk(chunk)
+
+  defp translate_bounded_stream_chunk({:arbor_stream_error, reason}),
+    do: %Arbor.LLM.StreamEvent{type: :error, data: %{reason: reason}}
+
+  # ── Translation: Arbor → ReqLLM ─────────────────────────────────────
+
+  @doc """
+  Build the model_spec req_llm expects.
+
+  For cloud providers we return a `"provider:model"` string, which
+  triggers `ReqLLM.model/1`'s llm_db catalog lookup — that's how
+  pricing and capability metadata get attached to the response. For
+  local-LM Arbor providers (lm_studio, ollama) we construct an
+  `LLMDB.Model` struct directly because llm_db's catalog doesn't know
+  about arbitrary operator-pulled models like `nomic-embed-text` or
+  `llama-3.2-3b`. Without the struct path, `ReqLLM.model("openai:nomic-embed-text")`
+  returns `{:error, :not_found}` and dispatch fails before reaching
+  the network.
+
+  Public for testability — production code goes through `complete/2`.
+  """
+  @spec build_model_spec(Request.t()) :: {:ok, String.t() | LLMDB.Model.t()} | {:error, term()}
+  def build_model_spec(%Request{provider: nil}),
+    do: {:error, {:invalid_request, :missing_provider}}
+
+  def build_model_spec(%Request{model: nil}),
+    do: {:error, {:invalid_request, :missing_model}}
+
+  def build_model_spec(%Request{provider: provider, model: model})
+      when is_binary(provider) and is_binary(model) do
+    if ProviderRegistry.local?(provider) or ProviderRegistry.keyless?(provider) do
+      build_local_model_struct(provider, model)
+    else
+      case ProviderRegistry.req_llm_atom(provider) do
+        nil ->
+          # Unknown provider — pass through unchanged so an operator
+          # can use a provider req_llm knows about that we haven't
+          # mapped explicitly (e.g. amazon_bedrock, azure, groq).
+          {:ok, provider <> ":" <> model}
+
+        atom ->
+          spec = Atom.to_string(atom) <> ":" <> model
+
+          # The catalog lookup attaches pricing/capability metadata — but its
+          # snapshot lags fresh releases, so a just-launched slug (e.g. a new
+          # OpenRouter model) returns {:error, :not_found} and dispatch fails
+          # before the network. Fall back to a bare struct (as local providers
+          # do) so any provider-served model still runs; the response usage
+          # carries the tokens/cost either way.
+          case ReqLLM.model(spec) do
+            {:ok, _} -> {:ok, spec}
+            _ -> LLMDB.Model.new(%{id: model, model: model, provider: atom})
+          end
+      end
+    end
+  end
+
+  defp build_local_model_struct(arbor_provider, model) do
+    atom = ProviderRegistry.req_llm_atom(arbor_provider)
+
+    # The schema requires `id`, `model`, and `provider`. Everything
+    # else is nullish — that's what we want for local LMs since
+    # llm_db has no pricing or capability metadata for them.
+    LLMDB.Model.new(%{
+      id: model,
+      model: model,
+      provider: atom
+    })
+  end
+
+  @doc """
+  Look up the default base_url for a local-LM Arbor provider.
+
+  Returns the operator-configured value when set
+  (`config :arbor_llm, <provider>, base_url: ...`), the
+  hardcoded default otherwise, or `nil` if the provider isn't a
+  local-LM server. Public for testability.
+  """
+  @spec default_base_url_for(String.t()) :: String.t() | nil
+  def default_base_url_for(provider) when is_binary(provider) do
+    ProviderRegistry.default_base_url(provider)
+  end
+
+  @doc """
+  Translate Arbor `Message` structs into req_llm-shaped messages.
+
+  req_llm's `generate_text/3` accepts a list of `%ReqLLM.Message{}`
+  structs (or, equivalently, the `Context.user/assistant/system/tool`
+  helpers). Convert Arbor and persisted JSON text blocks into native
+  ReqLLM content parts before calling those helpers: they pass lists
+  through without normalizing their elements. User multimodal parts
+  retain their metadata; assistant content stays limited to text and tools.
+
+  Public for testability.
+  """
+  @spec translate_messages([Message.t()]) :: [ReqLLM.Message.t()]
+  def translate_messages(messages) when is_list(messages) do
+    Enum.map(messages, &translate_message/1)
+  end
+
+  defp translate_message(%Message{role: role, content: content} = msg) do
+    case role do
+      :user ->
+        ReqLLM.Context.user(reqllm_content(content))
+
+      :assistant ->
+        translate_assistant_content(content)
+
+      :system ->
+        ReqLLM.Context.system(reqllm_text_content(content))
+
+      :developer ->
+        ReqLLM.Context.system(reqllm_text_content(content))
+
+      :tool ->
+        # ReqLLM.Context doesn't expose a tool/1 helper; the tool_call_id
+        # lives in the Arbor message metadata. Build the ReqLLM.Message
+        # struct directly so we preserve it for the provider's
+        # tool-response shape.
+        tool_call_id =
+          Map.get(msg.metadata, "tool_call_id") || Map.get(msg.metadata, :tool_call_id)
+
+        # ReqLLM message content must be a list of ContentPart structs (keyed by
+        # :type), NOT raw strings — a bare string here raised "expected a map,
+        # got: <string>" when encoding the tool-result turn. Wrap the (already
+        # sanitized) tool-result text as a ReqLLM text part.
+        %ReqLLM.Message{
+          role: :tool,
+          content: content |> List.wrap() |> reqllm_text_content(),
+          tool_call_id: tool_call_id
+        }
+    end
+  end
+
+  # Session history uses JSON text blocks, while live callers may supply Arbor
+  # parts or native ReqLLM structs. Only recognized text shapes become text;
+  # unknown blocks and structs must never be inspected/stringified into prompts.
+  defp reqllm_content(content) when is_binary(content), do: content
+  defp reqllm_content(parts) when is_list(parts), do: Enum.map(parts, &reqllm_content_part/1)
+  defp reqllm_content(other), do: other
+
+  # Other roles retain their previous nontext representation. Only user
+  # messages have historically converted Arbor's image maps at this boundary.
+  defp reqllm_text_content(parts) when is_list(parts),
+    do: Enum.map(parts, &(reqllm_text_part(&1) || &1))
+
+  defp reqllm_text_content(other), do: other
+
+  defp reqllm_content_part(text) when is_binary(text), do: ReqLLM.Message.ContentPart.text(text)
+  defp reqllm_content_part(%ReqLLM.Message.ContentPart{} = p), do: p
+  defp reqllm_content_part(%_{} = other), do: other
+
+  defp reqllm_content_part(part) when is_map(part) do
+    reqllm_text_part(part) || reqllm_nontext_part(part)
+  end
+
+  defp reqllm_content_part(other), do: other
+
+  defp reqllm_text_part(text) when is_binary(text), do: ReqLLM.Message.ContentPart.text(text)
+
+  defp reqllm_text_part(%ReqLLM.Message.ContentPart{type: :text, text: text} = part)
+       when is_binary(text),
+       do: part
+
+  defp reqllm_text_part(%_{}), do: nil
+
+  defp reqllm_text_part(part) when is_map(part) do
+    # Require exactly one discriminator and one payload key. A mixed map must
+    # not turn a historical thinking/tool block into text by key precedence.
+    types = part |> Map.take([:kind, "kind", :type, "type"]) |> Map.values()
+    texts = part |> Map.take([:text, "text"]) |> Map.values()
+
+    case {types, texts} do
+      {[type], [text]} when type in [:text, "text"] and is_binary(text) ->
+        ReqLLM.Message.ContentPart.text(text)
+
+      _ ->
+        nil
+    end
+  end
+
+  defp reqllm_text_part(_), do: nil
+
+  # Arbor's image_base64 stores ALREADY-base64 data; ReqLLM.image/2 base64-encodes
+  # its input (expects raw bytes), which would double-encode. Build the data-URI
+  # directly as an image_url so the base64 passes through untouched.
+  defp reqllm_nontext_part(%{kind: :image, data: data, media_type: mt}) when is_binary(data),
+    do: ReqLLM.Message.ContentPart.image_url("data:#{mt || "image/png"};base64,#{data}")
+
+  defp reqllm_nontext_part(%{kind: :image, url: url}) when is_binary(url),
+    do: ReqLLM.Message.ContentPart.image_url(url)
+
+  defp reqllm_nontext_part(other), do: other
+
+  # An assistant message is either plain text (from history) OR a list of Arbor
+  # content parts (build_assistant_message emits `%{kind: :text}` +
+  # `%{kind: :tool_call}` maps for the tool-use continuation). ReqLLM has NO
+  # tool_call CONTENT part — tool calls live in the Message's `:tool_calls`
+  # field — and ReqLLM content parts are keyed by `:type`, so handing Arbor's
+  # `:kind`-keyed maps to `Context.assistant/1` as raw content raised
+  # `KeyError :type` on the continuation turn (the text part has no `:type`).
+  # Extract tool_call parts into `:tool_calls`; normalize text without losing
+  # its ordering or persisted JSON blocks. Keep nontext assistant content
+  # excluded before any provider codec, as in the original text/tool boundary.
+  defp translate_assistant_content(content) when is_binary(content),
+    do: ReqLLM.Context.assistant(content)
+
+  defp translate_assistant_content(parts) when is_list(parts) do
+    {tool_parts, content_parts} =
+      Enum.split_with(parts, &match?(%{kind: :tool_call}, &1))
+
+    tool_calls =
+      Enum.map(tool_parts, fn tc ->
+        {Map.get(tc, :name), Map.get(tc, :arguments), [id: Map.get(tc, :id)]}
+      end)
+
+    content =
+      content_parts
+      |> Enum.map(&reqllm_text_part/1)
+      |> Enum.reject(&is_nil/1)
+
+    ReqLLM.Context.assistant(content, tool_calls: tool_calls)
+  end
+
+  defp translate_assistant_content(other), do: ReqLLM.Context.assistant(other)
+
+  @doc """
+  Build the keyword opts req_llm accepts.
+
+  We forward the standard generation knobs (temperature, max_tokens,
+  reasoning_effort), the translated tools list, and any caller-supplied
+  `base_url:` / `provider_options:` overrides. Public for testability.
+  """
+  @spec build_req_opts(Request.t(), keyword()) :: keyword()
+  def build_req_opts(%Request{} = request, opts) do
+    request_provider_opts =
+      case request.provider_options do
+        m when is_map(m) and map_size(m) > 0 -> Map.to_list(m)
+        _ -> nil
+      end
+
+    # kimi k2.x-code/thinking models LOCK sampling params to fixed values and ERROR on any
+    # custom value (Moonshot docs). Omit temperature/top_p so the model uses its own defaults.
+    # Minimal per-model policy — only kimi behaves this way, so no general seam is warranted.
+    {temperature, top_p} =
+      if kimi_params_locked?(request.model),
+        do: {nil, nil},
+        else: {request.temperature, request.top_p}
+
+    base =
+      []
+      |> maybe_put(:temperature, temperature)
+      |> maybe_put(:top_p, top_p)
+      |> maybe_put(:max_tokens, request.max_tokens)
+      |> maybe_put(:reasoning_effort, request.reasoning_effort)
+      |> maybe_put(:receive_timeout, Keyword.get(opts, :receive_timeout, request.receive_timeout))
+      |> maybe_put(:provider_options, request_provider_opts)
+      |> maybe_put(:tools, translate_tools(request.tools))
+      |> maybe_put(:tool_choice, translate_tool_choice(request.tool_choice))
+
+    # Caller-supplied base_url wins. Otherwise, if the request is for a
+    # local-LM Arbor provider (lm_studio / ollama), inject the
+    # configured default so req_llm's openai provider points at
+    # localhost instead of api.openai.com.
+    caller_base_url = Keyword.get(opts, :base_url)
+    inferred_base_url = caller_base_url || default_base_url_for(request.provider)
+
+    base
+    |> maybe_merge(:arbor_sensitivity, %{
+      provider: request.provider,
+      model: request.model,
+      content: request,
+      opts: sensitivity_opts(opts)
+    })
+    |> maybe_merge(:base_url, inferred_base_url)
+    |> maybe_merge(:api_key, local_api_key(request.provider, opts))
+    |> maybe_merge(:req_http_options, local_req_http_options(request.provider, opts))
+    |> maybe_merge(:provider_options, Keyword.get(opts, :provider_options))
+    |> maybe_merge(:max_response_bytes, Keyword.get(opts, :max_response_bytes))
+  end
+
+  # Replay is a closed local read: provider readiness is irrelevant, and both
+  # a miss and an invalid fixture halt before Dispatch. Record retains all
+  # ordinary provider admission and transport checks.
+  defp completion_req_opts(request, opts, %{mode: :replay}) do
+    request
+    |> build_req_opts(opts)
+    |> maybe_mark_anonymous(request.provider)
+    |> validate_base_url_opt(request.provider)
+  end
+
+  defp completion_req_opts(request, opts, _scope), do: validated_req_opts(request, opts)
+
+  defp resolve_fixture_scope(nil, _provider), do: {:ok, nil}
+
+  defp resolve_fixture_scope(name, provider) do
+    with {:ok, scope} <- FixtureSet.resolve(name),
+         :ok <- validate_eval_fixture_pipeline() do
+      {:ok, Map.put(scope, :provider, provider)}
+    end
+  end
+
+  defp validated_req_opts(request, opts) do
+    # Strip private attribution before any provider option assembly.
+    opts = Keyword.delete(opts, :provider_usage_context)
+
+    with :ok <- ensure_keyless_ready(request.provider, request.model, opts) do
+      opts = Keyword.delete(opts, :opencode_zen_probe_ids)
+
+      request
+      |> build_req_opts(opts)
+      |> maybe_mark_anonymous(request.provider)
+      |> validate_base_url_opt(request.provider)
+    end
+  end
+
+  defp validated_stream_opts(request, opts) do
+    with {:ok, req_opts} <- validated_req_opts(request, opts) do
+      {:ok,
+       req_opts
+       |> maybe_merge(:max_stream_events, Keyword.get(opts, :max_stream_events))
+       |> maybe_merge(:max_stream_event_bytes, Keyword.get(opts, :max_stream_event_bytes))}
+    end
+  end
+
+  defp validated_embed_opts(arbor_provider, model, opts) do
+    opts = Keyword.delete(opts, :provider_usage_context)
+
+    with :ok <- ensure_keyless_ready(arbor_provider, model, opts) do
+      opts = Keyword.delete(opts, :opencode_zen_probe_ids)
+
+      arbor_provider
+      |> build_embed_opts(opts)
+      |> maybe_mark_anonymous(arbor_provider)
+      |> validate_base_url_opt(arbor_provider)
+    end
+  end
+
+  defp validate_base_url_opt(opts, provider) do
+    case Keyword.fetch(opts, :base_url) do
+      :error ->
+        {:ok, opts}
+
+      {:ok, value} ->
+        policy = {:req_llm_base, provider}
+
+        case Endpoint.validate(value, policy) do
+          {:ok, canonical} -> {:ok, Keyword.put(opts, :base_url, canonical)}
+          {:error, reason} -> {:error, {:invalid_base_url, reason}}
+        end
+    end
+  end
+
+  # Disable req's transient-retry for local-LM providers. Retrying a slow
+  # local server (e.g. a loaded homelab Ollama) just multiplies a
+  # receive_timeout-bounded wait by the retry count, so a 30s timeout can
+  # silently become 90s+. req_llm exposes req's knobs under
+  # :req_http_options. A caller-supplied value always wins. Returns nil
+  # for cloud providers (keep req's default backoff for flaky cloud APIs).
+  defp local_req_http_options(provider, opts) do
+    cond do
+      Keyword.has_key?(opts, :req_http_options) ->
+        Keyword.get(opts, :req_http_options)
+
+      is_binary(provider) and ProviderRegistry.keyless?(provider) ->
+        Arbor.LLM.OpenCodeZen.Transport.req_http_options()
+
+      is_binary(provider) and ProviderRegistry.local?(provider) ->
+        [retry: false]
+
+      true ->
+        nil
+    end
+  end
+
+  # Credential injection is keyed off credential_shape/1, not "empty string
+  # means no key". Local servers accept a placeholder bearer. The keyless
+  # provider must NOT send that placeholder — the relay 401s any bearer —
+  # so we inject a sentinel that Transport.apply_anonymous_auth/1 strips
+  # before the request hits the wire. Cloud providers keep nil so req_llm
+  # resolves their real key from the env; missing/blank still fails closed.
+  defp local_api_key(provider, opts) do
+    cond do
+      is_binary(provider) and ProviderRegistry.keyless?(provider) ->
+        Arbor.LLM.OpenCodeZen.Transport.req_llm_placeholder()
+
+      present_api_key?(Keyword.get(opts, :api_key)) ->
+        Keyword.get(opts, :api_key)
+
+      is_binary(provider) and ProviderRegistry.local?(provider) ->
+        # A daemon-less host may point a local-shape provider at a hosted
+        # endpoint (ollama -> https://ollama.com); use its configured key,
+        # else the placeholder local servers ignore.
+        ProviderRegistry.configured_api_key(provider) || "arbor-local"
+
+      true ->
+        nil
+    end
+  end
+
+  defp present_api_key?(key) when is_binary(key) and key != "", do: true
+  defp present_api_key?(_), do: false
+
+  defp ensure_keyless_ready(provider, model, opts) do
+    if is_binary(provider) and ProviderRegistry.keyless?(provider) do
+      with :ok <- OpenCodeZen.ensure_acknowledged() do
+        OpenCodeZen.admit_model(model, opts)
+      end
+    else
+      :ok
+    end
+  end
+
+  defp maybe_mark_anonymous(opts, provider) do
+    if is_binary(provider) and ProviderRegistry.keyless?(provider) do
+      Keyword.put(opts, :arbor_anonymous_auth, true)
+    else
+      opts
+    end
+  end
+
+  @doc """
+  Translate Arbor tool maps (canonical facade or OpenAI nested format) into the
+  `%ReqLLM.Tool{}` struct list req_llm expects.
+
+  req_llm's per-provider `prepare_request` calls
+  `ReqLLM.Tool.to_schema/2` to convert each struct to provider-specific
+  shape (Anthropic input_schema, OpenAI function definition, etc.) —
+  passing raw maps bypasses that conversion and breaks tool use for
+  every provider except OpenAI chat-completions.
+
+  Callbacks are stubbed: req_llm never invokes them in the
+  request → response flow (tool execution happens upstream in our
+  `ToolLoop`), so a no-op `fn _ -> {:ok, %{}} end` keeps `Tool.new/1`
+  validation happy without affecting behavior. Public for testability.
+  """
+  @spec translate_tools([map()] | nil) :: [ReqLLM.Tool.t()] | nil
+  def translate_tools(nil), do: nil
+  def translate_tools([]), do: nil
+
+  def translate_tools(tools) when is_list(tools) do
+    tools
+    |> Enum.map(&translate_tool/1)
+    |> Enum.reject(&is_nil/1)
+    |> case do
+      [] -> nil
+      list -> list
+    end
+  end
+
+  defp translate_tool(%{name: name, input_schema: schema} = tool)
+       when is_binary(name) and is_map(schema) do
+    translate_tool(%{
+      "type" => "function",
+      "function" => %{
+        "name" => name,
+        "description" => Map.get(tool, :description),
+        "parameters" => schema
+      }
+    })
+  end
+
+  defp translate_tool(%{"type" => "function", "function" => function}) when is_map(function) do
+    name = function["name"]
+    description = function["description"] || ""
+    params = function["parameters"] || %{"type" => "object", "properties" => %{}}
+
+    case ReqLLM.Tool.new(
+           name: name,
+           description: description,
+           parameter_schema: params,
+           callback: fn _args -> {:ok, %{}} end
+         ) do
+      {:ok, tool} -> tool
+      {:error, _reason} -> nil
+    end
+  end
+
+  defp translate_tool(_), do: nil
+
+  @doc """
+  Translate Arbor's `tool_choice` value to what req_llm accepts.
+
+  req_llm/NimbleOptions rejects string-keyed maps and OpenAI's nested
+  function-choice form before transport. Canonical specific-tool form is
+  the atom-keyed `%{type: "tool", name: binary_name}`; provider adapters
+  translate that to wire formats.
+
+  Boundary rules:
+
+    * `"auto"` / `:auto` → `nil` (omit; providers default to auto when
+      tools are present).
+    * `"none"` / `"required"` and atom forms → `nil` (omit; clear tools
+      or pin a specific tool instead).
+    * Canonical `%{type: "tool", name: name}` (atom or string keys) →
+      `%{type: "tool", name: binary_name}`.
+    * OpenAI nested `%{type: "function", function: %{name: name}}`
+      (atom or string keys, including the ToolLoop reserved-terminal
+      shape) → the same canonical map.
+    * Malformed or unknown map shapes → `nil` (do not forward values
+      ReqLLM will reject).
+
+  Public for testability.
+  """
+  @spec translate_tool_choice(String.t() | atom() | map() | nil) :: map() | nil
+  def translate_tool_choice(nil), do: nil
+  def translate_tool_choice(""), do: nil
+  def translate_tool_choice("auto"), do: nil
+  def translate_tool_choice(:auto), do: nil
+  def translate_tool_choice("none"), do: nil
+  def translate_tool_choice(:none), do: nil
+  def translate_tool_choice("required"), do: nil
+  def translate_tool_choice(:required), do: nil
+
+  def translate_tool_choice(%{} = map) do
+    case normalize_specific_tool_choice(map) do
+      {:ok, canonical} -> canonical
+      :error -> nil
+    end
+  end
+
+  def translate_tool_choice(_), do: nil
+
+  # Mirror ToolLoop terminal tool-name contract (nonblank, valid UTF-8, no NUL,
+  # bounded, action-identifier grammar). Keep normalization closed here rather
+  # than importing ToolLoop internals.
+  @max_tool_choice_name_bytes 128
+  @tool_choice_name_re ~r/^[A-Za-z][A-Za-z0-9_.\/-]*$/
+
+  # ReqLLM canonical specific-tool choice: atom-keyed %{type: "tool", name: binary}.
+  defp normalize_specific_tool_choice(map) when is_map(map) do
+    with {:ok, name} <- extract_tool_choice_name(map),
+         {:ok, name} <- validate_tool_choice_name(name) do
+      {:ok, %{type: "tool", name: name}}
+    else
+      _ -> :error
+    end
+  end
+
+  # Canonical tool form (atom or string keys).
+  defp extract_tool_choice_name(%{type: "tool", name: name}), do: {:ok, name}
+  defp extract_tool_choice_name(%{"type" => "tool", "name" => name}), do: {:ok, name}
+
+  # OpenAI nested function form (atom or string keys). ToolLoop's reserved
+  # terminal forced-choice uses the string-key nested shape.
+  defp extract_tool_choice_name(%{type: "function", function: function}) when is_map(function) do
+    extract_nested_function_name(function)
+  end
+
+  defp extract_tool_choice_name(%{"type" => "function", "function" => function})
+       when is_map(function) do
+    extract_nested_function_name(function)
+  end
+
+  defp extract_tool_choice_name(_), do: :error
+
+  defp extract_nested_function_name(%{name: name}), do: {:ok, name}
+  defp extract_nested_function_name(%{"name" => name}), do: {:ok, name}
+  defp extract_nested_function_name(_), do: :error
+
+  defp validate_tool_choice_name(name) when is_binary(name) do
+    trimmed = String.trim(name)
+
+    cond do
+      trimmed == "" ->
+        :error
+
+      not String.valid?(trimmed) ->
+        :error
+
+      String.contains?(trimmed, <<0>>) ->
+        :error
+
+      byte_size(trimmed) > @max_tool_choice_name_bytes ->
+        :error
+
+      Regex.match?(@tool_choice_name_re, trimmed) ->
+        {:ok, trimmed}
+
+      true ->
+        :error
+    end
+  end
+
+  defp validate_tool_choice_name(_), do: :error
+
+  defp maybe_put(opts, _key, nil), do: opts
+  defp maybe_put(opts, key, value), do: Keyword.put(opts, key, value)
+
+  # kimi k2.x (k2.5 / k2.6 / k2.7-code) fix temperature/top_p/penalties and reject any custom
+  # value. Kept deliberately narrow — only kimi behaves this way.
+  defp kimi_params_locked?(model) when is_binary(model), do: model =~ ~r/kimi-k2/i
+  defp kimi_params_locked?(_), do: false
+
+  defp maybe_merge(opts, _key, nil), do: opts
+  defp maybe_merge(opts, key, value), do: Keyword.put(opts, key, value)
+
+  # ── Dispatch ────────────────────────────────────────────────────────
+
+  defp call_req_llm(
+         model_spec,
+         messages,
+         opts,
+         usage_context,
+         single_attempt?,
+         fixture_scope,
+         completion_pipeline
+       ) do
+    run_pipeline_call(
+      :complete,
+      {model_spec, messages, opts},
+      usage_context,
+      single_attempt?,
+      fixture_scope,
+      completion_pipeline
+    )
+    |> Map.fetch!(:result)
+  end
+
+  # Single entry point for all four dispatch operations. Each call
+  # threads through the configured pipeline, falling through to
+  # Plugs.Dispatch (which calls the appropriate req_llm function) if
+  # no upstream plug short-circuited. The pipeline is configurable
+  # so tests can swap in record-only, replay-only, or transparent
+  # variants without touching the adapter.
+  defp run_pipeline(operation, request, usage_context) do
+    run_pipeline_call(operation, request, usage_context)
+    |> Map.fetch!(:result)
+  end
+
+  # Private provider_usage_context is merged into Call metadata only — never
+  # into the request tuple that Dispatch forwards to ReqLLM.
+  # Single-attempt policy is a direct private boolean + Call.assign, never opts.
+  defp run_pipeline_call(
+         operation,
+         request,
+         usage_context,
+         single_attempt? \\ false,
+         fixture_scope \\ nil,
+         completion_pipeline \\ nil
+       ) do
+    {model, content, req_opts} = request
+    {input, req_opts} = Keyword.pop(req_opts, :arbor_sensitivity)
+    request = {model, content, req_opts}
+
+    call =
+      operation
+      |> Call.new(request)
+      |> Call.put_metadata(%{sensitivity_input: input})
+      |> maybe_put_provider_usage_context(usage_context)
+      |> maybe_put_fixture_scope(fixture_scope)
+      |> Call.assign(:live_completion, not is_nil(completion_pipeline))
+
+    live_pipeline = Map.get(call.metadata, :live_embedding_pipeline)
+
+    # The live embedding restriction also prevents a retry callback from
+    # replacing a failed dispatch result, and suppresses provider-installed
+    # Req retries through the existing single-attempt contract.
+    call =
+      if single_attempt? or not is_nil(live_pipeline) or not is_nil(completion_pipeline) do
+        Call.assign(call, :single_attempt, true)
+      else
+        call
+      end
+
+    # Named completion and live-only embedding admission each freeze the
+    # source default for this call; operator config changes affect later calls.
+    selected_pipeline =
+      completion_pipeline || live_pipeline ||
+        if(fixture_scope, do: @default_pipeline, else: pipeline())
+
+    Pipeline.through(call, selected_pipeline)
+  end
+
+  defp sensitivity_opts(opts),
+    do: Keyword.take(opts, [:sensitivity, :taint, :agent_id, :base_url, :runtime])
+
+  defp maybe_put_fixture_scope(call, nil), do: call
+
+  defp maybe_put_fixture_scope(call, scope),
+    do: Call.put_metadata(call, %{eval_fixture: scope})
+
+  defp pop_provider_usage_context(opts) when is_list(opts) do
+    case Keyword.pop(opts, :provider_usage_context) do
+      {context, rest} when is_map(context) and not is_struct(context) ->
+        {normalize_provider_usage_context(context), rest}
+
+      {_other, rest} ->
+        {nil, rest}
+    end
+  end
+
+  defp normalize_provider_usage_context(context) do
+    Enum.reduce([:principal_id, :task_id, :goal_id, :correlation_id], %{}, fn key, acc ->
+      value = Map.get(context, key) || Map.get(context, Atom.to_string(key))
+
+      if is_binary(value) and byte_size(value) > 0 and byte_size(value) <= 128 and
+           String.valid?(value) and String.trim(value) == value and
+           not String.contains?(value, <<0>>) do
+        Map.put(acc, key, value)
+      else
+        acc
+      end
+    end)
+    |> case do
+      empty when map_size(empty) == 0 -> nil
+      normalized -> normalized
+    end
+  end
+
+  defp maybe_put_provider_usage_context(call, nil), do: call
+
+  defp maybe_put_provider_usage_context(call, context) when is_map(context) do
+    Call.put_metadata(call, context)
+  end
+
+  defp pipeline do
+    Application.get_env(:arbor_llm, :pipeline, @default_pipeline)
+  end
+
+  # ── Translation: ReqLLM → Arbor ─────────────────────────────────────
+
+  @doc """
+  Translate a successful `ReqLLM.Response` into `Arbor.LLM.Response`.
+
+  The `content_parts` field is built in three layers:
+
+    1. **Tool calls** (if any) from `response.message.tool_calls` are
+       promoted to `kind: :tool_call` parts. These flow to the
+       orchestrator's `ToolLoop`, which dispatches them.
+    2. **Text content** runs through `PostProcessors.parse_structured/1`
+       so any provider's response benefits from reasoning_content
+       extraction and wrapped-JSON envelope handling.
+    3. Tool-call parts come first when present (matches how the
+       openai_compatible adapter today orders them); text parts append.
+
+  Public for testability.
+  """
+  @spec translate_response(ReqLLM.Response.t(), Request.t()) :: Response.t()
+  def translate_response(%ReqLLM.Response{} = req_response, %Request{} = _request) do
+    text = ReqLLM.Response.text(req_response) || ""
+    reasoning_content = extract_reasoning_text(req_response)
+    finish_reason = translate_finish_reason(req_response.finish_reason)
+
+    msg_for_post = %{
+      "content" => text,
+      "reasoning_content" => reasoning_content,
+      "reasoning" => nil
+    }
+
+    text_parts =
+      case PostProcessors.parse_structured(msg_for_post) do
+        nil -> [ContentPart.text(text)]
+        parts -> parts
+      end
+
+    tool_call_parts = extract_tool_call_parts(req_response)
+
+    content_parts = tool_call_parts ++ text_parts
+
+    %Response{
+      text: text,
+      # Expose chain-of-thought content to downstream consumers. Hidden by
+      # default in most rendering paths but available when the UX wants
+      # transparency — and critically, NOT silently dropped, which masks
+      # reasoning-model responses where final-content tokens got cut off
+      # mid-CoT (gemma-4-e4b-it surfaced this on 2026-06-02).
+      reasoning_content: reasoning_content,
+      finish_reason: finish_reason,
+      content_parts: content_parts,
+      usage: translate_usage(req_response.usage),
+      warnings: [],
+      # Rich upstream structs may contain transport-owned terms. The public
+      # response boundary exposes only the normalized, ceiling-bound fields.
+      raw: nil
+    }
+  end
+
+  defp extract_tool_call_parts(%ReqLLM.Response{message: nil}), do: []
+
+  defp extract_tool_call_parts(%ReqLLM.Response{message: %ReqLLM.Message{tool_calls: nil}}),
+    do: []
+
+  defp extract_tool_call_parts(%ReqLLM.Response{message: %ReqLLM.Message{tool_calls: []}}), do: []
+
+  defp extract_tool_call_parts(%ReqLLM.Response{
+         message: %ReqLLM.Message{tool_calls: calls}
+       })
+       when is_list(calls) do
+    Enum.map(calls, &translate_tool_call/1)
+  end
+
+  defp translate_tool_call(%ReqLLM.ToolCall{id: id, function: function}) when is_map(function) do
+    name = function["name"] || function[:name] || ""
+    arguments = function["arguments"] || function[:arguments] || %{}
+    ContentPart.tool_call(id, name, arguments)
+  end
+
+  # ReqLLM provider may also emit ToolCall-shaped maps directly for
+  # protocols where the strict struct doesn't fit (e.g. some
+  # OpenAI-compat streaming flows). Handle the loose shape too so a
+  # provider quirk doesn't lose tool calls.
+  defp translate_tool_call(%{} = call) do
+    id = call[:id] || call["id"] || ""
+    function = call[:function] || call["function"] || %{}
+    name = function[:name] || function["name"] || ""
+    arguments = function[:arguments] || function["arguments"] || %{}
+    ContentPart.tool_call(id, name, arguments)
+  end
+
+  defp translate_tool_call(_), do: nil
+
+  defp extract_reasoning_text(%ReqLLM.Response{message: nil}), do: nil
+
+  defp extract_reasoning_text(%ReqLLM.Response{message: %ReqLLM.Message{} = msg}) do
+    # Two upstream paths for chain-of-thought content, depending on the
+    # provider's ReqLLM adapter:
+    #
+    # 1. `message.reasoning_details` — a list of structured
+    #    `ReasoningDetails`. Used by providers that surface reasoning
+    #    as a separate top-level field (some OpenAI o-series paths,
+    #    certain Anthropic flows).
+    #
+    # 2. `message.content` parts with `type: :thinking` — used by
+    #    Ollama for reasoning models like kimi-k2.6:cloud and the
+    #    gemma-3-it thinking variants. Pre-fix, this path was silently
+    #    dropped — `reasoning_content` ended up nil even though the
+    #    model HAD emitted reasoning. Worse, when a reasoning model
+    #    exhausted its budget mid-CoT and produced no final `:text`
+    #    part, `text` came back "" with no signal as to why.
+    #
+    # Combine both sources; nil if neither yields text.
+    reasoning_from_details(msg) || reasoning_from_thinking_parts(msg)
+  end
+
+  defp extract_reasoning_text(_), do: nil
+
+  defp reasoning_from_details(%ReqLLM.Message{reasoning_details: nil}), do: nil
+
+  defp reasoning_from_details(%ReqLLM.Message{reasoning_details: details})
+       when is_list(details) do
+    details
+    |> Enum.map(&reasoning_detail_text/1)
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join("\n")
+    |> nil_if_blank()
+  end
+
+  defp reasoning_from_details(_), do: nil
+
+  defp reasoning_detail_text(%ReqLLM.Message.ReasoningDetails{text: text})
+       when is_binary(text),
+       do: text
+
+  # ReqLLM's OpenRouter streaming decoder preserves wire maps here, while
+  # its non-streaming decoder produces ReasoningDetails structs. Extract
+  # text only; signatures and encrypted reasoning are opaque metadata.
+  defp reasoning_detail_text(%{"text" => text}) when is_binary(text), do: text
+  defp reasoning_detail_text(_), do: nil
+
+  defp reasoning_from_thinking_parts(%ReqLLM.Message{content: nil}), do: nil
+
+  defp reasoning_from_thinking_parts(%ReqLLM.Message{content: parts}) when is_list(parts) do
+    parts
+    |> Enum.filter(fn
+      %ReqLLM.Message.ContentPart{type: :thinking} -> true
+      _ -> false
+    end)
+    |> Enum.map(& &1.text)
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join("\n")
+    |> nil_if_blank()
+  end
+
+  defp reasoning_from_thinking_parts(_), do: nil
+
+  defp nil_if_blank(""), do: nil
+  defp nil_if_blank(s) when is_binary(s), do: s
+
+  defp translate_finish_reason(nil), do: :stop
+  defp translate_finish_reason(:stop), do: :stop
+  defp translate_finish_reason(:length), do: :length
+  defp translate_finish_reason(:tool_calls), do: :tool_calls
+  defp translate_finish_reason(:content_filter), do: :content_filter
+  defp translate_finish_reason(:error), do: :error
+  defp translate_finish_reason(_), do: :other
+
+  defp translate_usage(nil), do: %{}
+
+  defp translate_usage(usage) when is_map(usage) do
+    # ReqLLM.Usage canonical keys: input_tokens, output_tokens, total_tokens.
+    # Forward as-is plus map to Arbor's historical aliases.
+    Map.merge(usage, %{
+      input_tokens: Map.get(usage, :input_tokens),
+      output_tokens: Map.get(usage, :output_tokens),
+      total_tokens: Map.get(usage, :total_tokens)
+    })
+  end
+
+  # Error translation lives in `Arbor.LLM.Plugs.Dispatch`: every dispatch
+  # failure — non-2xx status, transport, provider exception, exit, or a local
+  # refusal of the response — is stamped on the call's result as one
+  # `{:error, %ProviderError{}}` (classified by `Arbor.LLM.ProviderErrorCore`),
+  # or `{:error, %RequestTimeoutError{}}` for a deadline expiry.
+end

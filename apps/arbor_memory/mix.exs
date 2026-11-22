@@ -43,7 +43,7 @@ defmodule ArborMemory.MixProject do
        path: "../../packages/arbor_historian", runtime: false, env: Mix.env()},
       {:arbor_historian_host, in_umbrella: true},
       {:arbor_ai, in_umbrella: true},
-      {:arbor_llm, in_umbrella: true},
+      {:arbor_llm, "~> 0.1.0", path: "../../packages/arbor_llm", env: Mix.env()},
       {:arbor_trust, "~> 0.1.0",
        path: "../../packages/arbor_trust", runtime: false, env: Mix.env()},
       {:arbor_trust_host, in_umbrella: true},

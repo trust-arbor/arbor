@@ -13,7 +13,7 @@ defmodule Arbor.Commands.PlatformInventory do
   """
 
   alias Arbor.Commands.PackagingRoot
-  alias Arbor.Commands.PlatformInventory.{Core, Encode}
+  alias Arbor.Commands.PlatformInventory.{Core, Encode, Scope}
   alias Arbor.Commands.SourceCoupling.GitInventory
   alias Arbor.Common.SafePath
 
@@ -86,7 +86,9 @@ defmodule Arbor.Commands.PlatformInventory do
   defp load_inventory(root, _opts, _seen, false), do: load_git_inventory(root)
 
   defp load_git_inventory(root) do
-    GitInventory.load_selected_blobs(root, Core.platform_apps(), [])
+    GitInventory.load_selected_blobs(root, Scope.whole_source_apps(),
+      extra_paths: Scope.relocated_source_paths()
+    )
   end
 
   defp load_classifications(root, opts, seen, true) do

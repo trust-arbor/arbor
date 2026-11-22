@@ -29,7 +29,37 @@ defmodule Arbor.Dashboard.MixProject do
     [
       extra_applications: [:logger],
       mod: {Arbor.Dashboard.Application, []},
-      env: [start_children: Mix.env() != :test]
+      env: [
+        start_children: Mix.env() != :test,
+        arbor_feature: Arbor.Dashboard.Feature,
+        arbor_feature_metadata: %{
+          id: :dashboard,
+          requires: [:core],
+          dependency_role: :fixed_host_prerequisite,
+          contribution_scope: :direct_application_entrypoint,
+          snapshot_required_keys: [:start_children],
+          public_child_ids: [Phoenix.PubSub.Supervisor, Arbor.Dashboard.Endpoint],
+          sources: %{
+            application: %{
+              path: "apps/arbor_dashboard/lib/arbor_dashboard/application.ex",
+              sha256: "38766afcdbb689a24772990b562ab4917f6f9d90da4c57acfad53689ab716117"
+            },
+            endpoint: %{
+              path: "apps/arbor_dashboard/lib/arbor_dashboard/endpoint.ex",
+              sha256: "7cf875ae11083cbe461584ccc4b2d6240c49c8bf9a4a8f8dc991e1e2f4ef1c04"
+            },
+            routes: %{
+              owner: Arbor.Dashboard.Router,
+              path: "apps/arbor_dashboard/lib/arbor_dashboard/router.ex",
+              sha256: "e42d26d7ccae83f5fc66a177d2e043d55cce38993a60d3372ccd441f78f84298",
+              coverage: :explicit_routes_with_macro_delegation
+            },
+            direct_global_action_catalog: :no_additional_contribution_declared_here,
+            direct_global_uri_provider: :no_additional_contribution_declared_here,
+            observation: :source_declaration
+          }
+        }
+      ]
     ]
   end
 

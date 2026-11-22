@@ -26,14 +26,14 @@ defmodule Mix.Tasks.Arbor.OllamaRuntimeConfigTest do
   test "defaults leave chat and embeddings local", %{root: root} do
     config = read_runtime(root)
     assert config[:arbor_ai][:ollama][:base_url] == "http://localhost:11434"
-    assert config[:arbor_orchestrator][:ollama][:base_url] == "http://localhost:11434/v1"
+    assert config[:arbor_llm][:ollama][:base_url] == "http://localhost:11434/v1"
   end
 
   test "shared legacy URL still configures both paths", %{root: root} do
     System.put_env("ARBOR_OLLAMA_BASE_URL", "http://ollama.internal:11434")
     config = read_runtime(root)
     assert config[:arbor_ai][:ollama][:base_url] == "http://ollama.internal:11434"
-    assert config[:arbor_orchestrator][:ollama][:base_url] == "http://ollama.internal:11434/v1"
+    assert config[:arbor_llm][:ollama][:base_url] == "http://ollama.internal:11434/v1"
   end
 
   test "cloud council configuration does not redirect embeddings", %{root: root} do
@@ -42,8 +42,8 @@ defmodule Mix.Tasks.Arbor.OllamaRuntimeConfigTest do
     config = read_runtime(root)
     assert config[:arbor_ai][:ollama][:base_url] == "http://localhost:11434"
     assert config[:arbor_ai][:ollama][:api_key] == nil
-    assert config[:arbor_orchestrator][:ollama][:base_url] == "https://ollama.com/v1"
-    assert config[:arbor_orchestrator][:ollama][:api_key] == "test-only-not-a-credential"
+    assert config[:arbor_llm][:ollama][:base_url] == "https://ollama.com/v1"
+    assert config[:arbor_llm][:ollama][:api_key] == "test-only-not-a-credential"
   end
 
   test "chat override preserves its v1 suffix and the separate embedding URL", %{root: root} do
@@ -51,14 +51,14 @@ defmodule Mix.Tasks.Arbor.OllamaRuntimeConfigTest do
     System.put_env("ARBOR_OLLAMA_CHAT_BASE_URL", "https://ollama.com/v1")
     config = read_runtime(root)
     assert config[:arbor_ai][:ollama][:base_url] == "http://ollama.internal:11434"
-    assert config[:arbor_orchestrator][:ollama][:base_url] == "https://ollama.com/v1"
+    assert config[:arbor_llm][:ollama][:base_url] == "https://ollama.com/v1"
   end
 
   test "blank chat override falls back to the shared URL", %{root: root} do
     System.put_env("ARBOR_OLLAMA_BASE_URL", "http://ollama.internal:11434")
     System.put_env("ARBOR_OLLAMA_CHAT_BASE_URL", "")
     config = read_runtime(root)
-    assert config[:arbor_orchestrator][:ollama][:base_url] == "http://ollama.internal:11434/v1"
+    assert config[:arbor_llm][:ollama][:base_url] == "http://ollama.internal:11434/v1"
   end
 
   defp read_runtime(root) do

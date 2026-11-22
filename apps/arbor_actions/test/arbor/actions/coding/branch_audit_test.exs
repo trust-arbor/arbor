@@ -470,7 +470,7 @@ defmodule Arbor.Actions.Coding.BranchAuditTest do
   test "same branch at a new reviewed OID receives distinct replay-stable evidence", %{
     tmp_dir: tmp_dir
   } do
-    repo = build_fixture(Path.join(tmp_dir, "repo"))
+    repo = build_replay_fixture(Path.join(tmp_dir, "repo"))
     assert {:ok, first_manifest} = Actions.audit_coding_branches(repo, "main")
     first_entry = Enum.find(first_manifest["branches"], &(&1["ref"] == "refs/heads/merged"))
 
@@ -610,6 +610,17 @@ defmodule Arbor.Actions.Coding.BranchAuditTest do
     git!(repo, ["branch", "checked-out", initial])
     checked_path = Path.join(Path.dirname(repo), "checked-worktree")
     git!(repo, ["worktree", "add", checked_path, "checked-out"])
+    repo
+  end
+
+  defp build_replay_fixture(repo) do
+    create_git_repo(repo)
+    git!(repo, ["branch", "-m", "main"])
+    git!(repo, ["checkout", "-b", "merged"])
+    add_commit(repo, "merged.txt", "merged\n", "merged")
+    git!(repo, ["checkout", "main"])
+    git!(repo, ["merge", "--ff-only", "merged"])
+    add_commit(repo, "destination.txt", "destination\n", "destination")
     repo
   end
 

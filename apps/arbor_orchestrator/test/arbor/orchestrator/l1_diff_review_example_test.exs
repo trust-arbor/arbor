@@ -52,8 +52,8 @@ defmodule Arbor.Orchestrator.L1DiffReviewExampleTest do
   """
 
   setup_all do
-    original_flag = Application.get_env(:arbor_orchestrator, :discover_local_providers, true)
-    Application.put_env(:arbor_orchestrator, :discover_local_providers, true)
+    original_flag = Application.get_env(:arbor_llm, :discover_local_providers, true)
+    Application.put_env(:arbor_llm, :discover_local_providers, true)
     Arbor.LLM.Client.clear_default_client()
 
     for mod <- [Arbor.Security.Identity.Registry, Arbor.Security.Identity.NonceCache] do
@@ -61,7 +61,7 @@ defmodule Arbor.Orchestrator.L1DiffReviewExampleTest do
     end
 
     on_exit(fn ->
-      Application.put_env(:arbor_orchestrator, :discover_local_providers, original_flag)
+      Application.put_env(:arbor_llm, :discover_local_providers, original_flag)
       Arbor.LLM.Client.clear_default_client()
     end)
 

@@ -35,6 +35,8 @@
           "packages/arbor_trust/test/",
           "packages/arbor_historian/lib/",
           "packages/arbor_historian/test/",
+          "packages/arbor_llm/lib/",
+          "packages/arbor_llm/test/",
           "packages/arbor_persistence/lib/",
           "packages/arbor_persistence/test/",
           "packages/arbor_persistence_sql/lib/",

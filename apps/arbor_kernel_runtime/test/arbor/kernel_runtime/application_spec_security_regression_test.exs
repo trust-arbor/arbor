@@ -52,11 +52,13 @@ defmodule Arbor.KernelRuntime.ApplicationSpecSecurityRegressionTest do
       prepare_restricted_peer!(control, :arbor_kernel_runtime)
       refute_omitted_env_ebins_on_peer(control)
       put_peer_runtime(control, start_profile: :activation_only)
+      before_paths = peer_call(control, :code, :get_path, [])
 
       assert {:ok, _} =
                peer_call(control, Application, :ensure_all_started, [:arbor_kernel_runtime])
 
       refute_omitted_env_ebins_on_peer(control)
+      assert peer_call(control, :code, :get_path, []) == before_paths
 
       started = peer_started_apps(control)
       loaded = peer_loaded_apps(control)

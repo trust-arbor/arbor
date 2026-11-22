@@ -1,10 +1,13 @@
 defmodule Arbor.Kernel.BoundaryConfigurationTest do
   use ExUnit.Case, async: true
 
+  alias Arbor.Eval.Subject
+
   @moduletag :fast
 
   @production_boundaries %{
     Arbor.Kernel => %{deps: [], exports: []},
+    Subject => %{deps: [], exports: []},
     Arbor.Types => %{deps: [], exports: :all},
     Arbor.Identifiers => %{deps: [Arbor.Types], exports: :all},
     Arbor.Contracts => %{
@@ -42,6 +45,41 @@ defmodule Arbor.Kernel.BoundaryConfigurationTest do
       assert Keyword.fetch!(opts, :exports) == expected.exports
       refute Keyword.has_key?(opts, :dirty_xrefs)
       refute disabled_check?(opts)
+    end
+  end
+
+  test "the evaluation subject behaviour retains one passive kernel owner" do
+    assert Application.get_application(Subject) == :arbor_kernel
+    assert Subject in Application.spec(:arbor_kernel, :modules)
+    assert Subject.behaviour_info(:callbacks) == [run: 2]
+    assert Application.spec(:arbor_kernel, :mod) in [nil, []]
+
+    runtime_modules = Application.spec(:arbor_kernel_runtime, :modules) || []
+    refute Subject in runtime_modules
+
+    root = umbrella_root()
+    assert File.regular?(Path.join(root, "packages/arbor_kernel/lib/arbor/eval/subject.ex"))
+    refute File.exists?(Path.join(root, "apps/arbor_kernel_runtime/lib/arbor/eval/subject.ex"))
+  end
+
+  test "the contract Mix tasks are explicitly classified as development tooling" do
+    definition = boundary_definition(Arbor.Kernel.DevTools)
+
+    assert definition.app == :arbor_kernel
+    assert definition.opts[:top_level?] == true
+    assert definition.opts[:check] == [in: false, out: false]
+    assert definition.opts[:exports] == []
+    refute Keyword.has_key?(definition.opts, :dirty_xrefs)
+
+    assert {:ok, modules} = :application.get_key(:arbor_kernel, :modules)
+
+    tasks = Enum.filter(modules, &mix_task?/1)
+    assert tasks == [Mix.Tasks.Arbor.Contracts.Census, Mix.Tasks.Arbor.Contracts.Test]
+
+    for task <- tasks do
+      task_definition = boundary_definition(task)
+      assert task_definition.mix_task?
+      assert task_definition.opts == [classify_to: Arbor.Kernel.DevTools]
     end
   end
 

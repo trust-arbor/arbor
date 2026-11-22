@@ -265,8 +265,11 @@ defmodule Arbor.Shell.ProcessGroup do
     cancel_id = launch.cancel_id
 
     case open_trusted_build(launch, start_time, timeout, max_output_bytes) do
-      {:error, reason} ->
-        _ = Lease.record_exhaustion(lease_pid, setup_exhaustion_reason(reason))
+      {:error, reason, proof} ->
+        if proof in [:no_port, :exhausted] do
+          _ = Lease.record_exhaustion(lease_pid, setup_exhaustion_reason(reason))
+        end
+
         {:error, reason}
 
       {:ok, handle} ->
@@ -314,25 +317,38 @@ defmodule Arbor.Shell.ProcessGroup do
 
     with :ok <- validate_args(launch.argv),
          {:ok, launcher} <- launcher_path(),
-         remaining when remaining > 0 <- remaining_ms(deadline),
-         {:ok, port} <-
-           open_trusted_build_port(launcher, launch, remaining, max_output_bytes),
-         {:ok, group_id} <- await_ready(port, deadline) do
-      {:ok,
-       %__MODULE__{
-         port: port,
-         group_id: group_id,
-         deadline: deadline,
-         start_time: start_time,
-         max_output_bytes: max_output_bytes,
-         stdin_open: true
-       }}
+         remaining when remaining > 0 <- remaining_ms(deadline) do
+      case open_trusted_build_port(launcher, launch, remaining, max_output_bytes) do
+        {:ok, port} ->
+          case await_ready(port, deadline) do
+            {:ok, group_id} ->
+              {:ok,
+               %__MODULE__{
+                 port: port,
+                 group_id: group_id,
+                 deadline: deadline,
+                 start_time: start_time,
+                 max_output_bytes: max_output_bytes,
+                 stdin_open: true
+               }}
+
+            {:error, reason} ->
+              # These two-tuples are emitted only after a proved native abort.
+              {:error, reason, :exhausted}
+
+            {:error, reason, :exhaustion_unproved} ->
+              {:error, reason, :exhaustion_unproved}
+          end
+
+        {:error, reason} ->
+          {:error, reason, :no_port}
+      end
     else
       remaining when is_integer(remaining) and remaining <= 0 ->
-        {:error, :timeout_during_setup}
+        {:error, :timeout_during_setup, :no_port}
 
       {:error, reason} ->
-        {:error, reason}
+        {:error, reason, :no_port}
     end
   end
 
@@ -688,6 +704,7 @@ defmodule Arbor.Shell.ProcessGroup do
     else
       remaining when is_integer(remaining) and remaining <= 0 -> {:error, :timeout_during_setup}
       {:error, reason} -> {:error, reason}
+      {:error, reason, :exhaustion_unproved} -> {:error, reason}
     end
   end
 
@@ -970,150 +987,331 @@ defmodule Arbor.Shell.ProcessGroup do
   end
 
   defp await_ready(port, deadline) do
+    await_ready(port, deadline, unready_os_pid(port), false)
+  end
+
+  defp await_ready(port, deadline, os_pid, parent_exited) do
     remaining = remaining_ms(deadline)
 
     if remaining <= 0 do
-      exhaust_unready_port(port)
-      {:error, :timeout_during_setup}
+      abort_unready_port(port, :timeout_during_setup, os_pid, parent_exited)
     else
       receive do
         {^port, {:data, <<@ready, group_id::unsigned-big-64>>}} when group_id > 0 ->
-          {:ok, group_id}
+          if parent_exited,
+            do: await_ready(port, deadline, os_pid, parent_exited),
+            else: {:ok, group_id}
+
+        {^port, {:data, <<@terminal, payload::binary>>}} ->
+          case unready_terminal_reason(payload) do
+            {:ok, reason} ->
+              finish_unready_failure(
+                port,
+                {:ok, parent_exited},
+                os_pid,
+                if(reason == :timeout, do: :timeout_during_setup, else: :cancelled_during_setup)
+              )
+
+            :error ->
+              close_port(port)
+              {:error, :teardown_timeout, :exhaustion_unproved}
+          end
 
         {^port, {:data, <<@error, message::binary>>}} ->
           close_port(port)
-          {:error, {:launcher_error, message}}
+          {:error, {:launcher_error, message}, :exhaustion_unproved}
+
+        {^port, {:exit_status, 0}} ->
+          collect_exited_unready(port, os_pid, true)
 
         {^port, {:exit_status, status}} ->
-          {:error, {:launcher_exited_before_ready, status}}
-
-        {:EXIT, ^port, reason} when reason != :normal ->
           close_port(port)
-          {:error, {:port_exited, reason}}
+          {:error, {:launcher_exited_before_ready, status}, :exhaustion_unproved}
 
         {:EXIT, ^port, :normal} ->
-          {:error, {:port_exited, :normal}}
+          collect_exited_unready(port, os_pid, parent_exited)
+
+        {:EXIT, ^port, _reason} ->
+          close_port(port)
+          {:error, :teardown_timeout, :exhaustion_unproved}
 
         {:cancel_shell_execution, _cancel_id} ->
-          exhaust_unready_port(port)
-          {:error, :cancelled_during_setup}
+          abort_unready_port(port, :cancelled_during_setup, os_pid, parent_exited)
       after
-        remaining ->
-          exhaust_unready_port(port)
-          {:error, :timeout_during_setup}
+        remaining -> abort_unready_port(port, :timeout_during_setup, os_pid, parent_exited)
       end
     end
   end
 
-  # OTP 28 `Port.close/1` does not signal a `spawn_executable` process. The
-  # launcher calls `setsid` only after it starts, so a setup timeout can observe
-  # the pid before any process group exists. `kill(-pid)` then returns ESRCH and
-  # the kill helper reports success while the launcher keeps running. Signal the
-  # pid itself, then the group, and do not return while that pid is alive.
-  defp exhaust_unready_port(port) do
-    os_pid =
-      case Port.info(port, :os_pid) do
-        {:os_pid, pid} when is_integer(pid) and pid > 0 -> pid
-        _ -> nil
-      end
+  # Keep the reader open for a native containment proof. Never STOP or kill a
+  # caretaker whose pre-START child is not yet identified by READY.
+  defp abort_unready_port(port, original_reason, os_pid, parent_exited) do
+    try do
+      _ = command(port, <<@cancel>>)
 
-    if is_integer(os_pid), do: reap_unready_os_pid(os_pid)
+      proof =
+        case await_unready_terminal(
+               port,
+               System.monotonic_time(:millisecond) + @teardown_timeout_ms,
+               parent_exited
+             ) do
+          {:ok, exited, _native_reason} -> {:ok, exited}
+          :unproved -> :unproved
+        end
 
-    close_port(port)
-
-    if is_integer(os_pid), do: await_os_pid_absent(os_pid)
-  end
-
-  defp reap_unready_os_pid(os_pid) do
-    deadline = System.monotonic_time(:millisecond) + @teardown_timeout_ms
-    reap_unready_os_pid(os_pid, deadline)
-  end
-
-  defp reap_unready_os_pid(os_pid, deadline) do
-    children = direct_child_pids(os_pid)
-    _ = signal_os_pid(os_pid)
-    _ = native_kill_group(os_pid)
-
-    Enum.each(children, fn child ->
-      _ = signal_os_pid(child)
-      _ = native_kill_group(child)
-    end)
-
-    cond do
-      not os_pid_alive?(os_pid) ->
-        :ok
-
-      System.monotonic_time(:millisecond) >= deadline ->
-        :ok
-
-      true ->
-        Process.sleep(@cleanup_retry_ms)
-        reap_unready_os_pid(os_pid, deadline)
+      finish_unready_failure(port, proof, os_pid, original_reason)
+    after
+      close_port(port)
     end
   end
 
-  defp await_os_pid_absent(os_pid) do
+  defp collect_exited_unready(port, os_pid, parent_exited) do
+    # A Port exit ends startup waiting. Collect both proofs within one teardown
+    # budget; the operation deadline and later messages cannot extend this.
     deadline = System.monotonic_time(:millisecond) + @teardown_timeout_ms
-    await_os_pid_absent(os_pid, deadline)
+
+    try do
+      case await_unready_terminal(port, deadline, parent_exited) do
+        {:ok, exited, native_reason} ->
+          reason =
+            if native_reason == :timeout, do: :timeout_during_setup, else: :cancelled_during_setup
+
+          finish_unready_failure(port, {:ok, exited}, os_pid, reason, deadline)
+
+        :unproved ->
+          finish_unready_failure(port, :unproved, os_pid, :teardown_timeout, deadline)
+      end
+    after
+      close_port(port)
+    end
+  end
+
+  defp await_unready_terminal(port, deadline, parent_exited) do
+    remaining = remaining_ms(deadline)
+
+    if remaining <= 0 do
+      cutoff = make_ref()
+      send(self(), {:unready_proof_cutoff, cutoff})
+      drain_unready_terminal(port, cutoff, parent_exited, :pending, false)
+    else
+      receive do
+        {^port, {:data, <<@ready, group_id::unsigned-big-64>>}} when group_id > 0 ->
+          await_unready_terminal(port, deadline, parent_exited)
+
+        {^port, {:data, <<@terminal, payload::binary>>}} ->
+          case unready_terminal_reason(payload) do
+            {:ok, reason} -> {:ok, parent_exited, reason}
+            :error -> :unproved
+          end
+
+        {^port, {:exit_status, 0}} ->
+          await_unready_terminal(port, deadline, true)
+
+        {:EXIT, ^port, :normal} ->
+          await_unready_terminal(port, deadline, parent_exited)
+
+        {:cancel_shell_execution, _cancel_id} ->
+          await_unready_terminal(port, deadline, parent_exited)
+
+        {^port, {:data, _payload}} ->
+          :unproved
+
+        {^port, {:exit_status, _status}} ->
+          :unproved
+
+        {:EXIT, ^port, _reason} ->
+          :unproved
+      after
+        remaining -> await_unready_terminal(port, deadline, parent_exited)
+      end
+    end
+  end
+
+  # Observe only the finite same-Port prefix already queued before this marker.
+  # Leave cancel controls unmatched; neither later messages nor a new wait can
+  # extend the cutoff. This does not attest signals still in transit or future events.
+  defp drain_unready_terminal(port, cutoff, parent_exited, native_reason, failed) do
+    receive do
+      {:unready_proof_cutoff, ^cutoff} ->
+        if not failed and native_reason in [:timeout, :cancelled],
+          do: {:ok, parent_exited, native_reason},
+          else: :unproved
+
+      {^port, {:data, <<@ready, group_id::unsigned-big-64>>}} when group_id > 0 ->
+        drain_unready_terminal(port, cutoff, parent_exited, native_reason, failed)
+
+      {^port, {:data, <<@terminal, payload::binary>>}} ->
+        case unready_terminal_reason(payload) do
+          {:ok, reason} when native_reason == :pending ->
+            drain_unready_terminal(port, cutoff, parent_exited, reason, failed)
+
+          _ ->
+            drain_unready_terminal(port, cutoff, parent_exited, native_reason, true)
+        end
+
+      {^port, {:exit_status, 0}} ->
+        drain_unready_terminal(port, cutoff, true, native_reason, failed)
+
+      {:EXIT, ^port, :normal} ->
+        drain_unready_terminal(port, cutoff, parent_exited, native_reason, failed)
+
+      {^port, {:data, _payload}} ->
+        drain_unready_terminal(port, cutoff, parent_exited, native_reason, true)
+
+      {^port, {:exit_status, _status}} ->
+        drain_unready_terminal(port, cutoff, parent_exited, native_reason, true)
+
+      {:EXIT, ^port, _reason} ->
+        drain_unready_terminal(port, cutoff, parent_exited, native_reason, true)
+    end
+  end
+
+  defp unready_terminal_reason(payload) do
+    case decode_terminal_payload(payload) do
+      {:ok, reason, 137, _meta} when reason in [:timeout, :cancelled] -> {:ok, reason}
+      _ -> :error
+    end
+  end
+
+  defp unready_os_pid(port) do
+    case Port.info(port, :os_pid) do
+      {:os_pid, pid} when is_integer(pid) and pid > 0 -> pid
+      _ -> nil
+    end
+  end
+
+  defp finish_unready_failure(port, proof, os_pid, original_reason) do
+    finish_unready_failure(
+      port,
+      proof,
+      os_pid,
+      original_reason,
+      System.monotonic_time(:millisecond) + @teardown_timeout_ms
+    )
+  end
+
+  defp finish_unready_failure(port, proof, os_pid, original_reason, deadline) do
+    # A closing collector passes its existing deadline; never start a second read budget.
+    try do
+      parent_exit =
+        case proof do
+          {:ok, true} ->
+            if await_unready_parent_exit(port, System.monotonic_time(:millisecond)) == :failed,
+              do: :unproved,
+              else: :ok
+
+          {:ok, false} ->
+            case await_unready_parent_exit(port, System.monotonic_time(:millisecond)) do
+              :ok ->
+                :ok
+
+              :failed ->
+                :unproved
+
+              :pending ->
+                absent =
+                  if is_integer(os_pid),
+                    do: await_os_pid_absent(os_pid, deadline),
+                    else: :unproved
+
+                cutoff = if absent == :ok, do: System.monotonic_time(:millisecond), else: deadline
+
+                case await_unready_parent_exit(port, cutoff) do
+                  :ok -> :ok
+                  :failed -> :unproved
+                  :pending -> absent
+                end
+            end
+
+          _ ->
+            :unproved
+        end
+
+      if match?({:ok, _}, proof) and parent_exit == :ok,
+        do: {:error, original_reason},
+        else: {:error, :teardown_timeout, :exhaustion_unproved}
+    after
+      close_port(port)
+    end
+  end
+
+  defp await_unready_parent_exit(port, deadline) do
+    await_unready_parent_exit(port, deadline, :pending)
+  end
+
+  defp await_unready_parent_exit(port, deadline, status) do
+    # Only after valid TERM: status 0 proves OS exit; normal Port EXIT does not.
+    # Drain queued negatives before accepting any proof; a failure stays sticky.
+    remaining = remaining_ms(deadline)
+
+    if remaining <= 0 do
+      cutoff = make_ref()
+      send(self(), {:unready_proof_cutoff, cutoff})
+      drain_unready_parent_exit(port, cutoff, status)
+    else
+      receive do
+        {^port, {:exit_status, 0}} ->
+          result = if status == :failed, do: :failed, else: :ok
+          await_unready_parent_exit(port, System.monotonic_time(:millisecond), result)
+
+        {^port, {:exit_status, _status}} ->
+          await_unready_parent_exit(port, System.monotonic_time(:millisecond), :failed)
+
+        {:EXIT, ^port, :normal} ->
+          await_unready_parent_exit(port, deadline, status)
+
+        {:EXIT, ^port, _reason} ->
+          await_unready_parent_exit(port, System.monotonic_time(:millisecond), :failed)
+
+        {^port, {:data, _payload}} ->
+          await_unready_parent_exit(port, System.monotonic_time(:millisecond), :failed)
+      after
+        remaining -> await_unready_parent_exit(port, deadline, status)
+      end
+    end
+  end
+
+  defp drain_unready_parent_exit(port, cutoff, status) do
+    receive do
+      {:unready_proof_cutoff, ^cutoff} ->
+        status
+
+      {^port, {:exit_status, 0}} ->
+        result = if status == :failed, do: :failed, else: :ok
+        drain_unready_parent_exit(port, cutoff, result)
+
+      {^port, {:exit_status, _status}} ->
+        drain_unready_parent_exit(port, cutoff, :failed)
+
+      {:EXIT, ^port, :normal} ->
+        drain_unready_parent_exit(port, cutoff, status)
+
+      {:EXIT, ^port, _reason} ->
+        drain_unready_parent_exit(port, cutoff, :failed)
+
+      {^port, {:data, _payload}} ->
+        drain_unready_parent_exit(port, cutoff, :failed)
+    end
   end
 
   defp await_os_pid_absent(os_pid, deadline) do
-    cond do
-      not os_pid_alive?(os_pid) ->
-        :ok
+    case System.cmd("/bin/ps", ["-p", Integer.to_string(os_pid), "-o", "stat="],
+           stderr_to_stdout: true
+         ) do
+      {output, 1} ->
+        if String.trim(output) == "", do: :ok, else: :unproved
 
-      System.monotonic_time(:millisecond) >= deadline ->
-        :ok
-
-      true ->
-        _ = signal_os_pid(os_pid)
-        Process.sleep(@cleanup_retry_ms)
-        await_os_pid_absent(os_pid, deadline)
-    end
-  end
-
-  defp signal_os_pid(pid) when is_integer(pid) and pid > 0 do
-    _ = System.cmd("kill", ["-KILL", Integer.to_string(pid)], stderr_to_stdout: true)
-    :ok
-  end
-
-  defp os_pid_alive?(pid) when is_integer(pid) and pid > 0 do
-    case System.cmd("ps", ["-p", Integer.to_string(pid), "-o", "stat="], stderr_to_stdout: true) do
-      {output, 0} ->
-        case output |> String.trim() |> String.first() do
-          nil -> false
-          "Z" -> false
-          _ -> true
+      {_output, 0} ->
+        # T and Z are both still present. Never signal an unfenced parent.
+        if System.monotonic_time(:millisecond) < deadline do
+          Process.sleep(@cleanup_retry_ms)
+          await_os_pid_absent(os_pid, deadline)
+        else
+          :unproved
         end
 
       _ ->
-        false
-    end
-  end
-
-  defp direct_child_pids(parent) when is_integer(parent) and parent > 0 do
-    case System.cmd("ps", ["-ax", "-o", "pid=,ppid="], stderr_to_stdout: true) do
-      {output, 0} ->
-        output
-        |> String.split("\n", trim: true)
-        |> Enum.flat_map(fn line ->
-          case String.split(line) do
-            [pid, ppid] ->
-              with {child, ""} <- Integer.parse(pid),
-                   {^parent, ""} <- Integer.parse(ppid),
-                   true <- child > 0 do
-                [child]
-              else
-                _ -> []
-              end
-
-            _ ->
-              []
-          end
-        end)
-
-      _ ->
-        []
+        :unproved
     end
   end
 

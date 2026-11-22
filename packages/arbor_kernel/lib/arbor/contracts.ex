@@ -34,6 +34,7 @@ defmodule Arbor.Contracts do
       Arbor.Contracts.Coding.CanonicalJson,
       Arbor.Contracts.Coding.SourceInventory,
       Arbor.Contracts.Extension.Envelope,
+      Arbor.Contracts.Feature,
       Arbor.Contracts.Persistence.AppendOperation,
       Arbor.Contracts.Persistence.Filter,
       Arbor.Contracts.Persistence.Record,
@@ -45,6 +46,7 @@ defmodule Arbor.Contracts do
       Arbor.Contracts.Persistence.VectorRecord,
       Arbor.Contracts.Persistence.VectorValidation,
       Arbor.Contracts.Security.Classification,
+      Arbor.Contracts.Security.Sanitizer,
       Arbor.Contracts.Security.Taint,
       Arbor.Contracts.Security.TaintEnvelope,
       Arbor.Contracts.Security.TaintedValue

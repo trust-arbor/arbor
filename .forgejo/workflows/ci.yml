@@ -165,7 +165,7 @@ jobs:
       - name: Extracted package construction checks
         run: |
           ./bin/mix run --no-start -e '
-          Enum.each(~w(arbor_kernel arbor_support arbor_oauth arbor_capabilities_oidc arbor_capabilities arbor_capabilities_signals arbor_signals arbor_persistence arbor_persistence_sql arbor_persistence_eventstore arbor_trust arbor_historian), fn package ->
+          Enum.each(~w(arbor_kernel arbor_support arbor_oauth arbor_capabilities_oidc arbor_capabilities arbor_capabilities_signals arbor_signals arbor_persistence arbor_persistence_sql arbor_persistence_eventstore arbor_trust arbor_historian arbor_llm), fn package ->
             case Arbor.Eval.Suites.LibraryConstruction.check_directory("packages/#{package}/lib/") do
               {:ok, %{passed: true} = result} ->
                 IO.puts("#{package}: #{result.files_checked} files checked")
@@ -213,7 +213,8 @@ jobs:
           set -euo pipefail
           CORE_DEPS_PATH="$PWD/deps"
           ./bin/mix test apps/arbor_actions/test/arbor/actions/invocation_audit_security_regression_test.exs apps/arbor_actions/test/arbor/actions/invocation_receipt_test.exs apps/arbor_actions/test/arbor/actions/shell_filesystem_containment_security_regression_test.exs apps/arbor_actions/test/arbor/actions/shell_authorizer_boot_config_security_regression_test.exs apps/arbor_actions/test/arbor/actions/skill_version_security_regression_test.exs apps/arbor_actions/test/arbor/actions/scheduler_descriptor_regression_test.exs --timeout 120000
-          ./bin/mix test apps/arbor_llm/test/arbor/llm/tool_loop_invocation_audit_security_regression_test.exs apps/arbor_llm/test/arbor/llm/execution_provider_identity_test.exs apps/arbor_llm/test/arbor/llm/stock_tool_transport_test.exs --timeout 120000
+          # The standalone LLM job owns the moved invocation-audit and provider-identity suites.
+          ./bin/mix test apps/arbor_orchestrator/test/arbor/llm/stock_tool_transport_test.exs --timeout 120000
           ./bin/mix test apps/arbor_ai/test/arbor/ai/acp_session/handler_store_outage_security_regression_test.exs apps/arbor_ai/test/arbor/ai/skill_prompt_security_regression_test.exs --timeout 120000
           ./bin/mix test apps/arbor_agent/test/arbor/agent/eval/agent_task_precondition_security_regression_test.exs apps/arbor_agent/test/arbor/agent/skill_prompt_version_security_regression_test.exs --timeout 120000
           (cd packages/arbor_historian && MIX_DEPS_PATH="$CORE_DEPS_PATH" ../../bin/mix test test/arbor/historian/security_invocation_sink_test.exs test/arbor/historian/security_invocation_durability_security_regression_test.exs --timeout 120000)
@@ -457,12 +458,92 @@ jobs:
           ../../bin/mix compile --warnings-as-errors
           ../../bin/mix test --timeout 120000
 
+  # The active LLM package owns its full hermetic suite. Umbrella discovery only
+  # exercises its passive Host and the product integrations above.
+  llm_package:
+    name: Standalone LLM
+    runs-on: native
+    env:
+      MIX_ENV: test
+      ARBOR_KERNEL_PATH: ${{ github.workspace }}/packages/arbor_kernel
+      ARBOR_SUPPORT_PATH: ${{ github.workspace }}/packages/arbor_support
+      ARBOR_OAUTH_PATH: ${{ github.workspace }}/packages/arbor_oauth
+      ARBOR_SIGNALS_PATH: ${{ github.workspace }}/packages/arbor_signals
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up toolchain
+        run: |
+          mise install
+          echo "$HOME/.local/share/mise/shims" >> "$GITHUB_PATH"
+          command -v cc
+      - name: Resolve committed public package closure
+        working-directory: packages/arbor_llm
+        run: ../../bin/mix deps.get --check-locked
+      - name: Fresh strict compile and complete hermetic owning suite
+        working-directory: packages/arbor_llm
+        run: |
+          set -euo pipefail
+          state="$(mktemp -d "${TMPDIR:-/tmp}/arbor-llm-owning.XXXXXX")"
+          state="$(cd "$state" && pwd -P)"
+          export LLM_CI_STATE_ROOT="$state"
+          export MIX_BUILD_PATH="$state/_build/test"
+          export ARBOR_HOME="$state/home" ARBOR_DATA_DIR="$state/data" TMPDIR="$state/tmp"
+          export CODEX_HOME="$state/cli/codex" CLAUDE_CONFIG_DIR="$state/cli/claude"
+          export XDG_CONFIG_HOME="$state/cli/config" XDG_CACHE_HOME="$state/cli/cache" XDG_DATA_HOME="$state/cli/data"
+          mkdir -p "$ARBOR_HOME" "$ARBOR_DATA_DIR" "$TMPDIR" "$state/oauth" "$state/disclosure" "$CODEX_HOME" "$state/cli/grok"
+          touch "$state/empty.env"
+          export ARBOR_ENV_PATH="$state/empty.env"
+          ../../bin/mix compile --warnings-as-errors
+          ../../bin/mix run --no-start --no-compile -e '
+          root = System.fetch_env!("LLM_CI_STATE_ROOT")
+          Application.put_env(:arbor_llm, :oauth_store_dir, Path.join(root, "oauth"))
+          Application.put_env(:arbor_llm, :oauth_source_files, %{openai: Path.join(root, "cli/codex/auth.json")})
+          Application.put_env(:arbor_llm, :oauth_cli_files, %{openai: Path.join(root, "cli/codex/auth.json"), xai: Path.join(root, "cli/grok/auth.json")})
+          Application.put_env(:arbor_llm, :opencode_zen_acknowledgement_path, Path.join(root, "disclosure/ack.json"))
+          Application.put_env(:arbor_llm, :trusted_proxy_endpoints, %{})
+          Application.put_env(:arbor_llm, :discover_local_providers, false)
+          for provider <- Arbor.LLM.ProviderRegistry.list_cloud() do
+            case Arbor.LLM.ProviderRegistry.default_env_key(provider) do
+              key when is_binary(key) -> System.delete_env(key)
+              _ -> :ok
+            end
+            case Arbor.LLM.ProviderRegistry.req_llm_atom(provider) do
+              atom when is_atom(atom) and atom not in [nil, true, false] ->
+                Application.delete_env(:req_llm, ReqLLM.Keys.config_key(atom))
+              _ -> :ok
+            end
+          end
+          System.delete_env("UNIFIED_LLM_DEFAULT_PROVIDER")
+          System.delete_env("UNIFIED_LLM_DEFAULT_MODEL")
+          {:ok, socket} = :socket.open(:inet, :stream, :tcp)
+          :ok = :socket.bind(socket, %{family: :inet, addr: {127, 0, 0, 1}, port: 0})
+          {:ok, %{port: port}} = :socket.sockname(socket)
+          url = "http://127.0.0.1:#{port}/v1"
+          for provider <- [:lm_studio, :ollama], do: Application.put_env(:arbor_llm, provider, base_url: url)
+          Application.put_env(:arbor_llm, :lm_studio_base_url, url)
+          try do
+            Mix.Task.run("test", ["--no-compile", "--seed", "0", "--timeout", "120000", "--exclude", "llm_local"])
+          after
+            :socket.close(socket)
+          end'
+          for package in arbor_kernel arbor_support arbor_oauth arbor_signals arbor_llm; do
+            test -f "$MIX_BUILD_PATH/lib/$package/ebin/$package.app"
+          done
+          for path in "$MIX_BUILD_PATH"/lib/arbor_*; do
+            case "${path##*/}" in
+              arbor_kernel|arbor_support|arbor_oauth|arbor_signals|arbor_llm) ;;
+              *) echo "Unexpected first-party dependency: $path" >&2; exit 1 ;;
+            esac
+          done
+
   # Safety primitives and their C reader compile in their standalone owner.
   support:
     name: Standalone safety support
     runs-on: native
     env:
       MIX_ENV: test
+      ARBOR_KERNEL_PATH: ${{ github.workspace }}/packages/arbor_kernel
 
     steps:
       - name: Checkout
@@ -894,6 +975,34 @@ jobs:
 
       - name: Run LLM tests
         run: mix test --only llm --include llm_local --include integration_lm_studio --timeout 600000
+
+      - name: Run standalone LLM backend smoke tests
+        working-directory: packages/arbor_llm
+        env:
+          MIX_DEPS_PATH: ${{ github.workspace }}/deps
+          ARBOR_KERNEL_PATH: ${{ github.workspace }}/packages/arbor_kernel
+          ARBOR_SUPPORT_PATH: ${{ github.workspace }}/packages/arbor_support
+          ARBOR_OAUTH_PATH: ${{ github.workspace }}/packages/arbor_oauth
+          ARBOR_SIGNALS_PATH: ${{ github.workspace }}/packages/arbor_signals
+        run: |
+          set -euo pipefail
+          ../../bin/mix deps.get --check-locked
+          state="$(mktemp -d "${TMPDIR:-/tmp}/arbor-llm-backend.XXXXXX")"
+          state="$(cd "$state" && pwd -P)"
+          export LLM_CI_STATE_ROOT="$state"
+          export ARBOR_HOME="$state/home" ARBOR_DATA_DIR="$state/data" TMPDIR="$state/tmp"
+          export CODEX_HOME="$state/cli/codex" CLAUDE_CONFIG_DIR="$state/cli/claude"
+          export XDG_CONFIG_HOME="$state/cli/config" XDG_CACHE_HOME="$state/cli/cache" XDG_DATA_HOME="$state/cli/data"
+          mkdir -p "$ARBOR_HOME" "$ARBOR_DATA_DIR" "$TMPDIR" "$state/oauth" "$state/disclosure" "$CODEX_HOME" "$state/cli/grok"
+          touch "$state/empty.env"
+          export ARBOR_ENV_PATH="$state/empty.env"
+          ../../bin/mix run --no-start -e '
+          root = System.fetch_env!("LLM_CI_STATE_ROOT")
+          Application.put_env(:arbor_llm, :oauth_store_dir, Path.join(root, "oauth"))
+          Application.put_env(:arbor_llm, :oauth_source_files, %{openai: Path.join(root, "cli/codex/auth.json")})
+          Application.put_env(:arbor_llm, :oauth_cli_files, %{openai: Path.join(root, "cli/codex/auth.json"), xai: Path.join(root, "cli/grok/auth.json")})
+          Application.put_env(:arbor_llm, :opencode_zen_acknowledgement_path, Path.join(root, "disclosure/ack.json"))
+          Mix.Task.run("test", ["--only", "llm", "--include", "llm_local", "--include", "integration_lm_studio", "--timeout", "600000"])'
 
   # ── Experimental tracking lane (allowed to fail) ────────────────────────────
   # Does Arbor build & test on the NEXT Erlang/Elixir generation? This lane

@@ -36,7 +36,7 @@ defmodule Arbor.Orchestrator.TDDCycleExampleTest do
 
   setup_all do
     # See hello_world_example_test.exs for why each of these is needed.
-    Application.put_env(:arbor_orchestrator, :discover_local_providers, true)
+    Application.put_env(:arbor_llm, :discover_local_providers, true)
     Arbor.LLM.Client.clear_default_client()
 
     case Process.whereis(Arbor.Security.Identity.Registry) do

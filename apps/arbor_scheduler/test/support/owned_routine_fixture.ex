@@ -18,8 +18,23 @@ defmodule Arbor.Scheduler.Test.OwnedRoutineFixture do
   # where the new routine APIs are intentionally absent. Runtime apply keeps
   # compilation strict while exercising the same actual APIs on the candidate.
   @oban Arbor.Scheduler.Test.OwnedRoutineOban
+  @run_journal Arbor.Scheduler.Test.OwnedRoutineRunJournal
   @dot Path.expand("../../priv/pipelines/morning_digest.dot", __DIR__)
   @migrations Path.expand("../../../arbor_persistence_host/priv/repo/migrations", __DIR__)
+
+  # Only the journal selection is private to the SQL owner. Credentials,
+  # options and result classification still reach the real secure API.
+  defmodule SQLJournalOrchestrator do
+    def run_file_as(path, principal, credential, opts) do
+      journal = Application.fetch_env!(:arbor_scheduler, :_owned_routine_journal)
+      opts = Keyword.put(opts, :journal_opts, server: journal)
+      apply(Arbor.Orchestrator, :run_file_as, [path, principal, credential, opts])
+    end
+
+    def classify_run_result(result) do
+      apply(Arbor.Orchestrator, :classify_run_result, [result])
+    end
+  end
 
   # Observation-only test boundary. Every invocation still reaches the actual
   # public Scheduler gate after the pause. It cannot authorize an effect itself.
@@ -87,11 +102,30 @@ defmodule Arbor.Scheduler.Test.OwnedRoutineFixture do
     end
   end
 
+  defp start_sql_owner_journal! do
+    opts = Application.get_env(:arbor_orchestrator, :run_journal, [])
+    assert Keyword.keyword?(opts)
+
+    assert Keyword.get(opts, :backend) == nil,
+           "OwnedRoutineFixture needs an independently owned backend before testing a backed journal"
+
+    assert Process.whereis(@run_journal) == nil,
+           "OwnedRoutineFixture may not reuse another SQL owner's journal"
+
+    opts =
+      opts
+      |> Keyword.put(:name, @run_journal)
+      |> Keyword.put(:ets_table, make_ref())
+
+    start_supervised!({Arbor.Orchestrator.RunJournal, opts})
+  end
+
   def start_sql! do
     assert Process.whereis(Repo) == nil,
            "Run the owned Scheduler SQLite journey standalone; it may not reuse another Repo"
 
     assert {:ok, _} = Application.ensure_all_started(:arbor_orchestrator)
+    journal = start_sql_owner_journal!()
 
     root =
       Path.join(System.tmp_dir!(), "arbor_owned_scheduler_#{System.unique_integer([:positive])}")
@@ -137,7 +171,7 @@ defmodule Arbor.Scheduler.Test.OwnedRoutineFixture do
       File.rm_rf!(root)
     end)
 
-    %{sql_root: root, repo_supervisor: supervisor}
+    %{sql_root: root, repo_supervisor: supervisor, run_journal: journal}
   end
 
   # This opt-in lane owns a newly created database on a disposable test server.
@@ -147,6 +181,7 @@ defmodule Arbor.Scheduler.Test.OwnedRoutineFixture do
     assert apply(Repo, :__adapter__, []) == Postgres
     assert Process.whereis(Repo) == nil
     assert {:ok, _} = Application.ensure_all_started(:arbor_orchestrator)
+    journal = start_sql_owner_journal!()
 
     name = "arbor_owned_scheduler_#{System.unique_integer([:positive])}"
     root = Path.join(System.tmp_dir!(), name)
@@ -190,6 +225,7 @@ defmodule Arbor.Scheduler.Test.OwnedRoutineFixture do
     %{
       sql_root: root,
       repo_supervisor: supervisor,
+      run_journal: journal,
       oban_engine: Oban.Engines.Basic,
       oban_prefix: "public",
       oban_testing: :disabled
@@ -214,7 +250,8 @@ defmodule Arbor.Scheduler.Test.OwnedRoutineFixture do
 
     for {app, key, value} <- [
           {:arbor_scheduler, :oban_name, @oban},
-          {:arbor_scheduler, :orchestrator_module, Arbor.Orchestrator},
+          {:arbor_scheduler, :orchestrator_module, SQLJournalOrchestrator},
+          {:arbor_scheduler, :_owned_routine_journal, Map.fetch!(ctx, :run_journal)},
           {:arbor_scheduler, :pipeline_roots, %{"owned_test" => pipelines}},
           {:arbor_scheduler, :morning_digest_pipeline, dot},
           {:arbor_scheduler, :routine_logs_root, Path.join(workdir, "logs")},

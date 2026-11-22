@@ -32,18 +32,23 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerProviderFallbackTest do
   end
 
   @env_keys [
-    :llm_dispatcher,
     :llm_provider_availability,
     :llm_fallback_providers,
     :llm_provider_fallbacks
   ]
 
   setup do
+    previous_dispatcher = Application.fetch_env(:arbor_llm, :llm_dispatcher)
     previous = Map.new(@env_keys, &{&1, Application.get_env(:arbor_orchestrator, &1)})
     {:ok, _} = RecordingDispatcher.start_link()
-    Application.put_env(:arbor_orchestrator, :llm_dispatcher, RecordingDispatcher)
+    Application.put_env(:arbor_llm, :llm_dispatcher, RecordingDispatcher)
 
     on_exit(fn ->
+      case previous_dispatcher do
+        {:ok, dispatcher} -> Application.put_env(:arbor_llm, :llm_dispatcher, dispatcher)
+        :error -> Application.delete_env(:arbor_llm, :llm_dispatcher)
+      end
+
       Enum.each(previous, fn
         {k, nil} -> Application.delete_env(:arbor_orchestrator, k)
         {k, v} -> Application.put_env(:arbor_orchestrator, k, v)

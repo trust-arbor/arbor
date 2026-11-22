@@ -98,7 +98,7 @@ defmodule Arbor.Orchestrator.SessionSecurityQualificationAdmissionTest do
     journal_supervisor = durable_journal!(Path.join(root, "authority-journal"))
 
     endpoint = metadata_server!()
-    set_env(:arbor_orchestrator, :lm_studio, base_url: endpoint <> "/v1")
+    set_env(:arbor_llm, :lm_studio, base_url: endpoint <> "/v1")
     set_env(:arbor_llm, :lm_studio_base_url, endpoint <> "/v1")
 
     previous_client = Client.default_client()

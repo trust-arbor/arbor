@@ -55,6 +55,8 @@ defmodule Arbor.MixProject do
        path: "packages/arbor_trust", runtime: false, env: Mix.env(), override: true},
       {:arbor_historian, "~> 0.1.0",
        path: "packages/arbor_historian", runtime: false, env: Mix.env(), override: true},
+      {:arbor_llm, "~> 0.1.0",
+       path: "packages/arbor_llm", runtime: false, env: Mix.env(), override: true},
       {:arbor_persistence, path: "packages/arbor_persistence", env: Mix.env(), override: true},
       {:arbor_persistence_sql,
        path: "packages/arbor_persistence_sql", env: Mix.env(), override: true},

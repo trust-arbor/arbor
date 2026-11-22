@@ -99,7 +99,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerRequiredPolicySecurityRegression
       {:arbor_orchestrator, :_policy_retry, false},
       {:arbor_orchestrator, :_native_provider, "sensitivity_remote"},
       {:arbor_orchestrator, :sensitivity_routing_module, Arbor.AI},
-      {:arbor_orchestrator, :llm_dispatcher, Arbor.AI.Runtime.Dispatch},
+      {:arbor_llm, :llm_dispatcher, Arbor.AI.Runtime.Dispatch},
       {:arbor_orchestrator, :llm_provider_availability, fn _ -> true end},
       {:arbor_orchestrator, :llm_provider_fallbacks, %{}},
       {:arbor_orchestrator, :llm_fallback_providers, []},
@@ -229,13 +229,13 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerRequiredPolicySecurityRegression
   end
 
   test "security regression: native route also requires final sensitivity permission" do
-    Application.put_env(:arbor_orchestrator, :llm_dispatcher, NativeDispatcher)
+    Application.put_env(:arbor_llm, :llm_dispatcher, NativeDispatcher)
     assert_refused(execute(:direct))
     refute_received {:native_called, _}
   end
 
   test "permitted native route preserves the existing Session callback" do
-    Application.put_env(:arbor_orchestrator, :llm_dispatcher, NativeDispatcher)
+    Application.put_env(:arbor_llm, :llm_dispatcher, NativeDispatcher)
     Application.put_env(:arbor_orchestrator, :_native_provider, "sensitivity_local")
     outcome = execute(:direct)
     assert outcome.status == :success, inspect(outcome)
@@ -244,7 +244,7 @@ defmodule Arbor.Orchestrator.Handlers.LlmHandlerRequiredPolicySecurityRegression
   end
 
   test "security regression: malformed existing route callback cannot become permission" do
-    Application.put_env(:arbor_orchestrator, :llm_dispatcher, NativeDispatcher)
+    Application.put_env(:arbor_llm, :llm_dispatcher, NativeDispatcher)
     Application.put_env(:arbor_capabilities, :egress_gate_enforcing, false)
     outcome = execute(:ordinary, [], :confidential, nil, route_authorizer: :malformed)
     assert_refused(outcome)

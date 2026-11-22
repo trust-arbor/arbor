@@ -1,4 +1,5 @@
 Code.require_file("trusted_build_test_helpers.exs", __DIR__)
+Code.require_file("owned_native_test_observer.exs", __DIR__)
 
 defmodule Arbor.Shell.TrustedBuildUnavailableTest do
   use ExUnit.Case, async: false
@@ -7,6 +8,13 @@ defmodule Arbor.Shell.TrustedBuildUnavailableTest do
 
   alias Arbor.Shell
   alias Arbor.Shell.TrustedBuildTestHelpers, as: Helpers
+  alias Arbor.Shell.OwnedNativeTestObserver, as: NativeObserver
+
+  setup do
+    NativeObserver.start!(__MODULE__, self())
+    on_exit(fn -> NativeObserver.stop!(__MODULE__) end)
+    :ok
+  end
 
   test "non-Darwin acquire does not execute the wrapper" do
     if match?({:unix, :darwin}, :os.type()) do
@@ -104,16 +112,5 @@ defmodule Arbor.Shell.TrustedBuildUnavailableTest do
     Enum.any?(os_processes(), &String.contains?(&1.command, "arbor_shell_launcher trusted-build"))
   end
 
-  defp os_processes do
-    {output, 0} = System.cmd("ps", ["-ax", "-o", "pid=,command="])
-
-    output
-    |> String.split("\n", trim: true)
-    |> Enum.map(fn line ->
-      case String.split(String.trim(line), " ", parts: 2) do
-        [pid, command] -> %{pid: pid, command: command}
-        _other -> %{pid: "", command: line}
-      end
-    end)
-  end
+  defp os_processes, do: NativeObserver.processes(__MODULE__)
 end

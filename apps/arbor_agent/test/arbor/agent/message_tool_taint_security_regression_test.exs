@@ -145,6 +145,7 @@ defmodule Arbor.Agent.MessageToolTaintSecurityRegressionTest do
   end
 
   setup do
+    :ok = Arbor.LLM.TestSupport.SensitivityFixture.register_guarded_adapters([ScriptedAdapter])
     ensure_security_children!()
     ensure_identity_alias_store!()
     registry_started_here? = ensure_action_registry!()

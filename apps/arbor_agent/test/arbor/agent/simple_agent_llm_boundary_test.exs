@@ -235,7 +235,14 @@ defmodule Arbor.Agent.SimpleAgentLLMBoundaryTest do
     SimpleAgent.run(
       "Test task",
       Keyword.merge(
-        [provider: :simple_agent_boundary, model: model, context_management: :none, tools: []],
+        [
+          provider: :simple_agent_boundary,
+          model: model,
+          context_management: :none,
+          tools: [],
+          # Keep the default prompt independent of a private checkout path.
+          working_dir: "/fixture"
+        ],
         opts
       )
     )

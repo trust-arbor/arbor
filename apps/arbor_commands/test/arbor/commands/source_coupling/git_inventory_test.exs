@@ -28,6 +28,102 @@ defmodule Arbor.Commands.SourceCoupling.GitInventoryTest do
   end
 
   describe "load_selected_blobs/3 provenance" do
+    test "exact extra sources retain their index provenance without selecting neighboring sources" do
+      tree_oid = String.duplicate("a", 40)
+      blob_oid = String.duplicate("b", 40)
+      shell_path = "apps/arbor_shell/lib/shell.ex"
+      extra_path = "apps/arbor_commands/lib/mix/tasks/arbor.login.ex"
+
+      staged = [
+        "100644 #{blob_oid} 0\t#{shell_path}",
+        "100644 #{blob_oid} 0\t#{extra_path}",
+        "100644 #{blob_oid} 0\tapps/arbor_commands/lib/mix/tasks/arbor.login_extra.ex",
+        "100644 #{blob_oid} 0\tapps/arbor_commands/lib/mix/tasks/arbor.login.ex.extra.ex"
+      ]
+
+      assert {:ok, default} =
+               GitInventory.load_selected_blobs("/tmp", ["arbor_shell"],
+                 run_git: stub_git(tree_oid, staged)
+               )
+
+      assert Enum.map(default.files, & &1.path) == [shell_path]
+
+      assert {:ok, selected} =
+               GitInventory.load_selected_blobs("/tmp", ["arbor_shell"],
+                 extra_paths: [extra_path],
+                 run_git: stub_git(tree_oid, staged)
+               )
+
+      assert Enum.sort(Enum.map(selected.files, & &1.path)) == Enum.sort([shell_path, extra_path])
+      assert Enum.all?(selected.files, &(&1.blob_oid == blob_oid and &1.bytes == "xxxxxxxx"))
+
+      assert {:ok, expected_digest} =
+               GitInventory.selected_index_digest([
+                 {shell_path, "100644", blob_oid},
+                 {extra_path, "100644", blob_oid}
+               ])
+
+      assert selected.selected_index_digest == expected_digest
+      refute selected.selected_index_digest == default.selected_index_digest
+    end
+
+    test "extra sources pass the same stage mode and object admission as whole selected apps" do
+      tree_oid = String.duplicate("a", 40)
+      blob_oid = String.duplicate("b", 40)
+      path = "apps/arbor_orchestrator/lib/arbor/llm/arbor_actions_executor.ex"
+
+      for {stage_line, expected} <- [
+            {"100644 abc 0\t#{path}", {:error, {:invalid_oid, "abc"}}},
+            {"100644 #{blob_oid} 2\t#{path}", {:error, {:unsupported_selected_stage, path, 2}}},
+            {"120000 #{blob_oid} 0\t#{path}",
+             {:error, {:unsupported_selected_mode, "120000", path}}},
+            {"160000 #{blob_oid} 0\t#{path}",
+             {:error, {:unsupported_selected_mode, "160000", path}}}
+          ] do
+        assert ^expected =
+                 GitInventory.load_selected_blobs("/tmp", ["arbor_shell"],
+                   extra_paths: [path],
+                   run_git: stub_git(tree_oid, [stage_line])
+                 )
+      end
+    end
+
+    test "invalid or unbounded extra source selections are refused before git executes" do
+      run_git = fn _root, _args, _stdin -> flunk("git must not run for invalid extra paths") end
+      path = "apps/arbor_commands/lib/mix/tasks/arbor.login.ex"
+
+      for extra_paths <- [
+            nil,
+            %{},
+            [path | :improper],
+            ["../apps/arbor_commands/lib/escape.ex"],
+            ["apps/arbor_commands/lib/../lib/escape.ex"],
+            ["apps/arbor_commands/test/source.ex"],
+            ["apps/arbor_commands/lib/source.exs"],
+            ["apps/arbor_integrations/lib/source.ex"],
+            ["apps/arbor_commands/lib/*.ex"],
+            ["apps/arbor_commands/lib/" <> String.duplicate("x", 4_097) <> ".ex"]
+          ] do
+        assert {:error, :invalid_extra_paths} =
+                 GitInventory.load_selected_blobs("/tmp", ["arbor_shell"],
+                   extra_paths: extra_paths,
+                   run_git: run_git
+                 )
+      end
+
+      assert {:error, :duplicate_extra_paths} =
+               GitInventory.load_selected_blobs("/tmp", ["arbor_shell"],
+                 extra_paths: [path, path],
+                 run_git: run_git
+               )
+
+      assert {:error, :extra_path_limit} =
+               GitInventory.load_selected_blobs("/tmp", ["arbor_shell"],
+                 extra_paths: Enum.map(1..257, &"apps/arbor_commands/lib/extra_#{&1}.ex"),
+                 run_git: run_git
+               )
+    end
+
     test "selected package bytes and digest remain bound to the staged source" do
       tree_oid = String.duplicate("a", 40)
       blob_oid = String.duplicate("b", 40)

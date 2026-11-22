@@ -99,11 +99,11 @@ runtime-false dependencies: 1 + the maximum dependency level. Libraries depend
 only on lower levels. Audited from each `mix.exs` on 2026-11-21.
 
 ```
-L0  arbor_kernel, arbor_custody, arbor_support, arbor_oauth, arbor_multimedia, arbor_persistence  (zero first-party deps)
-L1  arbor_signals, arbor_historian, arbor_capabilities_oidc, arbor_persistence_sql, arbor_persistence_eventstore
-L2  arbor_capabilities, arbor_cartographer, arbor_web
-L3  arbor_capabilities_signals, arbor_kernel_runtime, arbor_trust
-L4  arbor_llm, arbor_security
+L0  arbor_kernel, arbor_custody, arbor_oauth, arbor_multimedia, arbor_persistence  (zero first-party deps)
+L1  arbor_signals, arbor_support, arbor_capabilities_oidc, arbor_persistence_sql, arbor_persistence_eventstore
+L2  arbor_capabilities, arbor_historian, arbor_cartographer, arbor_web
+L3  arbor_capabilities_signals, arbor_kernel_runtime, arbor_llm, arbor_trust
+L4  arbor_llm_host, arbor_security
 L5  arbor_persistence_host, arbor_shell, arbor_sandbox
 L6  arbor_comms, arbor_historian_host, arbor_trust_host
 L7  arbor_ai, arbor_consensus, arbor_scheduler
@@ -117,7 +117,7 @@ L12 arbor_dashboard
 Notes (the levels are enforced by
 [dependency_hierarchy_test.exs](apps/arbor_commands/test/arbor/repo_guards/dependency_hierarchy_test.exs)):
 
-- **Kernel, Custody, Support, OAuth, Multimedia and Persistence are L0.** Kernel
+- **Kernel, Custody, OAuth, Multimedia and Persistence are L0.** Kernel
   holds only contracts two or more libraries share; the census enforces it.
   Other `Arbor.Contracts.*` modules live with their owner (2026-11-21). Kernel
   Runtime (L3) composes Common, Signals and Monitor after boot admission.

@@ -213,6 +213,9 @@ defmodule Arbor.KernelRuntime.ApplicationTest do
   end
 
   test "security regression: gate crash does not stop shared req" do
+    config_before = Map.new(@config_sections, &snapshot_section/1)
+    on_exit(fn -> restore_test_runtime(config_before) end)
+
     assert Process.whereis(Arbor.KernelRuntime.ProviderGate)
     assert req_started?()
 

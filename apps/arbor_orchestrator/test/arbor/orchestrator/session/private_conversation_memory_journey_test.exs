@@ -129,7 +129,7 @@ defmodule Arbor.Orchestrator.Session.PrivateConversationMemoryJourneyTest do
 
     endpoint = embedding_endpoint!()
     # ReqLLM endpoint ownership uses the canonical ProviderRegistry config.
-    set_env(:arbor_orchestrator, :lm_studio, base_url: endpoint.url)
+    set_env(:arbor_llm, :lm_studio, base_url: endpoint.url)
     set_env(:arbor_llm, :lm_studio_base_url, endpoint.url)
 
     config = [

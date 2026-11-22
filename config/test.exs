@@ -169,7 +169,8 @@ config :arbor_ai,
 # dispatch then run without any network. Tests that make a real call are
 # tagged :llm and run in the non-gating LLM lane.
 config :arbor_llm,
-  default_provider: System.get_env("UNIFIED_LLM_DEFAULT_PROVIDER") || "openrouter"
+  default_provider: System.get_env("UNIFIED_LLM_DEFAULT_PROVIDER") || "openrouter",
+  tool_invocation_auditor: :disabled
 
 config :arbor_consensus, start_children: false
 # The Coordinator's code default is now fail-closed (`require_authorizer: true`,
@@ -329,7 +330,7 @@ config :arbor_ai, embedding_test_fallback: true
 # `provider: :ollama` actually reach the server instead of falling back
 # to the non-LLM path. runtime.exs points the ollama base_url at that
 # endpoint; the HTTP probe in Client.from_env then registers the adapter.
-config :arbor_orchestrator,
+config :arbor_llm,
   discover_local_providers: System.get_env("ARBOR_OLLAMA_BASE_URL") not in [nil, ""]
 
 # Don't run the model-availability preflight at startup during tests (it would
