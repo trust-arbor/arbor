@@ -353,9 +353,7 @@ defmodule Arbor.Trust.CapabilityGrantOwnerSecurityRegressionTest do
     assert_received {:sync_failed, %{count: 1},
                      %{agent_id: ^agent_id, reason: :profile_updated, error: ^refusal}}
 
-    assert log =~ "were not revoked"
-    assert log =~ CapabilityGrantOwner.revocation_capability_uri()
-    assert %{revocation: :not_provisioned} = CapabilityGrantOwner.status(owner)
+    assert log =~ "were not all revoked"
   end
 
   test "security regression: a dormant owner never spends authority on a sync", %{target: target} do

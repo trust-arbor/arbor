@@ -4,15 +4,14 @@ defmodule Mix.Tasks.Arbor.Trust.GrantOwner do
 
       mix arbor.trust.grant_owner status
       mix arbor.trust.grant_owner provision --key-file /path/to/operator.arbor.key
-      mix arbor.trust.grant_owner provision-revocation --key-file /path/to/operator.arbor.key
 
-  `provision` grants the owner only its fixed grant capability, so it can mint.
-  `provision-revocation` adds `arbor://security/revoke/**`, so it can also take
-  back the capabilities it minted when a trust profile is tightened, deleted or
-  disabled. Without the second grant those capabilities stay in the store.
+  Provisioning grants the owner only its fixed mutation capability. The grant is
+  authorized by the operator key file's exact signed one-use request; private
+  key bytes never leave the Security key-file boundary.
 
-  Each grant is authorized by the operator key file's exact signed one-use
-  request; private key bytes never leave the Security key-file boundary.
+  The owner needs no second grant to take back what it minted when a trust
+  profile is tightened, deleted or disabled: the security kernel lets a granter
+  revoke its own grants.
   """
 
   use Mix.Task
@@ -33,26 +32,14 @@ defmodule Mix.Tasks.Arbor.Trust.GrantOwner do
         print_status(Arbor.Trust.capability_grant_owner_status())
 
       ["provision"] ->
-        provision(
-          Keyword.get(opts, :key_file),
-          Arbor.Trust.CapabilityGrantOwner.required_capability_uri()
-        )
-
-      ["provision-revocation"] ->
-        provision(
-          Keyword.get(opts, :key_file),
-          Arbor.Trust.CapabilityGrantOwner.revocation_capability_uri()
-        )
+        provision(Keyword.get(opts, :key_file))
 
       _ ->
-        Mix.raise(
-          "usage: mix arbor.trust.grant_owner status | provision --key-file PATH | " <>
-            "provision-revocation --key-file PATH"
-        )
+        Mix.raise("usage: mix arbor.trust.grant_owner status | provision --key-file PATH")
     end
   end
 
-  defp provision(path, resource) when is_binary(path) and path != "" do
+  defp provision(path) when is_binary(path) and path != "" do
     status = Arbor.Trust.capability_grant_owner_status()
 
     principal_id =
@@ -63,7 +50,7 @@ defmodule Mix.Tasks.Arbor.Trust.GrantOwner do
 
     grant_opts = [
       principal: principal_id,
-      resource: resource,
+      resource: Arbor.Trust.CapabilityGrantOwner.required_capability_uri(),
       delegation_depth: 0,
       metadata: %{source: :trust_grant_owner_operator_provisioning}
     ]
@@ -88,7 +75,7 @@ defmodule Mix.Tasks.Arbor.Trust.GrantOwner do
     end
   end
 
-  defp provision(_path, _resource), do: Mix.raise("provision requires --key-file PATH")
+  defp provision(_path), do: Mix.raise("provision requires --key-file PATH")
 
   defp restart_capability_grant_owner! do
     with {:ok, supervisor} <-
@@ -109,8 +96,6 @@ defmodule Mix.Tasks.Arbor.Trust.GrantOwner do
     Mix.shell().info("state: #{status.state}")
     Mix.shell().info("principal_id: #{status.principal_id || "unavailable"}")
     Mix.shell().info("required_capability: #{status.required_capability}")
-    Mix.shell().info("revocation_capability: #{status.revocation_capability}")
-    Mix.shell().info("revocation: #{status.revocation}")
 
     if status.reason do
       Mix.shell().info("reason: #{inspect(status.reason)}")

@@ -132,8 +132,10 @@ defmodule Arbor.Trust.PolicyEnforcer do
   when the profile was deleted or disabled. Capabilities granted any other way
   are never touched.
 
-  Requires a caller-owned Security signing authority in `:actor_authority`
-  that may revoke for the principal. Returns the number revoked.
+  Requires a caller-owned Security signing authority in `:actor_authority`.
+  That actor must have granted the capability or hold a revoke right for the
+  principal. Every stale capability is attempted; if any could not be revoked
+  the first such failure is returned. Otherwise returns the number revoked.
   """
   @spec sync_capabilities(String.t(), keyword()) :: {:ok, non_neg_integer()} | {:error, term()}
   def sync_capabilities(principal_id, opts \\ []) do
@@ -213,29 +215,30 @@ defmodule Arbor.Trust.PolicyEnforcer do
   defp normalize_minted_mode("auto"), do: :auto
   defp normalize_minted_mode(_mode), do: nil
 
+  # Every stale capability is attempted. One the actor may not revoke (it did
+  # not grant it and holds no revoke right) must not shield the rest, so the
+  # first failure is remembered and returned after the pass.
   defp revoke_stale_capabilities(stale_caps, principal_id, actor_authority) do
-    stale_caps
-    |> Enum.reduce_while({:ok, 0}, fn cap, {:ok, revoked} ->
-      case Arbor.Security.revoke(cap.id, actor_authority: actor_authority) do
-        :ok -> {:cont, {:ok, revoked + 1}}
-        {:error, reason} -> {:halt, {:error, {:capability_revocation_failed, cap.id, reason}}}
-        other -> {:halt, {:error, {:capability_revocation_failed, cap.id, other}}}
-      end
-    end)
-    |> case do
-      {:ok, revoked} ->
-        if revoked > 0 do
-          Logger.info(
-            "[Trust.PolicyEnforcer] Revoked #{revoked} stale capabilities for #{principal_id}",
-            principal_id: principal_id,
-            revoked: revoked
-          )
+    {revoked, first_failure} =
+      Enum.reduce(stale_caps, {0, nil}, fn cap, {revoked, first_failure} ->
+        case Arbor.Security.revoke(cap.id, actor_authority: actor_authority) do
+          :ok -> {revoked + 1, first_failure}
+          {:error, reason} -> {revoked, first_failure || {cap.id, reason}}
+          other -> {revoked, first_failure || {cap.id, other}}
         end
+      end)
 
-        {:ok, revoked}
+    if revoked > 0 do
+      Logger.info(
+        "[Trust.PolicyEnforcer] Revoked #{revoked} stale capabilities for #{principal_id}",
+        principal_id: principal_id,
+        revoked: revoked
+      )
+    end
 
-      {:error, _reason} = error ->
-        error
+    case first_failure do
+      nil -> {:ok, revoked}
+      {cap_id, reason} -> {:error, {:capability_revocation_failed, cap_id, reason}}
     end
   end
 

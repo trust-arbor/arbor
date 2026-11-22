@@ -424,6 +424,95 @@ defmodule Arbor.Security.AuthorityMutationSecurityRegressionTest do
              Security.revoke(existing.id, actor_authority: authority)
   end
 
+  describe "a granter revoking its own grant" do
+    # Rule added 2026-11-22 so the Trust grant owner can take back what it
+    # minted without holding `arbor://security/revoke/**`.
+    setup do
+      {:ok, granter} = Identity.generate(name: "granter-revocation-granter")
+      {:ok, target} = Identity.generate(name: "granter-revocation-target")
+      {:ok, stranger} = Identity.generate(name: "granter-revocation-stranger")
+      :ok = Registry.register_fixture(granter)
+      :ok = Registry.register_fixture(target)
+      :ok = Registry.register_fixture(stranger)
+
+      # The granter may grant to the target. It holds no revoke right at all.
+      {:ok, _} =
+        Security.grant_fixture(
+          principal: granter.agent_id,
+          resource: "arbor://security/grant/#{target.agent_id}"
+        )
+
+      {:ok, granter_authority} = open_authority(granter)
+
+      {:ok, granted} =
+        Security.grant(
+          principal: target.agent_id,
+          resource: "arbor://fs/read/granter-revocation",
+          session_id: "session-granter-revocation",
+          actor_authority: granter_authority
+        )
+
+      on_exit(fn ->
+        Security.revoke_all_fixture(target.agent_id)
+        Security.revoke_all_fixture(granter.agent_id)
+      end)
+
+      %{
+        granter: granter,
+        target: target,
+        stranger: stranger,
+        granter_authority: granter_authority,
+        granted: granted
+      }
+    end
+
+    test "the granter revokes the exact capability it granted", ctx do
+      assert ctx.granted.metadata["granter_id"] == ctx.granter.agent_id
+      assert :ok = Security.revoke(ctx.granted.id, actor_authority: ctx.granter_authority)
+      assert {:error, :not_found} = Security.get_capability_fixture(ctx.granted.id)
+    end
+
+    test "security regression: the granter cannot revoke a capability someone else granted",
+         ctx do
+      {:ok, other} =
+        Security.grant_fixture(
+          principal: ctx.target.agent_id,
+          resource: "arbor://fs/read/granter-revocation-other"
+        )
+
+      assert {:error, :capability_revocation_unauthorized} =
+               Security.revoke(other.id, actor_authority: ctx.granter_authority)
+
+      assert {:ok, _still_there} = Security.get_capability_fixture(other.id)
+    end
+
+    test "security regression: nobody else gains the right, the holder included", ctx do
+      {:ok, stranger_authority} = open_authority(ctx.stranger)
+      {:ok, target_authority} = open_authority(ctx.target)
+
+      for authority <- [stranger_authority, target_authority] do
+        assert {:error, :capability_revocation_unauthorized} =
+                 Security.revoke(ctx.granted.id, actor_authority: authority)
+      end
+
+      assert {:ok, _still_there} = Security.get_capability_fixture(ctx.granted.id)
+    end
+
+    test "security regression: the rule does not reach bulk, cascade or scope revocation", ctx do
+      authority = ctx.granter_authority
+
+      assert {:error, :capability_revocation_unauthorized} =
+               Security.revoke_all(ctx.target.agent_id, actor_authority: authority)
+
+      assert {:error, :capability_revocation_unauthorized} =
+               Security.revoke_by_session("session-granter-revocation",
+                 actor_authority: authority
+               )
+
+      assert {:ok, _still_there} = Security.get_capability_fixture(ctx.granted.id)
+    end
+  end
+
   test "security regression: an exact signed mutation request is bound and one-use" do
     {:ok, actor} = Identity.generate(name: "signed-mutation-security-actor")
     {:ok, target} = Identity.generate(name: "signed-mutation-security-target")

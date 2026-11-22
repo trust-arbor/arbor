@@ -2443,21 +2443,51 @@ defmodule Arbor.Security.SystemAuthority do
     end
   end
 
-  # The general revoke right first; otherwise an agent may revoke only its own
-  # disclosure capability, under the same narrow right that let it mint one.
-  # The attestation still names the canonical revoke resource for the target.
+  # The general revoke right first. Without it, two narrow rules apply, each to
+  # one exact capability: an agent may revoke its own disclosure capability
+  # under the right that let it mint one, and a granter may revoke a
+  # capability it granted. The attestation still names the canonical revoke
+  # resource for the target.
   defp authorize_capability_revocation(actor_id, operation, target, resource, state) do
-    case authorize_capability_revocation_actor(actor_id, resource, state) do
-      :ok ->
-        :ok
-
-      error ->
-        case authorize_self_disclosure_revocation(actor_id, operation, target, state) do
-          :ok -> :ok
-          _ -> error
-        end
+    with {:error, _} = error <- authorize_capability_revocation_actor(actor_id, resource, state),
+         {:error, _} <- authorize_self_disclosure_revocation(actor_id, operation, target, state),
+         {:error, _} <- authorize_granter_revocation(actor_id, operation, target, state) do
+      error
     end
   end
+
+  # Taking back what you gave only ever narrows authority, and only authority
+  # the actor was itself allowed to hand out. The granter is the one the
+  # kernel recorded and signed at grant time (`metadata["granter_id"]`, set
+  # from the authenticated actor and covered by the issuer signature), read
+  # from the store, never from the caller. Only the single-capability
+  # operation qualifies: revoke-all, cascade and scope revocation reach
+  # capabilities the actor may not have granted.
+  defp authorize_granter_revocation(
+         actor_id,
+         :revoke,
+         %{capability_id: capability_id, principal_id: principal_id, capability_digest: digest},
+         state
+       )
+       when is_binary(actor_id) and is_binary(capability_id) and is_binary(principal_id) and
+              is_binary(digest) do
+    with {:ok, %Capability{id: ^capability_id, principal_id: ^principal_id} = cap} <-
+           capability_store_get(state, capability_id),
+         true <- capability_revocation_fence_digest(cap) == digest,
+         true <- capability_granter_id(cap) == actor_id,
+         :ok <- verify_capability_signature_safe(cap, state) do
+      :ok
+    else
+      _ -> {:error, :capability_revocation_unauthorized}
+    end
+  rescue
+    _ -> {:error, :capability_revocation_unauthorized}
+  catch
+    _, _ -> {:error, :capability_revocation_unauthorized}
+  end
+
+  defp authorize_granter_revocation(_actor_id, _operation, _target, _state),
+    do: {:error, :capability_revocation_unauthorized}
 
   defp authorize_self_disclosure_revocation(
          actor_id,

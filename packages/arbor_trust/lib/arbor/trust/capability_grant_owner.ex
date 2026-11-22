@@ -21,11 +21,11 @@ defmodule Arbor.Trust.CapabilityGrantOwner do
   its own authority. No signal is in that path, and the governed agent takes
   no part in it.
 
-  Revoking needs a second operator grant, `arbor://security/revoke/**`. An
-  owner provisioned for grants only still mints; its syncs fail at the first
-  revocation, and that is reported (a warning and the
-  `[:arbor, :trust, :capability_sync, :failed]` telemetry event), never
-  swallowed. `status/1` says whether the revocation grant is present.
+  The owner holds no revoke right. The security kernel lets a granter revoke
+  the exact capability it granted, and that is all the owner ever revokes. A
+  trust-marked capability someone else granted is left in place and reported
+  (a warning and the `[:arbor, :trust, :capability_sync, :failed]` telemetry
+  event), never swallowed.
   """
 
   use GenServer
@@ -39,7 +39,6 @@ defmodule Arbor.Trust.CapabilityGrantOwner do
 
   @identity_name "trust_capability_grant_owner"
   @required_capability "arbor://security/grant/**"
-  @revocation_capability "arbor://security/revoke/**"
   @sync_reasons [:profile_updated, :profile_deleted, :profile_disabled]
   @purpose :trust_capability_grant
   @max_seen_nonces 8_192
@@ -50,8 +49,6 @@ defmodule Arbor.Trust.CapabilityGrantOwner do
           state: :ready | :dormant,
           principal_id: String.t() | nil,
           required_capability: String.t(),
-          revocation_capability: String.t(),
-          revocation: :provisioned | :not_provisioned,
           reason: term() | nil
         }
 
@@ -104,9 +101,6 @@ defmodule Arbor.Trust.CapabilityGrantOwner do
   def identity_name, do: @identity_name
 
   @doc false
-  def revocation_capability_uri, do: @revocation_capability
-
-  @doc false
   def required_capability_uri, do: @required_capability
 
   @impl true
@@ -122,8 +116,7 @@ defmodule Arbor.Trust.CapabilityGrantOwner do
     @custody_table = :ets.new(@custody_table, [:named_table, :set, :private])
     true = :ets.insert(@custody_table, {@custody_tag, :bootstrap, dependencies})
 
-    {:ok, %{mode: :pending, principal_id: nil, dormant_reason: nil, revocation: :not_provisioned},
-     {:continue, :initialize}}
+    {:ok, %{mode: :pending, principal_id: nil, dormant_reason: nil}, {:continue, :initialize}}
   end
 
   @impl true
@@ -217,8 +210,7 @@ defmodule Arbor.Trust.CapabilityGrantOwner do
         %{
           mode: :ready,
           principal_id: principal_id,
-          dormant_reason: nil,
-          revocation: revocation_provision(principal_id, security)
+          dormant_reason: nil
         }
 
       {:error, reason} ->
@@ -229,8 +221,7 @@ defmodule Arbor.Trust.CapabilityGrantOwner do
         %{
           mode: :dormant,
           principal_id: principal_from_error(reason),
-          dormant_reason: reason,
-          revocation: :not_provisioned
+          dormant_reason: reason
         }
     end
   rescue
@@ -296,8 +287,8 @@ defmodule Arbor.Trust.CapabilityGrantOwner do
 
     Logger.warning(
       "[Trust.CapabilityGrantOwner] capabilities minted under the old trust profile were not " <>
-        "revoked for #{agent_id} after #{reason}: #{inspect(error)}. The owner needs " <>
-        "#{@revocation_capability} (mix arbor.trust.grant_owner provision-revocation)."
+        "all revoked for #{agent_id} after #{reason}: #{inspect(error)}. The owner can " <>
+        "revoke only what it granted."
     )
 
     result
@@ -463,27 +454,6 @@ defmodule Arbor.Trust.CapabilityGrantOwner do
     end
   end
 
-  # Read once at start, for `status/1` only. The kernel decides each
-  # revocation when it is attempted.
-  defp revocation_provision(principal_id, security) do
-    case security.list_capabilities(principal_id) do
-      {:ok, capabilities} when is_list(capabilities) ->
-        if Enum.any?(capabilities, fn capability ->
-             capability.resource_uri == @revocation_capability and
-               Arbor.Contracts.Security.Capability.valid?(capability)
-           end),
-           do: :provisioned,
-           else: :not_provisioned
-
-      _other ->
-        :not_provisioned
-    end
-  rescue
-    _ -> :not_provisioned
-  catch
-    :exit, _ -> :not_provisioned
-  end
-
   defp open_authority(principal_id, security) do
     with {:ok, proof} <-
            security.build_stored_signing_authority_acquisition_proof(
@@ -535,8 +505,6 @@ defmodule Arbor.Trust.CapabilityGrantOwner do
       state: state.mode,
       principal_id: state.principal_id,
       required_capability: @required_capability,
-      revocation_capability: @revocation_capability,
-      revocation: Map.get(state, :revocation, :not_provisioned),
       reason: state.dormant_reason
     }
   end
@@ -654,8 +622,7 @@ defmodule Arbor.Trust.CapabilityGrantOwner do
     %{
       mode: :dormant,
       principal_id: principal_from_error(reason),
-      dormant_reason: reason,
-      revocation: :not_provisioned
+      dormant_reason: reason
     }
   end
 
@@ -679,8 +646,6 @@ defmodule Arbor.Trust.CapabilityGrantOwner do
       state: :dormant,
       principal_id: nil,
       required_capability: @required_capability,
-      revocation_capability: @revocation_capability,
-      revocation: :not_provisioned,
       reason: reason
     }
   end
