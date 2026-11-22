@@ -1571,31 +1571,29 @@ defmodule Arbor.Orchestrator.Session do
     end
   end
 
-  # Handle trust profile change signals — rebuild tool visibility
+  # A trust profile changed for this session's agent.
+  #
+  # Tool visibility needs no rebuild here: every turn resolves it from the live
+  # profile (`ContextBuilder.resolve_session_tools/1`). What would outlive the
+  # change is the set of tools the agent found through discovery, so that is
+  # dropped; the agent can find them again, and discovery re-applies policy.
+  #
+  # The revocation is best effort. `Arbor.Security.revoke_by_session/2` needs
+  # the actor to hold `arbor://security/revoke/scope`, which an ordinary agent
+  # does not, so for most sessions it is refused. The refusal is reported, not
+  # swallowed. Enforcement does not depend on it: `Arbor.Trust.authorize/4`
+  # applies the current profile on every call.
   def handle_info(
         {:signal_received, %{category: :trust, type: type, data: %{agent_id: signal_agent_id}}},
         state
       )
-      when type in [:profile_updated, :profile_changed] do
+      when type in [:profile_updated, :profile_changed, :profile_deleted, :profile_disabled] do
     if signal_agent_id == state.agent_id do
-      alias Arbor.Orchestrator.Session.ToolDisclosure
+      state.session_id
+      |> revoke_session_capabilities(signing_authority())
+      |> report_profile_change_revocation(state.session_id, type)
 
-      # Rebuild tool list from updated profile
-      resolved_tools =
-        ToolDisclosure.resolve_tools(
-          state.config,
-          state.discovered_tools,
-          agent_id: state.agent_id
-        )
-
-      # Revoke stale JIT-granted capabilities for this session
-      safe_revoke_session_capabilities(state.session_id, signing_authority())
-
-      Logger.debug(
-        "Session #{state.session_id}: rebuilt tools after profile change (#{length(resolved_tools)} tools)"
-      )
-
-      {:noreply, state}
+      {:noreply, %{state | discovered_tools: MapSet.new()}}
     else
       {:noreply, state}
     end
@@ -4052,38 +4050,62 @@ defmodule Arbor.Orchestrator.Session do
     :ok
   end
 
-  # Subscribe to trust profile changes so a tightened profile revokes this
-  # session's session-scoped capabilities. A session can still run without the
-  # subscription (standalone slices have no signal bus), but then it keeps
-  # those capabilities until it ends, so the failure is logged, not swallowed.
+  # Subscribe to trust profile changes (see the `:signal_received` clause of
+  # `handle_info/2`). A session can still run without the subscription
+  # (standalone slices have no signal bus), so the failure is logged, not
+  # swallowed.
   defp safe_subscribe_profile_signals(agent_id) do
     case Arbor.Orchestrator.Session.TrustProfileSignals.subscribe() do
-      {:ok, _subscription_id} ->
+      {:ok, _subscription_ids} ->
         :ok
 
       {:error, reason} ->
         Logger.warning(
           "[Session] not subscribed to trust profile changes for #{agent_id}: " <>
-            "#{inspect(reason)}. Session capabilities will not be revoked on a profile change."
+            "#{inspect(reason)}. Discovered tools stay visible after a profile change."
         )
 
         :ok
     end
   end
 
-  # Revoke session-scoped capabilities (cleanup after profile change or
-  # termination). arbor_security is a hard dep; the rescue/catch guards only
-  # against the CapabilityStore process not being alive.
-  defp safe_revoke_session_capabilities(session_id, actor_authority)
+  # Revoke session-scoped capabilities. arbor_security is a hard dep; the
+  # rescue/catch guards only against the CapabilityStore process not being
+  # alive. The result is returned so the caller can report a refusal.
+  defp revoke_session_capabilities(session_id, actor_authority)
        when not is_nil(actor_authority) do
     Arbor.Security.revoke_by_session(session_id, actor_authority: actor_authority)
   rescue
-    _ -> :ok
+    error -> {:error, {:revocation_raised, error.__struct__}}
   catch
-    :exit, _ -> :ok
+    :exit, _reason -> {:error, :capability_store_unavailable}
   end
 
-  defp safe_revoke_session_capabilities(_session_id, _actor_authority), do: :ok
+  defp revoke_session_capabilities(_session_id, _actor_authority), do: {:error, :no_authority}
+
+  defp report_profile_change_revocation({:ok, revoked}, session_id, type) do
+    Logger.debug(
+      "Session #{session_id}: revoked #{revoked} session capabilities after trust #{type}"
+    )
+  end
+
+  defp report_profile_change_revocation({:error, reason}, session_id, type) do
+    :telemetry.execute(
+      [:arbor, :session, :profile_change_revocation, :failed],
+      %{count: 1},
+      %{session_id: session_id, type: type, reason: reason}
+    )
+
+    Logger.warning(
+      "Session #{session_id}: session capabilities not revoked after trust #{type}: " <>
+        "#{inspect(reason)}. Capabilities minted under the old profile stay in the store; " <>
+        "calls through Arbor.Trust.authorize/4 still apply the new profile."
+    )
+  end
+
+  defp report_profile_change_revocation(other, session_id, type) do
+    report_profile_change_revocation({:error, {:unexpected_result, other}}, session_id, type)
+  end
 
   # Emit the [:arbor, :session, :turn] telemetry event on turn completion. Async turns
   # can't use :telemetry.span/3 (dispatch and result land in different callbacks), so we
