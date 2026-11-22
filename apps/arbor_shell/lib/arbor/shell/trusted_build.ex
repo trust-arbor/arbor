@@ -113,10 +113,26 @@ defmodule Arbor.Shell.TrustedBuild do
     end
   end
 
+  # The launcher hands the source path, as spelled, to Seatbelt and to its own
+  # overlap checks, and the kernel matches the resolved path. A source reached
+  # through a symlink would make those two views disagree, so the attested
+  # path must already be its own resolved form. Only registered trees are
+  # resolved, so an invented path learns nothing about the filesystem; a path
+  # that does not resolve falls through to the identity check, which names
+  # the cause.
+  defp require_canonical_source(%{path: path}) do
+    case SafePath.resolve_real(path) do
+      {:ok, ^path} -> :ok
+      {:ok, _other} -> {:error, :trusted_build_source_not_canonical}
+      {:error, _reason} -> :ok
+    end
+  end
+
   defp preflight_fixed_project_root(identity) do
     case OwnedTreeRegistry.fetch(identity) do
       {:ok, :unbound, _gen} ->
-        with :ok <- Identity.verify_owned_identity(identity),
+        with :ok <- require_canonical_source(identity),
+             :ok <- Identity.verify_owned_identity(identity),
              {:ok, _project} <-
                Identity.pin_descendant_directory(
                  identity,

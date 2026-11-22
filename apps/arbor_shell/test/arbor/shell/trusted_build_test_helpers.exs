@@ -6,7 +6,14 @@ defmodule Arbor.Shell.TrustedBuildTestHelpers do
 
   def unique_source_root do
     suffix = Base.encode16(:crypto.strong_rand_bytes(16), case: :lower)
-    Path.join(System.tmp_dir!(), "arbor-tb-src-#{suffix}")
+    Path.join(canonical_tmp_dir!(), "arbor-tb-src-#{suffix}")
+  end
+
+  # A trusted-build source must be attested under its resolved path; the macOS
+  # default temporary directory is reached through the `/var` symlink.
+  def canonical_tmp_dir! do
+    {:ok, real} = Arbor.Common.SafePath.resolve_real(System.tmp_dir!())
+    real
   end
 
   def capture_handle!(path) when is_binary(path) do
@@ -280,10 +287,10 @@ defmodule Arbor.Shell.TrustedBuildTestHelpers do
   end
 
   def unsafe_cleanup_root?(path) when is_binary(path) do
-    tmp = System.tmp_dir!()
-
-    path == tmp or path == Path.dirname(tmp) or path in @unsafe_roots or
-      ancestor_of_root?(path, tmp)
+    path in @unsafe_roots or
+      Enum.any?([System.tmp_dir!(), canonical_tmp_dir!()], fn tmp ->
+        path == tmp or path == Path.dirname(tmp) or ancestor_of_root?(path, tmp)
+      end)
   end
 
   def ancestor_of_root?(candidate, root) do

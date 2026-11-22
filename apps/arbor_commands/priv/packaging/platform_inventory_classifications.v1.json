@@ -991,7 +991,7 @@
   },
   {
     "path": "apps/arbor_shell/lib/arbor/shell/trusted_build.ex",
-    "blob_oid": "72427708f012a0915d4f9c0d4e624fa89d84c9bd",
+    "blob_oid": "283ddbb050448286f74e5fc60785c6647465f7cc",
     "class": "trusted_host",
     "rationale": "Owns the trusted-build admission facade: closed request admission, fixed project-root preflight pinning, Darwin-only availability, generation-checked authority and registry checkout, and lease-token phase execution. Any build provider must pass this policy; it is not a replaceable mechanism."
   },

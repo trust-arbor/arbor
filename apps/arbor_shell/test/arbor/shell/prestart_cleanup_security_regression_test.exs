@@ -922,7 +922,7 @@ defmodule Arbor.Shell.PrestartProtocolSecurityRegressionTest do
 
     root =
       Path.join(
-        System.tmp_dir!(),
+        Helpers.canonical_tmp_dir!(),
         "arbor-prestart-protocol-" <> Base.encode16(:crypto.strong_rand_bytes(16))
       )
 
