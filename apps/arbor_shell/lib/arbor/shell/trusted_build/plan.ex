@@ -19,13 +19,21 @@ defmodule Arbor.Shell.TrustedBuild.Plan do
   }
 
   @writable_names ~w(home tmp build deps hex mix cache release)
-  @project_root_segments ["apps", "arbor_trust"]
+  @project_root_segments ["packages", "arbor_trust"]
+  @package_paths [
+    {"ARBOR_KERNEL_PATH", "arbor_kernel"},
+    {"ARBOR_CAPABILITIES_PATH", "arbor_capabilities"},
+    {"ARBOR_SUPPORT_PATH", "arbor_support"},
+    {"ARBOR_PERSISTENCE_PATH", "arbor_persistence"},
+    {"ARBOR_CUSTODY_PATH", "arbor_custody"},
+    {"ARBOR_OAUTH_PATH", "arbor_oauth"}
+  ]
   @env_keys ~w(
     MIX_ENV HEX_OFFLINE MIX_OS_CONCURRENCY_LOCK ARBOR_MIX_CONTAINED
     ARBOR_ERLANG_ROOT ARBOR_ELIXIR_ROOT HOME TMPDIR TMP HEX_HOME MIX_HOME
     MIX_ARCHIVES MIX_DEPS_PATH MIX_BUILD_PATH ELIXIR_MAKE_CACHE_DIR
     ERL_CRASH_DUMP ERL_COMPILER_OPTIONS SOURCE_DATE_EPOCH PATH LANG LC_ALL
-  )
+  ) ++ Enum.map(@package_paths, &elem(&1, 0))
   # Locked to trusted_build_replace_environ() Darwin PATH suffix.
   @darwin_utility_path "/usr/bin:/bin"
 
@@ -79,13 +87,13 @@ defmodule Arbor.Shell.TrustedBuild.Plan do
   def wrapper_path(identity_path) when is_binary(identity_path),
     do: Path.join([identity_path, "source", "bin", "mix"])
 
-  @spec closed_env(map(), map()) :: %{String.t() => String.t()}
-  def closed_env(roots, binding) do
+  @spec closed_env(map(), map(), %{path: String.t()}) :: %{String.t() => String.t()}
+  def closed_env(roots, binding, %{path: source_path}) do
     erlang = binding.erlang_root.path
     elixir = binding.elixir_root.path
     tmp = roots.tmp.path
 
-    %{
+    env = %{
       "MIX_ENV" => "prod",
       "HEX_OFFLINE" => "1",
       # Lease-private build/deps roots make Mix 1.19's outbound coordination lock unnecessary.
@@ -111,6 +119,10 @@ defmodule Arbor.Shell.TrustedBuild.Plan do
       "LANG" => "C",
       "LC_ALL" => "C"
     }
+
+    Enum.reduce(@package_paths, env, fn {key, package}, acc ->
+      Map.put(acc, key, Path.join([source_path, "packages", package]))
+    end)
   end
 
   defp closed_path(erlang, elixir) do

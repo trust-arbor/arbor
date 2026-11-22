@@ -71,8 +71,24 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.CheckCoreTest do
                CheckCore.admit_for_check(%{envelope_map: ctx.envelope, manifest_map: different})
     end
 
-    test "rejects a mix.lock digest that disagrees with the build inputs", ctx do
-      toolchain = %{ctx.manifest["toolchain"] | "mix_lock_sha256" => String.duplicate("e", 64)}
+    test "compose and readback bind the canonical package lock", ctx do
+      source = Map.new(ctx.manifest["source"]["build_inputs"], &{&1["path"], &1["sha256"]})
+      package_lock = source["packages/arbor_trust/mix.lock"]
+
+      assert is_binary(package_lock)
+      assert source["mix.lock"] != package_lock
+      assert ctx.manifest["toolchain"]["mix_lock_sha256"] == package_lock
+
+      assert {:ok, _} =
+               CheckCore.admit_for_check(%{
+                 envelope_map: ctx.envelope,
+                 manifest_map: ctx.manifest
+               })
+    end
+
+    test "rejects the umbrella lock digest even if it appears in the source inputs", ctx do
+      root_lock = Enum.find(ctx.manifest["source"]["build_inputs"], &(&1["path"] == "mix.lock"))
+      toolchain = %{ctx.manifest["toolchain"] | "mix_lock_sha256" => root_lock["sha256"]}
       tampered = %{ctx.manifest | "toolchain" => toolchain}
       assert :ok = Encode.validate_manifest(tampered)
 

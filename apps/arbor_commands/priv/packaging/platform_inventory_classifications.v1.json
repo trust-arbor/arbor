@@ -697,7 +697,7 @@
   },
   {
     "path": "apps/arbor_shell/lib/arbor/shell.ex",
-    "blob_oid": "de0463fe15035a1a8187bb50d168c2908be3195f",
+    "blob_oid": "ce6a4913b2e5f2fe59add978134255541c6ba813",
     "class": "trusted_host",
     "rationale": "Owns the public Shell facade, agent authorization, command disclosure boundary, and effect lifecycle entry points. Its trusted-system bypasses and native or Apple provider dispatch are mixed responsibilities that must split into narrow host bootstrap and authorized provider proxies."
   },
@@ -1021,7 +1021,7 @@
   },
   {
     "path": "apps/arbor_shell/lib/arbor/shell/trusted_build/lease.ex",
-    "blob_oid": "e5b32d7a0878e2fd546c182ab4246568dd490cae",
+    "blob_oid": "18ad460a95a653dacbfa17a294ff702a5d873910",
     "class": "trusted_host",
     "rationale": "Owns the unforgeable lease token, owner binding, phase admission and terminal commit, permit-gated fallback, bounded retrying cleanup with kill helper, and staged overlay and cookie operations. These owner-only transitions are the fixed ownership authority over build trees and workspaces."
   },
@@ -1045,7 +1045,7 @@
   },
   {
     "path": "apps/arbor_shell/lib/arbor/shell/trusted_build/plan.ex",
-    "blob_oid": "aa9e631c7414c571e608b1b0e823aef866b5b29f",
+    "blob_oid": "2880b78975d7d8a22716b0f75133f398a48e3171",
     "class": "trusted_host",
     "rationale": "Defines the closed phase set and order, the fixed argv per phase, bounded timeouts, the writable-name allowlist, and the pinned environment vocabulary for build execution. Build runners consume these ceilings but cannot choose or weaken them."
   },

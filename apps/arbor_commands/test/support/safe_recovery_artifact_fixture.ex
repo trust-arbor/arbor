@@ -86,7 +86,8 @@ defmodule Arbor.Commands.SafeRecoveryArtifactFixture do
       "platform_inventory" => @platform_inventory,
       "build_inputs" => [
         %{"path" => ".tool-versions", "sha256" => @tool_versions_sha256},
-        %{"path" => "mix.lock", "sha256" => @mix_lock_sha256}
+        %{"path" => "mix.lock", "sha256" => String.duplicate("e", 64)},
+        %{"path" => "packages/arbor_trust/mix.lock", "sha256" => @mix_lock_sha256}
       ]
     }
   end
@@ -126,9 +127,7 @@ defmodule Arbor.Commands.SafeRecoveryArtifactFixture do
     [
       {"bin/erlexec", exec, 0o755},
       {"lib/arbor_kernel-0.1.0/ebin/arbor_kernel.app", app_body("arbor_kernel"), 0o644},
-      {"lib/arbor_kernel_runtime-0.1.0/ebin/arbor_kernel_runtime.app",
-       app_body("arbor_kernel_runtime"), 0o644},
-      {"lib/arbor_security-0.1.0/ebin/arbor_security.app", app_body("arbor_security"), 0o644},
+      {"lib/arbor_support-0.1.0/ebin/arbor_support.app", app_body("arbor_support"), 0o644},
       {"lib/arbor_trust-0.1.0/ebin/Elixir.Arbor.Trust.beam", beam, 0o644},
       {"lib/arbor_trust-0.1.0/ebin/arbor_trust.app", app_body("arbor_trust"), 0o644},
       {"lib/jason-1.0.0/ebin/jason.app", app_body("jason", "1.0.0"), 0o644},
@@ -149,8 +148,8 @@ defmodule Arbor.Commands.SafeRecoveryArtifactFixture do
 
   def rel_body do
     "{release,<<\"arbor_trust\">>,<<\"0.1.0\">>,<<\"16.3\">>," <>
-      "[{arbor_kernel,<<\"0.1.0\">>},{arbor_kernel_runtime,<<\"0.1.0\">>}," <>
-      "{arbor_security,<<\"0.1.0\">>},{arbor_trust,<<\"0.1.0\">>}," <>
+      "[{arbor_kernel,<<\"0.1.0\">>},{arbor_support,<<\"0.1.0\">>}," <>
+      "{arbor_trust,<<\"0.1.0\">>}," <>
       "{jason,<<\"1.0.0\">>},{kernel,<<\"1.0.0\">>}]}."
   end
 
@@ -191,10 +190,8 @@ defmodule Arbor.Commands.SafeRecoveryArtifactFixture do
       "lib",
       "lib/arbor_kernel-0.1.0",
       "lib/arbor_kernel-0.1.0/ebin",
-      "lib/arbor_kernel_runtime-0.1.0",
-      "lib/arbor_kernel_runtime-0.1.0/ebin",
-      "lib/arbor_security-0.1.0",
-      "lib/arbor_security-0.1.0/ebin",
+      "lib/arbor_support-0.1.0",
+      "lib/arbor_support-0.1.0/ebin",
       "lib/arbor_trust-0.1.0",
       "lib/arbor_trust-0.1.0/ebin",
       "lib/jason-1.0.0",
@@ -227,15 +224,15 @@ defmodule Arbor.Commands.SafeRecoveryArtifactFixture do
 
   def thin_arm64 do
     # MH_MAGIC_64 LE + ARM64 cputype LE + remaining header zeros.
-    <<0xFEEDFACF::unsigned-little-32, 0x0100000C::unsigned-little-32,
-      0::unsigned-little-32, 0::unsigned-little-32, 0::unsigned-little-32,
-      0::unsigned-little-32, 0::unsigned-little-32, 0::unsigned-little-32>>
+    <<0xFEEDFACF::unsigned-little-32, 0x0100000C::unsigned-little-32, 0::unsigned-little-32,
+      0::unsigned-little-32, 0::unsigned-little-32, 0::unsigned-little-32, 0::unsigned-little-32,
+      0::unsigned-little-32>>
   end
 
   def thin_x86_64 do
-    <<0xFEEDFACF::unsigned-little-32, 0x01000007::unsigned-little-32,
-      0::unsigned-little-32, 0::unsigned-little-32, 0::unsigned-little-32,
-      0::unsigned-little-32, 0::unsigned-little-32, 0::unsigned-little-32>>
+    <<0xFEEDFACF::unsigned-little-32, 0x01000007::unsigned-little-32, 0::unsigned-little-32,
+      0::unsigned-little-32, 0::unsigned-little-32, 0::unsigned-little-32, 0::unsigned-little-32,
+      0::unsigned-little-32>>
   end
 
   def fat32_arm64 do

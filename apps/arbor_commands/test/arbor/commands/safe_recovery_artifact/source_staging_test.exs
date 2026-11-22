@@ -80,6 +80,8 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourceStagingTest do
     assert "packages/arbor_kernel/mix.exs" in paths
     assert "packages/arbor_kernel/test/kernel_test.exs" in paths
     assert "packages/arbor_signals/mix.exs" in paths
+    assert "packages/arbor_trust/mix.lock" in paths
+    assert "packages/arbor_trust/config/config.exs" in paths
     assert "packages/arbor_signals/lib/arbor/signals.ex" in paths
     assert "packages/arbor_persistence/lib/arbor/persistence/core.ex" in paths
     assert "packages/arbor_persistence_sql/lib/arbor/persistence/sql/repo.ex" in paths
@@ -336,8 +338,14 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourceStagingTest do
                %{path: "packages/arbor_kernel/lib/x.ex", mode: "100666", oid: oid} | required
              ])
 
-    assert {:error, :missing_required_input} =
-             SourcePolicy.select(Enum.reject(required, &(&1.path == "mix.lock")))
+    for path <- [
+          "mix.lock",
+          "packages/arbor_trust/mix.lock",
+          "packages/arbor_trust/config/config.exs"
+        ] do
+      assert {:error, :missing_required_input} =
+               SourcePolicy.select(Enum.reject(required, &(&1.path == path)))
+    end
   end
 
   @tag :slow
@@ -817,6 +825,8 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.SourceStagingTest do
       {"packages/arbor_persistence_sql/mix.exs", "persistence sql\n"},
       {"packages/arbor_persistence_sql/lib/sql.ex", "sql source\n"},
       {"packages/arbor_trust/mix.exs", "arbor_trust\n"},
+      {"packages/arbor_trust/mix.lock", "trust lock\n"},
+      {"packages/arbor_trust/config/config.exs", "trust config\n"},
       {"packages/arbor_trust/lib/a.ex", "trust\n"},
       {"packages/arbor_historian/mix.exs", "arbor_historian\n"},
       {"packages/arbor_historian/lib/a.ex", "historian\n"},

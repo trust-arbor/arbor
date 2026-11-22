@@ -193,7 +193,7 @@ defmodule Arbor.Shell.TrustedBuildTestHelpers do
 
   def plant_production_child_project!(source_path, mix_exs, lib_source)
       when is_binary(source_path) and is_binary(mix_exs) and is_binary(lib_source) do
-    project = Path.join([source_path, "apps", "arbor_trust"])
+    project = Path.join([source_path, "packages", "arbor_trust"])
     File.mkdir_p!(Path.join(project, "lib"))
     File.mkdir_p!(Path.join(source_path, "bin"))
     File.write!(Path.join(project, "mix.exs"), mix_exs)

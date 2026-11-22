@@ -121,7 +121,7 @@ static int g_agent_write = 0;
 /* Residual risk: file-read*, mach-lookup, process-info*, sysctl-read, signal,
  * and posix shm/sem are intentionally broad so Mix/ERTS can start. Writes are
  * the eight -D private roots plus Hex 2.5.1 CWD unpack temps
- * (paths containing /apps/arbor_trust/tmp_ ). Seatbelt regex has no {n}.
+ * (paths containing /packages/arbor_trust/tmp_ ). Seatbelt regex has no {n}.
  * Hex mkdir does not honor TMPDIR.
  * Other SOURCE writes stay denied by default. Only localhost bind+inbound
  * are added for Mix 1.19; outbound including loopback outbound stays denied
@@ -149,7 +149,7 @@ static int g_agent_write = 0;
   "(allow file-write* (subpath (param \"CACHE\")))\n" \
   "(allow file-write* (subpath (param \"RELEASE\")))\n" \
   "(deny file-write* (subpath (param \"SOURCE\")))\n" \
-  "(allow file-write* (require-all (subpath (param \"SOURCE\")) (regex #\"/apps/arbor_trust/tmp_\")))\n" \
+  "(allow file-write* (require-all (subpath (param \"SOURCE\")) (regex #\"/packages/arbor_trust/tmp_\")))\n" \
   "(allow network-bind (local ip \"localhost:*\"))\n" \
   "(allow network-inbound (local ip \"localhost:*\"))\n" \
   "(deny network*)"
@@ -839,7 +839,7 @@ static void trusted_build_replace_environ(const trusted_build_paths *paths) {
   if (erlang_n <= 0 || (size_t)erlang_n >= sizeof(erlang_bin)) _exit(126);
   int elixir_n = snprintf(elixir_bin, sizeof(elixir_bin), "%s/bin", paths->elixir_root);
   if (elixir_n <= 0 || (size_t)elixir_n >= sizeof(elixir_bin)) _exit(126);
-  /* Suffix locked to Plan.closed_env/2 Darwin policy. Not taken from environ. */
+  /* Suffix locked to Plan.closed_env/3 Darwin policy. Not taken from environ. */
   int path_n =
       snprintf(path_value, sizeof(path_value), "%s:%s:/usr/bin:/bin", erlang_bin, elixir_bin);
   if (path_n <= 0 || (size_t)path_n >= sizeof(path_value)) _exit(126);
@@ -869,6 +869,23 @@ static void trusted_build_replace_environ(const trusted_build_paths *paths) {
   if (setenv("PATH", path_value, 1) != 0) _exit(126);
   if (setenv("LANG", "C", 1) != 0) _exit(126);
   if (setenv("LC_ALL", "C", 1) != 0) _exit(126);
+
+  static const char *const package_paths[][2] = {
+      {"ARBOR_KERNEL_PATH", "arbor_kernel"},
+      {"ARBOR_CAPABILITIES_PATH", "arbor_capabilities"},
+      {"ARBOR_SUPPORT_PATH", "arbor_support"},
+      {"ARBOR_PERSISTENCE_PATH", "arbor_persistence"},
+      {"ARBOR_CUSTODY_PATH", "arbor_custody"},
+      {"ARBOR_OAUTH_PATH", "arbor_oauth"},
+  };
+
+  for (size_t i = 0; i < sizeof(package_paths) / sizeof(package_paths[0]); i++) {
+    char package_path[4096];
+    int n = snprintf(package_path, sizeof(package_path), "%s/packages/%s",
+                     paths->source, package_paths[i][1]);
+    if (n <= 0 || (size_t)n >= sizeof(package_path)) _exit(126);
+    if (setenv(package_paths[i][0], package_path, 1) != 0) _exit(126);
+  }
 }
 
 static void darwin_exec_trusted_build(const char *path, char **target_argv) {
@@ -3056,7 +3073,7 @@ static int run_trusted_build(int argc, char **argv) {
   project_st.st_ino = (ino_t)project_ino;
   project_st.st_mode = (mode_t)project_mode;
   project_st.st_uid = (uid_t)project_uid;
-  const char *project_segs[] = {"apps", "arbor_trust"};
+  const char *project_segs[] = {"packages", "arbor_trust"};
   if (verify_dir_ancestry(source_path, project_segs, 2, project_path, &project_st) != 0) {
     send_error("trusted-build ancestry mismatch");
     return 126;

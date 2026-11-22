@@ -27,7 +27,7 @@ defmodule Arbor.Shell.TrustedBuildDarwinSourceIntersectionTest do
       end)
 
       source = Path.join(identity.path, "source")
-      outside_parent = Path.join([identity.path, "outside", "apps", "arbor_trust"])
+      outside_parent = Path.join([identity.path, "outside", "packages", "arbor_trust"])
       outside_tmp = Path.join(outside_parent, @tmp_name)
       File.mkdir_p!(outside_parent)
 
@@ -56,8 +56,8 @@ defmodule Arbor.Shell.TrustedBuildDarwinSourceIntersectionTest do
         refute within?(outside_tmp, root)
       end)
 
-      refute File.exists?(Path.join([source, "apps", "arbor_trust", "SHOULD_NOT_WRITE"]))
-      refute File.exists?(Path.join([source, "apps", "arbor_trust", @tmp_name]))
+      refute File.exists?(Path.join([source, "packages", "arbor_trust", "SHOULD_NOT_WRITE"]))
+      refute File.exists?(Path.join([source, "packages", "arbor_trust", @tmp_name]))
       refute File.exists?(outside_tmp)
       {:ok, lease: lease, build: state.roots.build.path}
     else

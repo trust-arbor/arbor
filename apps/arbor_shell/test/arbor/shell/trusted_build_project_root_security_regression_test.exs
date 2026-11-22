@@ -67,8 +67,8 @@ defmodule Arbor.Shell.TrustedBuildProjectRootSecurityRegressionTest do
       real = Path.join(handle.root, "real-project")
       File.mkdir_p!(Path.join(real, "lib"))
       File.write!(Path.join(real, "mix.exs"), valid_mix_project())
-      File.mkdir_p!(Path.join(source, "apps"))
-      File.ln_s!(real, Path.join([source, "apps", "arbor_trust"]))
+      File.mkdir_p!(Path.join(source, "packages"))
+      File.ln_s!(real, Path.join([source, "packages", "arbor_trust"]))
 
       assert {:error, :symlink_rejected} = Shell.acquire_trusted_build_lease(request)
     after
@@ -82,7 +82,7 @@ defmodule Arbor.Shell.TrustedBuildProjectRootSecurityRegressionTest do
       real_apps = Path.join(handle2.root, "real-apps")
       File.mkdir_p!(Path.join([real_apps, "arbor_trust", "lib"]))
       File.write!(Path.join([real_apps, "arbor_trust", "mix.exs"]), valid_mix_project())
-      File.ln_s!(real_apps, Path.join(source2, "apps"))
+      File.ln_s!(real_apps, Path.join(source2, "packages"))
 
       assert {:error, :symlink_rejected} = Shell.acquire_trusted_build_lease(request2)
     after
@@ -96,7 +96,7 @@ defmodule Arbor.Shell.TrustedBuildProjectRootSecurityRegressionTest do
       {lease, identity, handle, source} = acquire_production_fixture!()
 
       try do
-        project = Path.join([source, "apps", "arbor_trust"])
+        project = Path.join([source, "packages", "arbor_trust"])
         File.rename!(project, project <> ".old")
         File.mkdir_p!(project)
         File.chmod!(project, 0o755)

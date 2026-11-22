@@ -9,7 +9,7 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.CheckCore do
   # cross-bindings. compare_inputs/2 binds the committed inputs against an
   # observed complete input set.
 
-  alias Arbor.Commands.SafeRecoveryArtifact.{Encode, Envelope}
+  alias Arbor.Commands.SafeRecoveryArtifact.{Encode, Envelope, SourcePolicy}
 
   @max_build_inputs 5_000
 
@@ -88,7 +88,8 @@ defmodule Arbor.Commands.SafeRecoveryArtifact.CheckCore do
   defp require_lock_bindings(%{"toolchain" => toolchain, "source" => %{"build_inputs" => inputs}}) do
     by_path = Map.new(inputs, &{&1["path"], &1["sha256"]})
 
-    with :ok <- match_lock(toolchain["mix_lock_sha256"], by_path["mix.lock"]) do
+    with :ok <-
+           match_lock(toolchain["mix_lock_sha256"], by_path[SourcePolicy.package_lock_path()]) do
       match_lock(toolchain["tool_versions_sha256"], by_path[".tool-versions"])
     end
   end
