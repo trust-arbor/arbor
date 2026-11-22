@@ -68,7 +68,10 @@ defmodule Arbor.Trust.PolicyEnforcer do
           {:ok, %{profile: map(), mode: :ask | :allow | :auto, constraints: map()}}
           | {:error, :unauthorized}
   def grant_spec(principal_id, resource_uri, opts \\ []) do
-    if enabled?() do
+    # A principal with no stored profile is never minted for. Policy resolution
+    # would substitute a stub whose baseline is `:ask`, and `:ask` is a grant
+    # decision, so a deleted profile would be minted for again at once.
+    if enabled?() and known_trust_profile?(principal_id) do
       mode = get_effective_mode(principal_id, resource_uri, opts)
 
       case grant_decision(resource_uri, mode) do
@@ -192,18 +195,33 @@ defmodule Arbor.Trust.PolicyEnforcer do
     :exit, reason -> {:error, {:capability_sync_exit, reason}}
   end
 
+  # A capability is stale when minting it again now would be refused, or
+  # would produce a grant of the other approval class. Asking `grant_decision/2`
+  # keeps this in step with minting: a high-risk URI that is minted as `:ask`
+  # under an `:auto` rule is not stale, an unprofiled or forbidden URI is, and
+  # an unknown mode fails closed. No stored profile means nothing would be
+  # minted, so everything is stale.
   defp stale?(cap, principal_id) do
-    current_mode = get_effective_mode(principal_id, cap.resource_uri, [])
-    minted_mode = normalize_minted_mode(minted_mode(cap))
-    requires_approval? = approval_required?(cap)
+    if known_trust_profile?(principal_id) do
+      current_mode = get_effective_mode(principal_id, cap.resource_uri, [])
 
-    cond do
-      current_mode == :block -> true
-      minted_mode == :ask -> current_mode != :ask
-      minted_mode in [:auto, :allow] -> current_mode not in [:auto, :allow]
-      is_nil(minted_mode) and requires_approval? -> current_mode in [:auto, :allow]
-      is_nil(minted_mode) and not requires_approval? -> current_mode == :ask
-      true -> false
+      case grant_decision(cap.resource_uri, current_mode) do
+        {:grant, _profile, expected_mode} -> approval_class(expected_mode) != minted_class(cap)
+        {:deny, _reason} -> true
+      end
+    else
+      true
+    end
+  end
+
+  defp approval_class(:ask), do: :attended
+  defp approval_class(mode) when mode in [:allow, :auto], do: :unattended
+
+  # Legacy grants carry no mode; the approval constraint is what they have.
+  defp minted_class(cap) do
+    case normalize_minted_mode(minted_mode(cap)) do
+      nil -> if approval_required?(cap), do: :attended, else: :unattended
+      mode -> approval_class(mode)
     end
   end
 

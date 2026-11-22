@@ -40,6 +40,12 @@ defmodule Arbor.Trust.CapabilityGrantOwner do
   @identity_name "trust_capability_grant_owner"
   @required_capability "arbor://security/grant/**"
   @sync_reasons [:profile_updated, :profile_deleted, :profile_disabled]
+  # A sync requested by the profile store that fails is tried again after
+  # these delays. The security kernel's authority and store call each other
+  # synchronously, so a revocation that collides with other kernel traffic can
+  # time out; without a retry that one collision would leave the grant alive
+  # until the next profile change.
+  @sync_retry_delays_ms [2_000, 10_000]
   @purpose :trust_capability_grant
   @max_seen_nonces 8_192
   @custody_table Arbor.Trust.CapabilityGrantOwner.Custody
@@ -152,7 +158,8 @@ defmodule Arbor.Trust.CapabilityGrantOwner do
 
   def handle_call({:sync, agent_id, reason}, _from, state)
       when is_binary(agent_id) and reason in @sync_reasons do
-    {:reply, run_sync(agent_id, reason, state), state}
+    {result, state} = run_sync(agent_id, reason, state)
+    {:reply, result, state}
   end
 
   def handle_call(_request, _from, state) do
@@ -162,13 +169,25 @@ defmodule Arbor.Trust.CapabilityGrantOwner do
   @impl true
   def handle_cast({:sync, agent_id, reason}, state)
       when is_binary(agent_id) and reason in @sync_reasons do
-    _ = run_sync(agent_id, reason, state)
-    {:noreply, state}
+    {:noreply, sync_with_retry(agent_id, reason, 0, state)}
   end
 
   def handle_cast(_request, state), do: {:noreply, state}
 
+  # Only a reference this process issued is honoured, so a raw message cannot
+  # drive a sync.
   @impl true
+  def handle_info({:retry_sync, ref}, state) when is_reference(ref) do
+    case Map.pop(Map.get(state, :sync_retries, %{}), ref) do
+      {{agent_id, reason, attempt}, retries} ->
+        state = Map.put(state, :sync_retries, retries)
+        {:noreply, sync_with_retry(agent_id, reason, attempt, state)}
+
+      {nil, _retries} ->
+        {:noreply, state}
+    end
+  end
+
   def handle_info(_message, state), do: {:noreply, state}
 
   @impl true
@@ -230,12 +249,35 @@ defmodule Arbor.Trust.CapabilityGrantOwner do
     :exit, reason -> dormant_state(dependencies, {:initialization_exit, reason})
   end
 
+  defp sync_with_retry(agent_id, reason, attempt, state) do
+    case run_sync(agent_id, reason, state) do
+      {{:error, _error}, %{mode: :ready} = state} ->
+        schedule_sync_retry(agent_id, reason, attempt, state)
+
+      {_result, state} ->
+        state
+    end
+  end
+
+  defp schedule_sync_retry(agent_id, reason, attempt, state) do
+    case Enum.at(@sync_retry_delays_ms, attempt) do
+      nil ->
+        state
+
+      delay ->
+        ref = make_ref()
+        Process.send_after(self(), {:retry_sync, ref}, delay)
+        retries = Map.get(state, :sync_retries, %{})
+        Map.put(state, :sync_retries, Map.put(retries, ref, {agent_id, reason, attempt + 1}))
+    end
+  end
+
   # A deleted or disabled profile leaves nothing to compare a minted mode
   # with, so everything this owner minted for the agent goes.
   defp sync_scope(:profile_updated), do: :stale
   defp sync_scope(reason) when reason in [:profile_deleted, :profile_disabled], do: :all
 
-  defp run_sync(agent_id, reason, %{mode: :ready}) do
+  defp run_sync(agent_id, reason, %{mode: :ready} = state) do
     result =
       case read_ready_custody() do
         {:ok, custody} ->
@@ -248,24 +290,34 @@ defmodule Arbor.Trust.CapabilityGrantOwner do
           {:error, custody_error}
       end
 
-    report_sync(result, agent_id, reason)
+    {report_sync(result, agent_id, reason), state}
   rescue
-    error -> report_sync({:error, {:sync_raised, error.__struct__}}, agent_id, reason)
+    error -> {report_sync({:error, {:sync_raised, error.__struct__}}, agent_id, reason), state}
   catch
-    :exit, _reason -> report_sync({:error, :sync_exited}, agent_id, reason)
+    :exit, _reason -> {report_sync({:error, :sync_exited}, agent_id, reason), state}
   end
 
-  # A dormant owner cannot mint, so a default install would warn on every
-  # profile write for nothing. Telemetry still records it; `status/1` shows
-  # the dormant state and its reason.
-  defp run_sync(agent_id, reason, _state) do
+  # A dormant owner has no authority to revoke with. Every refusal is counted
+  # in telemetry; the log line is written once per owner lifetime, because a
+  # default install is dormant and would otherwise warn on every profile write.
+  # An owner that minted and was later de-provisioned is in this state too,
+  # and its earlier grants stay in the store.
+  defp run_sync(agent_id, reason, state) do
     :telemetry.execute(
       [:arbor, :trust, :capability_sync, :failed],
       %{count: 1},
       %{agent_id: agent_id, reason: reason, error: :capability_grant_owner_unprovisioned}
     )
 
-    {:error, :capability_grant_owner_unprovisioned}
+    unless Map.get(state, :dormant_sync_warned, false) do
+      Logger.warning(
+        "[Trust.CapabilityGrantOwner] dormant (#{inspect(state.dormant_reason)}): trust-minted " <>
+          "capabilities are not being revoked on trust profile changes. Further occurrences " <>
+          "are counted in telemetry only."
+      )
+    end
+
+    {{:error, :capability_grant_owner_unprovisioned}, Map.put(state, :dormant_sync_warned, true)}
   end
 
   defp report_sync({:ok, revoked} = result, agent_id, reason) when is_integer(revoked) do
@@ -343,6 +395,10 @@ defmodule Arbor.Trust.CapabilityGrantOwner do
       resource: request.resource_uri,
       constraints: grant_spec.constraints,
       session_id: request.session_id,
+      # Not delegable. A delegated copy names the delegating agent as its
+      # granter, so this owner could no longer revoke it when the profile
+      # changes; the risk profiles also declare these grants non-delegable.
+      delegation_depth: 0,
       metadata: %{
         source: :trust_policy_enforcer,
         legacy_source: :policy_enforcer,

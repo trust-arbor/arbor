@@ -329,6 +329,11 @@ defmodule Arbor.Trust.AuthorizationPolicyIntegrationTest do
 
     assert {:ok, ^stale_cap} = Arbor.Security.get_capability_fixture(stale_cap.id)
 
+    # The profile write above asked the owner to sync. This grant is not the
+    # owner's, so it stays; a status call orders this process behind that
+    # attempt before it runs its own.
+    ExUnit.CaptureLog.capture_log(fn -> _ = Trust.capability_grant_owner_status() end)
+
     assert {:ok, 1} =
              PolicyEnforcer.sync_capabilities(agent_id,
                actor_authority: actor_authority
@@ -348,17 +353,17 @@ defmodule Arbor.Trust.AuthorizationPolicyIntegrationTest do
     uri = "arbor://fs/read/profile-change/note.txt"
     set_profile_rules(agent_id, %{"arbor://fs/read" => :auto})
     opts = [verify_identity: false, actor_authority: actor_authority]
+    grant_opts = authorize_opts_with_grant!(opts, agent_identity, uri)
+    direct_opts = [verify_identity: false, session_id: Keyword.fetch!(grant_opts, :session_id)]
 
-    assert {:ok, :authorized} =
-             Trust.authorize(
-               agent_id,
-               uri,
-               :read,
-               authorize_opts_with_grant!(opts, agent_identity, uri)
-             )
+    assert {:ok, :authorized} = Trust.authorize(agent_id, uri, :read, grant_opts)
 
     assert {:ok, minted} = CapabilityStore.find_authorizing(agent_id, uri)
     assert minted.metadata[:source] == :trust_policy_enforcer
+
+    # The pure capability check, with no trust policy in it: the path that
+    # kept honouring a stale grant.
+    assert {:ok, :authorized} = Arbor.Security.authorize(agent_id, uri, :read, direct_opts)
 
     %{state: :ready, principal_id: owner_id} = Trust.capability_grant_owner_status()
     assert minted.metadata["granter_id"] == owner_id
@@ -380,6 +385,70 @@ defmodule Arbor.Trust.AuthorizationPolicyIntegrationTest do
 
     assert {:error, :not_found} = Arbor.Security.get_capability_fixture(minted.id)
     assert {:ok, ^operator_cap} = Arbor.Security.get_capability_fixture(operator_cap.id)
+    assert {:error, _denied} = Arbor.Security.authorize(agent_id, uri, :read, direct_opts)
+  end
+
+  test "security regression: a trust-minted grant cannot be delegated out of the owner's reach",
+       %{agent_id: agent_id, agent_identity: agent_identity, actor_authority: actor_authority} do
+    uri = "arbor://fs/read/profile-delegate/note.txt"
+    set_profile_rules(agent_id, %{"arbor://fs/read" => :auto})
+    opts = [verify_identity: false, actor_authority: actor_authority]
+
+    assert {:ok, :authorized} =
+             Trust.authorize(
+               agent_id,
+               uri,
+               :read,
+               authorize_opts_with_grant!(opts, agent_identity, uri)
+             )
+
+    assert {:ok, minted} = CapabilityStore.find_authorizing(agent_id, uri)
+    assert minted.delegation_depth == 0
+
+    # A delegated copy would name the agent as its granter and survive the
+    # sync. Delegating to itself was the way to launder the grant.
+    {:ok, proof} =
+      Arbor.Security.build_signing_authority_acquisition_proof(
+        agent_id,
+        agent_identity.private_key,
+        purpose: :trust_test_delegation,
+        owner: self()
+      )
+
+    {:ok, agent_authority} =
+      Arbor.Security.open_ephemeral_signing_authority(proof, agent_identity.private_key)
+
+    assert {:error, _refused} =
+             Arbor.Security.delegate(minted.id, agent_id, actor_authority: agent_authority)
+
+    set_profile_rules(agent_id, %{"arbor://fs/read" => :block})
+    assert {:ok, 0} = Arbor.Trust.CapabilityGrantOwner.sync(agent_id, :profile_updated)
+    assert {:error, :not_found} = CapabilityStore.find_authorizing(agent_id, uri)
+  end
+
+  test "security regression: a clamped high-risk grant is not revoked by an unrelated profile edit",
+       %{agent_id: agent_id, agent_identity: agent_identity, actor_authority: actor_authority} do
+    uri = "arbor://agent/create"
+    Application.put_env(:arbor_trust, :allow_permissive_baseline, true)
+    set_profile_rules(agent_id, %{uri => :auto})
+    opts = [verify_identity: false, actor_authority: actor_authority]
+
+    # Minted as :ask although the rule says :auto; the outcome of the call is
+    # not what this test is about.
+    _ =
+      Trust.authorize(
+        agent_id,
+        uri,
+        :execute,
+        authorize_opts_with_grant!(opts, agent_identity, uri)
+      )
+
+    assert {:ok, clamped} = CapabilityStore.find_authorizing(agent_id, uri)
+    assert clamped.metadata[:mode] == :ask
+
+    set_profile_rules(agent_id, %{uri => :auto, "arbor://fs/read" => :allow})
+    assert {:ok, 0} = Arbor.Trust.CapabilityGrantOwner.sync(agent_id, :profile_updated)
+    assert {:ok, ^clamped} = Arbor.Security.get_capability_fixture(clamped.id)
   end
 
   test "security regression: deleting a profile revokes every grant the owner minted",
@@ -402,17 +471,24 @@ defmodule Arbor.Trust.AuthorizationPolicyIntegrationTest do
     assert {:ok, 0} = Arbor.Trust.CapabilityGrantOwner.sync(agent_id, :profile_deleted)
 
     assert {:error, :not_found} = Arbor.Security.get_capability_fixture(minted.id)
+
+    # With the profile gone the owner must not mint again. Policy resolution
+    # substitutes an :ask stub for a missing profile, and :ask is mintable.
+    assert {:error, _refused} =
+             Trust.authorize(
+               agent_id,
+               uri,
+               :read,
+               authorize_opts_with_grant!(opts, agent_identity, uri)
+             )
+
+    assert {:error, :not_found} = CapabilityStore.find_authorizing(agent_id, uri)
   end
 
   test "security regression: the owner cannot revoke a trust-marked grant it did not make, " <>
-         "and says so",
-       %{agent_id: agent_id, actor_authority: actor_authority} do
-    Application.put_env(:arbor_trust, :allow_permissive_baseline, true)
-
-    {:ok, _profile} =
-      Arbor.Trust.Store.update_profile(agent_id, fn profile ->
-        %{profile | baseline: :allow, rules: %{}}
-      end)
+         "says so, and still revokes its own",
+       %{agent_id: agent_id, agent_identity: agent_identity, actor_authority: actor_authority} do
+    set_profile_rules(agent_id, %{"arbor://fs/read" => :auto, "arbor://memory/recall" => :auto})
 
     {:ok, foreign} =
       Arbor.Security.grant(
@@ -422,10 +498,22 @@ defmodule Arbor.Trust.AuthorizationPolicyIntegrationTest do
         actor_authority: actor_authority
       )
 
-    {:ok, _profile} =
-      Arbor.Trust.Store.update_profile(agent_id, fn profile ->
-        %{profile | baseline: :ask}
-      end)
+    # A grant the owner did make, for the same agent. The foreign one must not
+    # shield it.
+    own_uri = "arbor://fs/read/profile-foreign/note.txt"
+    opts = [verify_identity: false, actor_authority: actor_authority]
+
+    assert {:ok, :authorized} =
+             Trust.authorize(
+               agent_id,
+               own_uri,
+               :read,
+               authorize_opts_with_grant!(opts, agent_identity, own_uri)
+             )
+
+    assert {:ok, own} = CapabilityStore.find_authorizing(agent_id, own_uri)
+
+    set_profile_rules(agent_id, %{"arbor://fs/read" => :block, "arbor://memory/recall" => :block})
 
     log =
       ExUnit.CaptureLog.capture_log(fn ->
@@ -437,6 +525,7 @@ defmodule Arbor.Trust.AuthorizationPolicyIntegrationTest do
 
     assert log =~ "were not all revoked"
     assert {:ok, ^foreign} = Arbor.Security.get_capability_fixture(foreign.id)
+    assert {:error, :not_found} = Arbor.Security.get_capability_fixture(own.id)
   end
 
   test "pre-approved bounded code/write cap bypasses the ceiling", %{agent_id: agent_id} do

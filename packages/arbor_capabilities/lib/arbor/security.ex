@@ -2345,9 +2345,15 @@ defmodule Arbor.Security do
   @doc """
   Revoke a capability using a live caller-owned authority.
 
-  The actor must hold `arbor://security/revoke/<principal_id>`. The authority
-  is checked again by `SystemAuthority`, and the resulting one-use receipt is
-  bound to the exact current capability payload before the store deletes it.
+  The actor must hold `arbor://security/revoke/<principal_id>`, with two
+  narrow exceptions that `SystemAuthority` decides for this exact capability:
+  an agent may revoke its own disclosure capability, and the granter the kernel
+  recorded and signed at grant time may revoke what it granted. Neither
+  exception extends to `revoke_all/2`, `cascade_revoke/2` or scope revocation.
+
+  The authority is checked again by `SystemAuthority`, and the resulting
+  one-use receipt is bound to the exact current capability payload before the
+  store deletes it.
   """
   @spec revoke(String.t(), keyword()) :: :ok | {:error, :not_found | term()}
   def revoke(capability_id, opts \\ []), do: revoke_capability_by_id(capability_id, opts)

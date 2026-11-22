@@ -56,6 +56,7 @@ defmodule Arbor.Trust.AuthorizationBoundaryTest do
     agent_identity: agent_identity
   } do
     uri = "arbor://code/read/a1/trust-mint"
+    {:ok, _profile} = Arbor.Trust.create_trust_profile(agent_id)
 
     assert {:ok, :authorized} =
              Arbor.Trust.authorize(

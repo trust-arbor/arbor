@@ -40,6 +40,10 @@ defmodule Arbor.Trust.PolicyEnforcerTest do
     def effective_mode(_principal, _uri, _opts), do: :block
   end
 
+  defmodule UnknownModePolicy do
+    def effective_mode(_principal, _uri, _opts), do: :surprise
+  end
+
   setup do
     ensure_started(Arbor.Security.Identity.Registry)
     ensure_started(Arbor.Security.SystemAuthority)
@@ -129,6 +133,7 @@ defmodule Arbor.Trust.PolicyEnforcerTest do
       })
 
       rebind_trust!()
+      profile!(agent_id)
 
       assert {:ok, spec} = PolicyEnforcer.grant_spec(agent_id, uri)
       assert spec.constraints == %{rate_limit: 7}
@@ -169,6 +174,7 @@ defmodule Arbor.Trust.PolicyEnforcerTest do
       rebind_trust!()
 
       try do
+        profile!(agent_id)
         assert {:ok, spec} = PolicyEnforcer.grant_spec(agent_id, uri)
         assert spec.profile.uri_prefix == "arbor://action/browser/navigate"
         assert spec.profile.effect_class == :read
@@ -185,6 +191,7 @@ defmodule Arbor.Trust.PolicyEnforcerTest do
 
       Application.put_env(:arbor_trust, :policy_enforcer_enabled, true)
       Application.put_env(:arbor_trust, :policy_module, AskPolicy)
+      profile!(agent_id)
 
       assert {:ok, spec} = PolicyEnforcer.grant_spec(agent_id, uri)
       assert spec.mode == :ask
@@ -216,6 +223,7 @@ defmodule Arbor.Trust.PolicyEnforcerTest do
     } do
       agent_id = unique_agent()
       uri = "arbor://fs/read/policy-sync-ask"
+      profile!(agent_id)
 
       Application.put_env(:arbor_trust, :policy_enforcer_enabled, true)
       Application.put_env(:arbor_trust, :policy_module, AskPolicy)
@@ -289,6 +297,7 @@ defmodule Arbor.Trust.PolicyEnforcerTest do
            "and leaves other grants alone",
          %{actor_authority: actor_authority} do
       agent_id = unique_agent()
+      profile!(agent_id)
 
       {:ok, minted} =
         Arbor.Security.grant(
@@ -358,6 +367,81 @@ defmodule Arbor.Trust.PolicyEnforcerTest do
                )
     end
 
+    test "security regression: no stored profile means no grant spec and every trust grant is stale",
+         %{actor_authority: actor_authority} do
+      agent_id = unique_agent()
+      Application.put_env(:arbor_trust, :policy_enforcer_enabled, true)
+      Application.put_env(:arbor_trust, :policy_module, AutoPolicy)
+
+      # The policy module would say :auto. With no profile on record nothing
+      # may be minted, so nothing minted earlier may stay either.
+      assert {:error, :unauthorized} =
+               PolicyEnforcer.grant_spec(agent_id, "arbor://fs/read/policy-no-profile")
+
+      {:ok, minted} =
+        Arbor.Security.grant(
+          principal: agent_id,
+          resource: "arbor://fs/read/policy-no-profile",
+          metadata: %{source: :trust_policy_enforcer, mode: :auto},
+          actor_authority: actor_authority
+        )
+
+      assert {:ok, 1} =
+               PolicyEnforcer.sync_capabilities(agent_id, actor_authority: actor_authority)
+
+      refute capability_present?(agent_id, minted.id)
+    end
+
+    test "security regression: string metadata from a persistent store is read like atoms",
+         %{actor_authority: actor_authority} do
+      agent_id = unique_agent()
+      profile!(agent_id)
+
+      {:ok, minted} =
+        Arbor.Security.grant(
+          principal: agent_id,
+          resource: "arbor://fs/read/policy-sync-strings",
+          metadata: %{"source" => "trust_policy_enforcer", "mode" => "allow"},
+          actor_authority: actor_authority
+        )
+
+      Application.put_env(:arbor_trust, :policy_module, AutoPolicy)
+
+      assert {:ok, 0} =
+               PolicyEnforcer.sync_capabilities(agent_id, actor_authority: actor_authority)
+
+      assert capability_present?(agent_id, minted.id)
+
+      Application.put_env(:arbor_trust, :policy_module, AskPolicy)
+
+      assert {:ok, 1} =
+               PolicyEnforcer.sync_capabilities(agent_id, actor_authority: actor_authority)
+
+      refute capability_present?(agent_id, minted.id)
+    end
+
+    test "security regression: an unknown policy mode fails closed", %{
+      actor_authority: actor_authority
+    } do
+      agent_id = unique_agent()
+      profile!(agent_id)
+
+      {:ok, minted} =
+        Arbor.Security.grant(
+          principal: agent_id,
+          resource: "arbor://fs/read/policy-sync-unknown-mode",
+          metadata: %{source: :trust_policy_enforcer, mode: :allow},
+          actor_authority: actor_authority
+        )
+
+      Application.put_env(:arbor_trust, :policy_module, UnknownModePolicy)
+
+      assert {:ok, 1} =
+               PolicyEnforcer.sync_capabilities(agent_id, actor_authority: actor_authority)
+
+      refute capability_present?(agent_id, minted.id)
+    end
+
     test "security regression: switching JIT minting off does not keep stale grants alive",
          %{actor_authority: actor_authority} do
       agent_id = unique_agent()
@@ -394,6 +478,15 @@ defmodule Arbor.Trust.PolicyEnforcerTest do
   end
 
   defp unique_agent, do: "agent_policy_enforcer_#{System.unique_integer([:positive])}"
+
+  # Minting and staleness both require a stored profile; the injected policy
+  # modules above still decide the mode.
+  defp profile!(agent_id) do
+    {:ok, _started} = Application.ensure_all_started(:arbor_trust)
+    if Process.whereis(Arbor.Trust.Store) == nil, do: start_supervised!({Arbor.Trust.Store, []})
+    {:ok, profile} = Arbor.Contracts.Trust.Profile.new(agent_id)
+    :ok = Arbor.Trust.Store.store_profile(profile)
+  end
 
   defp ensure_started(module) do
     if Process.whereis(module), do: :ok, else: start_supervised!({module, []})

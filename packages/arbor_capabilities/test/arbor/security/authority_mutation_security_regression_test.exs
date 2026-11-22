@@ -509,6 +509,12 @@ defmodule Arbor.Security.AuthorityMutationSecurityRegressionTest do
                  actor_authority: authority
                )
 
+      assert {:error, :capability_revocation_unauthorized} =
+               Security.revoke_by_task("task-granter-revocation", actor_authority: authority)
+
+      assert {:error, :capability_revocation_unauthorized} =
+               Security.cascade_revoke(ctx.granted.id, actor_authority: authority)
+
       assert {:ok, _still_there} = Security.get_capability_fixture(ctx.granted.id)
     end
   end

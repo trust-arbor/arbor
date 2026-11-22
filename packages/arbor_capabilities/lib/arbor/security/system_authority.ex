@@ -2475,7 +2475,10 @@ defmodule Arbor.Security.SystemAuthority do
            capability_store_get(state, capability_id),
          true <- capability_revocation_fence_digest(cap) == digest,
          true <- capability_granter_id(cap) == actor_id,
-         :ok <- verify_capability_signature_safe(cap, state) do
+         # Only this authority's own signature counts. It is the kernel that
+         # checked the granter against the authenticated actor before signing;
+         # an enrolled issuer's signature carries no such check.
+         :ok <- verify_authority_capability_signature_safe(cap, state.identity) do
       :ok
     else
       _ -> {:error, :capability_revocation_unauthorized}
