@@ -93,6 +93,8 @@ defmodule Arbor.Kernel.BoundaryConfigurationTest do
     Keyword.get(check, :in, true) == false or Keyword.get(check, :out, true) == false
   end
 
+  defp mix_task?(module), do: String.starts_with?(Atom.to_string(module), "Elixir.Mix.Tasks.")
+
   defp umbrella_root do
     Path.expand("../../../../..", __DIR__)
   end

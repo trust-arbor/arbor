@@ -24,7 +24,14 @@ defmodule Arbor.LLM.BoundaryOwnershipTest do
     assert definition.app == :arbor_llm
     assert definition.opts[:top_level?] == true
     assert definition.opts[:type] == :strict
-    assert definition.opts[:exports] == [{LLM, []}, AI.LLMError, Orchestrator.ToolHooks]
+
+    assert definition.opts[:exports] == [
+             {LLM, []},
+             {Contracts, []},
+             AI.LLMError,
+             Orchestrator.ToolHooks
+           ]
+
     refute Keyword.has_key?(definition.opts, :classify_to)
     refute Keyword.has_key?(definition.opts, :dirty_xrefs)
     refute ExUnit in definition.opts[:deps]

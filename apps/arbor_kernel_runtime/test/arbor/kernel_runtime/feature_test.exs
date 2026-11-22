@@ -140,7 +140,7 @@ defmodule Arbor.KernelRuntime.FeatureTest do
 
     assert_source_pin(
       "../../../lib/arbor/kernel_runtime.ex",
-      "c76e75f02d094cdfecd50c4bad169976185e00ba996a2cc99e14da87ab9c4210"
+      "679e8c80723b9ac0802bb840fadc76dd019a250ea611f490e51bb359efd5a736"
     )
 
     assert_source_pin(

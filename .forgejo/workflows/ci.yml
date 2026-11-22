@@ -465,10 +465,6 @@ jobs:
     runs-on: native
     env:
       MIX_ENV: test
-      ARBOR_KERNEL_PATH: ${{ github.workspace }}/packages/arbor_kernel
-      ARBOR_SUPPORT_PATH: ${{ github.workspace }}/packages/arbor_support
-      ARBOR_OAUTH_PATH: ${{ github.workspace }}/packages/arbor_oauth
-      ARBOR_SIGNALS_PATH: ${{ github.workspace }}/packages/arbor_signals
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -543,7 +539,6 @@ jobs:
     runs-on: native
     env:
       MIX_ENV: test
-      ARBOR_KERNEL_PATH: ${{ github.workspace }}/packages/arbor_kernel
 
     steps:
       - name: Checkout
@@ -980,10 +975,6 @@ jobs:
         working-directory: packages/arbor_llm
         env:
           MIX_DEPS_PATH: ${{ github.workspace }}/deps
-          ARBOR_KERNEL_PATH: ${{ github.workspace }}/packages/arbor_kernel
-          ARBOR_SUPPORT_PATH: ${{ github.workspace }}/packages/arbor_support
-          ARBOR_OAUTH_PATH: ${{ github.workspace }}/packages/arbor_oauth
-          ARBOR_SIGNALS_PATH: ${{ github.workspace }}/packages/arbor_signals
         run: |
           set -euo pipefail
           ../../bin/mix deps.get --check-locked

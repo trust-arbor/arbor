@@ -6,9 +6,13 @@ defmodule Arbor.LLM.Plugs.FixturePackageLocationTest do
   @moduletag :fast
 
   setup do
+    # File.cwd!/0 reports the resolved directory, and the default macOS TMPDIR
+    # is a symlink (/var -> /private/var), so resolve the root before comparing.
+    tmp = File.cd!(System.tmp_dir!(), &File.cwd!/0)
+
     root =
       Path.join(
-        System.tmp_dir!(),
+        tmp,
         "arbor-llm-fixture-location-#{Base.encode16(:crypto.strong_rand_bytes(12), case: :lower)}"
       )
 
