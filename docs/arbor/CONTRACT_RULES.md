@@ -234,6 +234,36 @@ kernel through `arbor_kernel_runtime`. Contract modules depend only on lower
 libraries. If a contract needs to import from a higher-level library, the
 dependency direction is wrong.
 
+### Compile-only dependencies (`runtime: false`)
+
+The extracted packages (Signals, Capabilities, Trust, Historian, Persistence,
+LLM) are started by a host application according to the boot profile, not by
+OTP's dependency order. A consumer therefore declares the package
+`runtime: false` and takes a normal dependency on its host:
+
+| Package | Host that starts it |
+|---|---|
+| `arbor_signals` | `arbor_kernel_runtime` |
+| `arbor_capabilities`, `arbor_capabilities_oidc`, `arbor_capabilities_signals` | `arbor_security` |
+| `arbor_trust` | `arbor_trust_host` |
+| `arbor_historian` | `arbor_historian_host` |
+| `arbor_persistence` and its adapters | `arbor_persistence_host` |
+| `arbor_llm` | `arbor_llm_host` |
+
+Code may call a `runtime: false` dependency only when it is the host, or its
+application has a runtime dependency path to the host. The host is then loaded
+and started first and brings the package up. Without that path nothing
+guarantees the package is present, and the call fails with `undef` in a
+release or peer that leaves the host out.
+
+A package under `packages/` cannot depend on a host. So a package never calls
+a compile-only dependency: it declares the dependency normally, or it goes
+through a configured port (section 9). Matching on a struct is not a call.
+
+[compile_only_dependency_calls_test.exs](../../apps/arbor_commands/test/arbor/repo_guards/compile_only_dependency_calls_test.exs)
+enforces this from the compiled import tables and lists the remaining
+exceptions. Add a host to its table when a new package gets one.
+
 ## 11. Organization
 
 ```
