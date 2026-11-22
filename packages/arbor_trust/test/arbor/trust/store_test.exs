@@ -466,4 +466,76 @@ defmodule Arbor.Trust.StoreTest do
 
     # Events tracking removed — events now live in EventStore exclusively
   end
+
+  describe "capability sync after a committed profile change" do
+    # Security regression (2026-11-22): nothing revoked the capabilities an old
+    # profile had minted. The store now asks the grant owner directly, on the
+    # node that committed the write, with no signal in the path.
+    setup do
+      previous = Application.get_env(:arbor_trust, :capability_grant_owner)
+      Application.put_env(:arbor_trust, :capability_grant_owner, self())
+
+      on_exit(fn ->
+        if previous,
+          do: Application.put_env(:arbor_trust, :capability_grant_owner, previous),
+          else: Application.delete_env(:arbor_trust, :capability_grant_owner)
+      end)
+
+      :ok
+    end
+
+    test "security regression: store, update and delete each request a sync", %{profile: profile} do
+      agent_id = profile.agent_id
+
+      :ok = Store.store_profile(profile)
+      assert_receive {:"$gen_cast", {:sync, ^agent_id, :profile_updated}}, 1_000
+
+      {:ok, _updated} = Store.update_profile(agent_id, fn p -> %{p | baseline: :block} end)
+      assert_receive {:"$gen_cast", {:sync, ^agent_id, :profile_updated}}, 1_000
+
+      :ok = Store.delete_profile(agent_id)
+      assert_receive {:"$gen_cast", {:sync, ^agent_id, :profile_deleted}}, 1_000
+    end
+
+    test "security regression: a failed durable delete requests a revoke-everything sync", %{
+      pid: pid,
+      profile: profile
+    } do
+      agent_id = profile.agent_id
+      GenServer.stop(pid, :normal)
+      DurableBackend.reset()
+
+      {:ok, durable_pid} =
+        Store.start_link(persistence: :durable, durable_backend: DurableBackend)
+
+      on_exit(fn ->
+        if Process.alive?(durable_pid), do: GenServer.stop(durable_pid, :normal)
+      end)
+
+      :ok = Store.store_profile(profile)
+      assert_receive {:"$gen_cast", {:sync, ^agent_id, :profile_updated}}, 1_000
+
+      DurableBackend.fail_writes?(true)
+      assert {:error, _reason} = Store.delete_profile(agent_id)
+      assert_receive {:"$gen_cast", {:sync, ^agent_id, :profile_disabled}}, 1_000
+      DurableBackend.fail_writes?(false)
+    end
+
+    test "a failed write requests nothing", %{pid: pid, profile: profile} do
+      GenServer.stop(pid, :normal)
+      DurableBackend.reset()
+
+      {:ok, durable_pid} =
+        Store.start_link(persistence: :durable, durable_backend: DurableBackend)
+
+      on_exit(fn ->
+        if Process.alive?(durable_pid), do: GenServer.stop(durable_pid, :normal)
+      end)
+
+      DurableBackend.fail_writes?(true)
+      assert {:error, _reason} = Store.store_profile(profile)
+      refute_receive {:"$gen_cast", {:sync, _agent_id, _reason}}, 200
+      DurableBackend.fail_writes?(false)
+    end
+  end
 end

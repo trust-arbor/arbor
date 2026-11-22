@@ -259,6 +259,7 @@ defmodule Arbor.Trust.Store do
         :ok = put_profile_in_cache(profile, state)
         clear_failed_deletion(profile.agent_id)
         emit_distributed_signal(:profile_updated, profile.agent_id)
+        request_capability_sync(profile.agent_id, :profile_updated)
 
         new_stats = update_stats(state.cache_stats, :writes, 1)
         {:reply, :ok, %{state | cache_stats: new_stats}}
@@ -297,6 +298,7 @@ defmodule Arbor.Trust.Store do
         :ets.delete(state.profiles_table, agent_id)
         clear_failed_deletion(agent_id)
         emit_distributed_signal(:profile_deleted, agent_id)
+        request_capability_sync(agent_id, :profile_deleted)
         new_stats = update_stats(state.cache_stats, :deletes, 1)
         {:reply, :ok, %{state | cache_stats: new_stats}}
 
@@ -306,6 +308,7 @@ defmodule Arbor.Trust.Store do
         :ok = put_profile_in_cache(tombstone, state)
         remember_failed_deletion(agent_id)
         emit_distributed_signal(:profile_disabled, agent_id)
+        request_capability_sync(agent_id, :profile_disabled)
         {:reply, error, state}
     end
   end
@@ -422,6 +425,7 @@ defmodule Arbor.Trust.Store do
         :ok = put_profile_in_cache(updated, state)
         clear_failed_deletion(agent_id)
         emit_distributed_signal(:profile_updated, agent_id)
+        request_capability_sync(agent_id, :profile_updated)
 
         new_stats = update_stats(state.cache_stats, :writes, 1)
         {:reply, {:ok, updated}, %{state | cache_stats: new_stats}}
@@ -622,6 +626,27 @@ defmodule Arbor.Trust.Store do
   # encoding can't drift between Store and any future persistence layers.
   defp serialize_profile(%Profile{} = profile), do: Authority.for_persistence(profile)
   defp deserialize_profile(data), do: Authority.from_persistence(data)
+
+  # Tell the grant owner to take back what the old profile minted. This is a
+  # direct cast on the node that committed the write, not a signal: revocation
+  # must not depend on the bus or on the governed agent. The cast cannot block
+  # or fail this write; the owner reports a sync it could not complete.
+  defp request_capability_sync(agent_id, reason) when is_binary(agent_id) do
+    owner =
+      Application.get_env(
+        :arbor_trust,
+        :capability_grant_owner,
+        Arbor.Trust.CapabilityGrantOwner
+      )
+
+    Arbor.Trust.CapabilityGrantOwner.request_sync(agent_id, reason, owner)
+  rescue
+    _ -> :ok
+  catch
+    :exit, _ -> :ok
+  end
+
+  defp request_capability_sync(_agent_id, _reason), do: :ok
 
   defp emit_distributed_signal(type, agent_id) do
     case ProfileSync.broadcast(type, %{agent_id: agent_id, origin_node: node()}) do

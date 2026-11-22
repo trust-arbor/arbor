@@ -329,12 +329,98 @@ defmodule Arbor.Trust.AuthorizationPolicyIntegrationTest do
 
     assert {:ok, ^stale_cap} = Arbor.Security.get_capability_fixture(stale_cap.id)
 
-    assert :ok =
+    assert {:ok, 1} =
              PolicyEnforcer.sync_capabilities(agent_id,
                actor_authority: actor_authority
              )
 
     assert {:error, :not_found} = Arbor.Security.get_capability_fixture(stale_cap.id)
+  end
+
+  # Until 2026-11-22 nothing called the sync above: a tightened profile left
+  # the capabilities minted under the old one in the store, where any caller
+  # of `Arbor.Security.authorize/4` still honoured them. This runs the real
+  # store, the real grant owner and the real security kernel.
+  test "security regression: tightening a profile revokes the stale grant with no caller involved",
+       %{agent_id: agent_id, actor_authority: actor_authority} do
+    uri = "arbor://memory/recall"
+    Application.put_env(:arbor_trust, :allow_permissive_baseline, true)
+
+    %{state: :ready, principal_id: owner_id} = Trust.capability_grant_owner_status()
+
+    {:ok, revocation_right} =
+      Arbor.Security.grant_fixture(
+        principal: owner_id,
+        resource: Arbor.Trust.CapabilityGrantOwner.revocation_capability_uri()
+      )
+
+    on_exit(fn -> Arbor.Security.revoke_fixture(revocation_right.id) end)
+
+    {:ok, _profile} =
+      Arbor.Trust.Store.update_profile(agent_id, fn profile ->
+        %{profile | baseline: :allow, rules: %{}}
+      end)
+
+    {:ok, stale_cap} =
+      Arbor.Security.grant(
+        principal: agent_id,
+        resource: uri,
+        metadata: %{source: :trust_policy_enforcer, mode: :auto},
+        actor_authority: actor_authority
+      )
+
+    {:ok, operator_cap} =
+      Arbor.Security.grant(
+        principal: agent_id,
+        resource: "arbor://memory/index",
+        actor_authority: actor_authority
+      )
+
+    {:ok, _profile} =
+      Arbor.Trust.Store.update_profile(agent_id, fn profile ->
+        %{profile | baseline: :ask}
+      end)
+
+    # The store casts to the owner; a synchronous no-op sync orders this
+    # process behind that cast.
+    assert {:ok, 0} = Arbor.Trust.CapabilityGrantOwner.sync(agent_id, :profile_updated)
+
+    assert {:error, :not_found} = Arbor.Security.get_capability_fixture(stale_cap.id)
+    assert {:ok, ^operator_cap} = Arbor.Security.get_capability_fixture(operator_cap.id)
+  end
+
+  test "security regression: without the revocation grant the owner reports the stale grant it left",
+       %{agent_id: agent_id, actor_authority: actor_authority} do
+    Application.put_env(:arbor_trust, :allow_permissive_baseline, true)
+
+    {:ok, _profile} =
+      Arbor.Trust.Store.update_profile(agent_id, fn profile ->
+        %{profile | baseline: :allow, rules: %{}}
+      end)
+
+    {:ok, stale_cap} =
+      Arbor.Security.grant(
+        principal: agent_id,
+        resource: "arbor://memory/recall",
+        metadata: %{source: :trust_policy_enforcer, mode: :auto},
+        actor_authority: actor_authority
+      )
+
+    {:ok, _profile} =
+      Arbor.Trust.Store.update_profile(agent_id, fn profile ->
+        %{profile | baseline: :ask}
+      end)
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:error, {:capability_revocation_failed, cap_id, _refusal}} =
+                 Arbor.Trust.CapabilityGrantOwner.sync(agent_id, :profile_updated)
+
+        assert cap_id == stale_cap.id
+      end)
+
+    assert log =~ "were not revoked"
+    assert {:ok, ^stale_cap} = Arbor.Security.get_capability_fixture(stale_cap.id)
   end
 
   test "pre-approved bounded code/write cap bypasses the ceiling", %{agent_id: agent_id} do

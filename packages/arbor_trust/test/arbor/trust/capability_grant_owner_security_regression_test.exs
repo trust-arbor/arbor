@@ -114,6 +114,17 @@ defmodule Arbor.Trust.CapabilityGrantOwnerSecurityRegressionTest do
            }}
       end
     end
+
+    def sync_capabilities(agent_id, opts) do
+      state =
+        Agent.get(
+          Arbor.Trust.CapabilityGrantOwnerSecurityRegressionTest.FakeSecurity.State,
+          & &1
+        )
+
+      send(state.test_pid, {:sync_called, agent_id, opts})
+      Map.get(state, :sync_result, {:ok, 0})
+    end
   end
 
   defmodule ProductionOwnerSupervisor do
@@ -285,6 +296,76 @@ defmodule Arbor.Trust.CapabilityGrantOwnerSecurityRegressionTest do
              CapabilityGrantOwner.request(signed, owner)
 
     refute_received {:grant_called, _opts}
+  end
+
+  test "security regression: the owner revokes with its own authority and the reason picks the scope",
+       %{target: target} do
+    owner = start_owner!()
+    owner_id = CapabilityGrantOwner.status(owner).principal_id
+
+    set_state(:sync_result, {:ok, 2})
+    assert {:ok, 2} = CapabilityGrantOwner.sync(target.agent_id, :profile_updated, owner)
+    assert_received {:sync_called, agent_id, opts}
+    assert agent_id == target.agent_id
+    assert opts[:scope] == :stale
+    assert %SigningAuthority{principal_id: ^owner_id} = opts[:actor_authority]
+
+    for reason <- [:profile_deleted, :profile_disabled] do
+      assert {:ok, 2} = CapabilityGrantOwner.sync(target.agent_id, reason, owner)
+      assert_received {:sync_called, _agent_id, opts}
+      assert opts[:scope] == :all
+    end
+
+    # The path the profile store uses.
+    assert :ok = CapabilityGrantOwner.request_sync(target.agent_id, :profile_deleted, owner)
+    assert_receive {:sync_called, _agent_id, opts}, 1_000
+    assert opts[:scope] == :all
+  end
+
+  test "security regression: a sync the owner could not complete is reported, not swallowed",
+       %{target: target} do
+    test_pid = self()
+    handler_id = {__MODULE__, make_ref()}
+
+    :telemetry.attach(
+      handler_id,
+      [:arbor, :trust, :capability_sync, :failed],
+      fn _event, measurements, metadata, _config ->
+        send(test_pid, {:sync_failed, measurements, metadata})
+      end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
+    owner = start_owner!()
+    refusal = {:capability_revocation_failed, "cap_1", :capability_revocation_unauthorized}
+    set_state(:sync_result, {:error, refusal})
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:error, ^refusal} =
+                 CapabilityGrantOwner.sync(target.agent_id, :profile_updated, owner)
+      end)
+
+    agent_id = target.agent_id
+
+    assert_received {:sync_failed, %{count: 1},
+                     %{agent_id: ^agent_id, reason: :profile_updated, error: ^refusal}}
+
+    assert log =~ "were not revoked"
+    assert log =~ CapabilityGrantOwner.revocation_capability_uri()
+    assert %{revocation: :not_provisioned} = CapabilityGrantOwner.status(owner)
+  end
+
+  test "security regression: a dormant owner never spends authority on a sync", %{target: target} do
+    set_state(:provisioned, false)
+    owner = start_owner!()
+
+    assert {:error, :capability_grant_owner_unprovisioned} =
+             CapabilityGrantOwner.sync(target.agent_id, :profile_deleted, owner)
+
+    refute_received {:sync_called, _agent_id, _opts}
   end
 
   test "security regression: raw owner control messages are denied without restarting custody" do

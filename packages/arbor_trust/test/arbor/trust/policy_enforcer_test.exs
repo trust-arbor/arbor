@@ -228,7 +228,7 @@ defmodule Arbor.Trust.PolicyEnforcerTest do
                  actor_authority: actor_authority
                )
 
-      assert :ok =
+      assert {:ok, 0} =
                PolicyEnforcer.sync_capabilities(agent_id,
                  actor_authority: actor_authority
                )
@@ -253,7 +253,7 @@ defmodule Arbor.Trust.PolicyEnforcerTest do
       Application.put_env(:arbor_trust, :policy_enforcer_enabled, true)
       Application.put_env(:arbor_trust, :policy_module, AskPolicy)
 
-      assert :ok =
+      assert {:ok, 1} =
                PolicyEnforcer.sync_capabilities(agent_id,
                  actor_authority: actor_authority
                )
@@ -283,6 +283,100 @@ defmodule Arbor.Trust.PolicyEnforcerTest do
 
       assert cap_id == cap.id
       assert capability_present?(agent_id, cap.id)
+    end
+
+    test "security regression: a profile tightened to block revokes the unattended trust grant " <>
+           "and leaves other grants alone",
+         %{actor_authority: actor_authority} do
+      agent_id = unique_agent()
+
+      {:ok, minted} =
+        Arbor.Security.grant(
+          principal: agent_id,
+          resource: "arbor://fs/read/policy-sync-block",
+          metadata: %{source: :trust_policy_enforcer, mode: :allow},
+          actor_authority: actor_authority
+        )
+
+      {:ok, operator_granted} =
+        Arbor.Security.grant(
+          principal: agent_id,
+          resource: "arbor://fs/read/policy-sync-operator",
+          actor_authority: actor_authority
+        )
+
+      Application.put_env(:arbor_trust, :policy_module, AutoPolicy)
+
+      assert {:ok, 0} =
+               PolicyEnforcer.sync_capabilities(agent_id, actor_authority: actor_authority)
+
+      assert capability_present?(agent_id, minted.id)
+
+      Application.put_env(:arbor_trust, :policy_module, BlockPolicy)
+
+      assert {:ok, 1} =
+               PolicyEnforcer.sync_capabilities(agent_id, actor_authority: actor_authority)
+
+      refute capability_present?(agent_id, minted.id)
+      assert capability_present?(agent_id, operator_granted.id)
+    end
+
+    test "security regression: scope :all revokes every trust grant whatever the mode says",
+         %{actor_authority: actor_authority} do
+      agent_id = unique_agent()
+
+      {:ok, minted} =
+        Arbor.Security.grant(
+          principal: agent_id,
+          resource: "arbor://fs/read/policy-sync-all",
+          metadata: %{source: :trust_policy_enforcer, mode: :auto},
+          actor_authority: actor_authority
+        )
+
+      {:ok, operator_granted} =
+        Arbor.Security.grant(
+          principal: agent_id,
+          resource: "arbor://fs/read/policy-sync-all-operator",
+          actor_authority: actor_authority
+        )
+
+      Application.put_env(:arbor_trust, :policy_module, AutoPolicy)
+
+      assert {:ok, 1} =
+               PolicyEnforcer.sync_capabilities(agent_id,
+                 actor_authority: actor_authority,
+                 scope: :all
+               )
+
+      refute capability_present?(agent_id, minted.id)
+      assert capability_present?(agent_id, operator_granted.id)
+
+      assert {:error, :invalid_sync_scope} =
+               PolicyEnforcer.sync_capabilities(agent_id,
+                 actor_authority: actor_authority,
+                 scope: :everything
+               )
+    end
+
+    test "security regression: switching JIT minting off does not keep stale grants alive",
+         %{actor_authority: actor_authority} do
+      agent_id = unique_agent()
+
+      {:ok, minted} =
+        Arbor.Security.grant(
+          principal: agent_id,
+          resource: "arbor://fs/read/policy-sync-disabled",
+          metadata: %{source: :trust_policy_enforcer, mode: :allow},
+          actor_authority: actor_authority
+        )
+
+      Application.put_env(:arbor_trust, :policy_enforcer_enabled, false)
+      Application.put_env(:arbor_trust, :policy_module, BlockPolicy)
+
+      assert {:ok, 1} =
+               PolicyEnforcer.sync_capabilities(agent_id, actor_authority: actor_authority)
+
+      refute capability_present?(agent_id, minted.id)
     end
   end
 

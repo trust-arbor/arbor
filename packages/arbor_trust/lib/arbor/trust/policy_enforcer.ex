@@ -124,18 +124,31 @@ defmodule Arbor.Trust.PolicyEnforcer do
   end
 
   @doc """
-  Audit and re-sync trust-minted capabilities after a profile change.
+  Revoke the trust-minted capabilities a profile change has made stale.
 
-  Requires a caller-owned Security signing authority in `:actor_authority`.
+  A capability is stale when the mode it was minted under no longer matches
+  the principal's current mode for its resource. With `scope: :all` every
+  trust-minted capability is revoked whatever the current mode says; use it
+  when the profile was deleted or disabled. Capabilities granted any other way
+  are never touched.
+
+  Requires a caller-owned Security signing authority in `:actor_authority`
+  that may revoke for the principal. Returns the number revoked.
   """
-  @spec sync_capabilities(String.t(), keyword()) :: :ok | {:error, term()}
+  @spec sync_capabilities(String.t(), keyword()) :: {:ok, non_neg_integer()} | {:error, term()}
   def sync_capabilities(principal_id, opts \\ []) do
-    if enabled?() do
-      with {:ok, actor_authority} <- fetch_actor_authority(opts) do
-        do_sync_capabilities(principal_id, actor_authority)
-      end
-    else
-      :ok
+    # Not gated on `enabled?/0`: switching JIT minting off must not keep the
+    # capabilities it minted earlier alive.
+    with {:ok, actor_authority} <- fetch_actor_authority(opts),
+         {:ok, scope} <- sync_scope(opts) do
+      do_sync_capabilities(principal_id, actor_authority, scope)
+    end
+  end
+
+  defp sync_scope(opts) do
+    case Keyword.get(opts, :scope, :stale) do
+      scope when scope in [:stale, :all] -> {:ok, scope}
+      _other -> {:error, :invalid_sync_scope}
     end
   end
 
@@ -158,25 +171,12 @@ defmodule Arbor.Trust.PolicyEnforcer do
     :exit, _ -> {:error, :store_unavailable}
   end
 
-  defp do_sync_capabilities(principal_id, actor_authority) do
+  defp do_sync_capabilities(principal_id, actor_authority, scope) do
     with {:ok, caps} <- Arbor.Security.list_capabilities(principal_id) do
       stale_caps =
         caps
         |> Enum.filter(&trust_minted?/1)
-        |> Enum.filter(fn cap ->
-          current_mode = get_effective_mode(principal_id, cap.resource_uri, [])
-          minted_mode = minted_mode(cap)
-          requires_approval? = approval_required?(cap)
-
-          cond do
-            current_mode == :block -> true
-            minted_mode == :ask -> current_mode != :ask
-            minted_mode in [:auto, :allow] -> current_mode not in [:auto, :allow]
-            is_nil(minted_mode) and requires_approval? -> current_mode in [:auto, :allow]
-            is_nil(minted_mode) and not requires_approval? -> current_mode == :ask
-            true -> false
-          end
-        end)
+        |> Enum.filter(&(scope == :all or stale?(&1, principal_id)))
 
       revoke_stale_capabilities(stale_caps, principal_id, actor_authority)
     else
@@ -189,6 +189,29 @@ defmodule Arbor.Trust.PolicyEnforcer do
   catch
     :exit, reason -> {:error, {:capability_sync_exit, reason}}
   end
+
+  defp stale?(cap, principal_id) do
+    current_mode = get_effective_mode(principal_id, cap.resource_uri, [])
+    minted_mode = normalize_minted_mode(minted_mode(cap))
+    requires_approval? = approval_required?(cap)
+
+    cond do
+      current_mode == :block -> true
+      minted_mode == :ask -> current_mode != :ask
+      minted_mode in [:auto, :allow] -> current_mode not in [:auto, :allow]
+      is_nil(minted_mode) and requires_approval? -> current_mode in [:auto, :allow]
+      is_nil(minted_mode) and not requires_approval? -> current_mode == :ask
+      true -> false
+    end
+  end
+
+  # Metadata comes back with string values after a round trip through a
+  # persistent capability store.
+  defp normalize_minted_mode(mode) when mode in [:ask, :allow, :auto], do: mode
+  defp normalize_minted_mode("ask"), do: :ask
+  defp normalize_minted_mode("allow"), do: :allow
+  defp normalize_minted_mode("auto"), do: :auto
+  defp normalize_minted_mode(_mode), do: nil
 
   defp revoke_stale_capabilities(stale_caps, principal_id, actor_authority) do
     stale_caps
@@ -203,13 +226,13 @@ defmodule Arbor.Trust.PolicyEnforcer do
       {:ok, revoked} ->
         if revoked > 0 do
           Logger.info(
-            "[Trust.PolicyEnforcer] Synced #{revoked} stale capabilities for #{principal_id}",
+            "[Trust.PolicyEnforcer] Revoked #{revoked} stale capabilities for #{principal_id}",
             principal_id: principal_id,
             revoked: revoked
           )
         end
 
-        :ok
+        {:ok, revoked}
 
       {:error, _reason} = error ->
         error

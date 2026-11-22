@@ -12,6 +12,20 @@ defmodule Arbor.Trust.CapabilityGrantOwner do
   Security, checks that the signer is the target principal, re-evaluates the
   current Trust policy itself, and only then spends its own mutation authority.
   Neither authority is returned to the caller.
+
+  ## Revoking what a profile change made stale
+
+  The owner is also the one actor that takes back what it minted. After a
+  trust profile write, delete or disable commits, `Arbor.Trust.Store` casts
+  `request_sync/2` and the owner runs `PolicyEnforcer.sync_capabilities/2` with
+  its own authority. No signal is in that path, and the governed agent takes
+  no part in it.
+
+  Revoking needs a second operator grant, `arbor://security/revoke/**`. An
+  owner provisioned for grants only still mints; its syncs fail at the first
+  revocation, and that is reported (a warning and the
+  `[:arbor, :trust, :capability_sync, :failed]` telemetry event), never
+  swallowed. `status/1` says whether the revocation grant is present.
   """
 
   use GenServer
@@ -25,6 +39,8 @@ defmodule Arbor.Trust.CapabilityGrantOwner do
 
   @identity_name "trust_capability_grant_owner"
   @required_capability "arbor://security/grant/**"
+  @revocation_capability "arbor://security/revoke/**"
+  @sync_reasons [:profile_updated, :profile_deleted, :profile_disabled]
   @purpose :trust_capability_grant
   @max_seen_nonces 8_192
   @custody_table Arbor.Trust.CapabilityGrantOwner.Custody
@@ -34,8 +50,12 @@ defmodule Arbor.Trust.CapabilityGrantOwner do
           state: :ready | :dormant,
           principal_id: String.t() | nil,
           required_capability: String.t(),
+          revocation_capability: String.t(),
+          revocation: :provisioned | :not_provisioned,
           reason: term() | nil
         }
+
+  @type sync_reason :: :profile_updated | :profile_deleted | :profile_disabled
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
@@ -57,8 +77,34 @@ defmodule Arbor.Trust.CapabilityGrantOwner do
     :exit, _ -> dormant_status(:capability_grant_owner_unavailable)
   end
 
+  @doc """
+  Ask the owner to revoke the trust-minted capabilities a profile change made
+  stale for `agent_id`. Asynchronous and never blocks the caller: the profile
+  store calls this from inside its own write.
+  """
+  @spec request_sync(String.t(), sync_reason(), GenServer.server()) :: :ok
+  def request_sync(agent_id, reason, server \\ __MODULE__)
+      when is_binary(agent_id) and reason in @sync_reasons do
+    GenServer.cast(server, {:sync, agent_id, reason})
+  end
+
+  @doc """
+  Run the same sync and wait for its result. For operators and tests.
+  """
+  @spec sync(String.t(), sync_reason(), GenServer.server()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def sync(agent_id, reason, server \\ __MODULE__)
+      when is_binary(agent_id) and reason in @sync_reasons do
+    GenServer.call(server, {:sync, agent_id, reason}, 30_000)
+  catch
+    :exit, _ -> {:error, :capability_grant_owner_unavailable}
+  end
+
   @doc false
   def identity_name, do: @identity_name
+
+  @doc false
+  def revocation_capability_uri, do: @revocation_capability
 
   @doc false
   def required_capability_uri, do: @required_capability
@@ -76,7 +122,8 @@ defmodule Arbor.Trust.CapabilityGrantOwner do
     @custody_table = :ets.new(@custody_table, [:named_table, :set, :private])
     true = :ets.insert(@custody_table, {@custody_tag, :bootstrap, dependencies})
 
-    {:ok, %{mode: :pending, principal_id: nil, dormant_reason: nil}, {:continue, :initialize}}
+    {:ok, %{mode: :pending, principal_id: nil, dormant_reason: nil, revocation: :not_provisioned},
+     {:continue, :initialize}}
   end
 
   @impl true
@@ -110,11 +157,22 @@ defmodule Arbor.Trust.CapabilityGrantOwner do
     {:reply, {:error, :capability_grant_owner_unprovisioned}, state}
   end
 
+  def handle_call({:sync, agent_id, reason}, _from, state)
+      when is_binary(agent_id) and reason in @sync_reasons do
+    {:reply, run_sync(agent_id, reason, state), state}
+  end
+
   def handle_call(_request, _from, state) do
     {:reply, {:error, :capability_grant_owner_unauthorized}, state}
   end
 
   @impl true
+  def handle_cast({:sync, agent_id, reason}, state)
+      when is_binary(agent_id) and reason in @sync_reasons do
+    _ = run_sync(agent_id, reason, state)
+    {:noreply, state}
+  end
+
   def handle_cast(_request, state), do: {:noreply, state}
 
   @impl true
@@ -159,7 +217,8 @@ defmodule Arbor.Trust.CapabilityGrantOwner do
         %{
           mode: :ready,
           principal_id: principal_id,
-          dormant_reason: nil
+          dormant_reason: nil,
+          revocation: revocation_provision(principal_id, security)
         }
 
       {:error, reason} ->
@@ -170,7 +229,8 @@ defmodule Arbor.Trust.CapabilityGrantOwner do
         %{
           mode: :dormant,
           principal_id: principal_from_error(reason),
-          dormant_reason: reason
+          dormant_reason: reason,
+          revocation: :not_provisioned
         }
     end
   rescue
@@ -178,6 +238,73 @@ defmodule Arbor.Trust.CapabilityGrantOwner do
   catch
     :exit, reason -> dormant_state(dependencies, {:initialization_exit, reason})
   end
+
+  # A deleted or disabled profile leaves nothing to compare a minted mode
+  # with, so everything this owner minted for the agent goes.
+  defp sync_scope(:profile_updated), do: :stale
+  defp sync_scope(reason) when reason in [:profile_deleted, :profile_disabled], do: :all
+
+  defp run_sync(agent_id, reason, %{mode: :ready}) do
+    result =
+      case read_ready_custody() do
+        {:ok, custody} ->
+          custody.policy.sync_capabilities(agent_id,
+            actor_authority: custody.authority,
+            scope: sync_scope(reason)
+          )
+
+        {:error, custody_error} ->
+          {:error, custody_error}
+      end
+
+    report_sync(result, agent_id, reason)
+  rescue
+    error -> report_sync({:error, {:sync_raised, error.__struct__}}, agent_id, reason)
+  catch
+    :exit, _reason -> report_sync({:error, :sync_exited}, agent_id, reason)
+  end
+
+  # A dormant owner cannot mint, so a default install would warn on every
+  # profile write for nothing. Telemetry still records it; `status/1` shows
+  # the dormant state and its reason.
+  defp run_sync(agent_id, reason, _state) do
+    :telemetry.execute(
+      [:arbor, :trust, :capability_sync, :failed],
+      %{count: 1},
+      %{agent_id: agent_id, reason: reason, error: :capability_grant_owner_unprovisioned}
+    )
+
+    {:error, :capability_grant_owner_unprovisioned}
+  end
+
+  defp report_sync({:ok, revoked} = result, agent_id, reason) when is_integer(revoked) do
+    :telemetry.execute(
+      [:arbor, :trust, :capability_sync, :completed],
+      %{revoked: revoked},
+      %{agent_id: agent_id, reason: reason}
+    )
+
+    result
+  end
+
+  defp report_sync({:error, error} = result, agent_id, reason) do
+    :telemetry.execute(
+      [:arbor, :trust, :capability_sync, :failed],
+      %{count: 1},
+      %{agent_id: agent_id, reason: reason, error: error}
+    )
+
+    Logger.warning(
+      "[Trust.CapabilityGrantOwner] capabilities minted under the old trust profile were not " <>
+        "revoked for #{agent_id} after #{reason}: #{inspect(error)}. The owner needs " <>
+        "#{@revocation_capability} (mix arbor.trust.grant_owner provision-revocation)."
+    )
+
+    result
+  end
+
+  defp report_sync(other, agent_id, reason),
+    do: report_sync({:error, {:unexpected_sync_result, other}}, agent_id, reason)
 
   defp grant_from_signed_request(signed_request, state) do
     now = System.system_time(:second)
@@ -336,6 +463,27 @@ defmodule Arbor.Trust.CapabilityGrantOwner do
     end
   end
 
+  # Read once at start, for `status/1` only. The kernel decides each
+  # revocation when it is attempted.
+  defp revocation_provision(principal_id, security) do
+    case security.list_capabilities(principal_id) do
+      {:ok, capabilities} when is_list(capabilities) ->
+        if Enum.any?(capabilities, fn capability ->
+             capability.resource_uri == @revocation_capability and
+               Arbor.Contracts.Security.Capability.valid?(capability)
+           end),
+           do: :provisioned,
+           else: :not_provisioned
+
+      _other ->
+        :not_provisioned
+    end
+  rescue
+    _ -> :not_provisioned
+  catch
+    :exit, _ -> :not_provisioned
+  end
+
   defp open_authority(principal_id, security) do
     with {:ok, proof} <-
            security.build_stored_signing_authority_acquisition_proof(
@@ -387,6 +535,8 @@ defmodule Arbor.Trust.CapabilityGrantOwner do
       state: state.mode,
       principal_id: state.principal_id,
       required_capability: @required_capability,
+      revocation_capability: @revocation_capability,
+      revocation: Map.get(state, :revocation, :not_provisioned),
       reason: state.dormant_reason
     }
   end
@@ -504,7 +654,8 @@ defmodule Arbor.Trust.CapabilityGrantOwner do
     %{
       mode: :dormant,
       principal_id: principal_from_error(reason),
-      dormant_reason: reason
+      dormant_reason: reason,
+      revocation: :not_provisioned
     }
   end
 
@@ -528,6 +679,8 @@ defmodule Arbor.Trust.CapabilityGrantOwner do
       state: :dormant,
       principal_id: nil,
       required_capability: @required_capability,
+      revocation_capability: @revocation_capability,
+      revocation: :not_provisioned,
       reason: reason
     }
   end
