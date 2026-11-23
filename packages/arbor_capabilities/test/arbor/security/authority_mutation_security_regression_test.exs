@@ -655,12 +655,15 @@ defmodule Arbor.Security.AuthorityMutationSecurityRegressionTest do
       # copy sits outside the scope being revoked.
       {task_parent, task_child} = ctx.delegate.("arbor://fs/read/delegation-revoke-task", [])
 
-      assert {:ok, revoked} =
+      # The copy inherits the session, so the scope names both parent and
+      # copy. Each is removed, and counted, exactly once.
+      assert child.session_id == "session-delegation"
+
+      assert {:ok, 2} =
                Security.revoke_by_session("session-delegation",
                  actor_authority: ctx.operator_authority
                )
 
-      assert revoked >= 2
       assert {:error, :not_found} = Security.get_capability_fixture(parent.id)
       assert {:error, :not_found} = Security.get_capability_fixture(child.id)
       assert {:ok, ^task_parent} = Security.get_capability_fixture(task_parent.id)
