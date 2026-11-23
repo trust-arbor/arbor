@@ -25,6 +25,10 @@ defmodule Arbor.Security.Store.JSONFileClusterLockSecurityRegressionTest do
   @payload_bytes 60_000
 
   setup_all do
+    assert distribution_contract_ready?(),
+           "pinned distribution cookie and private EPMD are required. " <>
+             "Run packages/arbor_capabilities/bin/test (CI distribution boot)."
+
     case ensure_distribution() do
       :ok -> :ok
       {:error, reason} -> {:skip, "cannot start distribution: #{inspect(reason)}"}
@@ -97,6 +101,19 @@ defmodule Arbor.Security.Store.JSONFileClusterLockSecurityRegressionTest do
       :peer.stop(peer_a)
       File.rm_rf!(root)
     end
+  end
+
+  defp distribution_contract_ready? do
+    cookie? =
+      case :init.get_argument(:setcookie) do
+        {:ok, [[cookie]]} when is_list(cookie) -> cookie != []
+        _ -> false
+      end
+
+    port = System.get_env("ERL_EPMD_PORT")
+
+    cookie? and is_binary(port) and port != "" and port != "4369" and
+      System.get_env("ERL_EPMD_ADDRESS") == "127.0.0.1"
   end
 
   defp ensure_distribution do

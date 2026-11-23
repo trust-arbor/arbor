@@ -1,3 +1,6 @@
+# Distributed peer tests need the VM booted with one pinned cookie and a
+# private EPMD. `mix test` cannot add -setcookie after startup. CI and
+# packages/arbor_capabilities/bin/test export that contract before the VM.
 ExUnit.start(exclude: [:llm, :llm_local])
 
 for file <-

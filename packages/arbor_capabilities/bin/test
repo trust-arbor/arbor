@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# Boot the Capabilities package suite the way CI does: one synthetic cookie,
+# a private EPMD on 127.0.0.1, and no competing ERL_AFLAGS/ERL_ZFLAGS cookie.
+# `mix test` cannot add -setcookie to an already-started VM.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+PKG="$ROOT/packages/arbor_capabilities"
+
+if command -v mise >/dev/null 2>&1; then
+  ERLANG_ROOT="$(mise where erlang)"
+else
+  ERLANG_ROOT="$(cd "$(dirname "$(command -v erl)")/.." && pwd)"
+fi
+
+ERL_EPMD_PORT="$(python3 - <<'PY'
+import socket
+with socket.socket() as sock:
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+if port == 4369:
+    raise SystemExit("Private EPMD requires a non-default port")
+print(port)
+PY
+)"
+export ERL_EPMD_PORT
+export ERL_EPMD_ADDRESS=127.0.0.1
+
+CAPABILITIES_QA_COOKIE="capabilities_pkg_$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+export CAPABILITIES_QA_COOKIE
+CUSTODY_QA_COOKIE_SHA256="$(python3 -c 'import hashlib, os; print(hashlib.sha256(os.environ["CAPABILITIES_QA_COOKIE"].encode()).hexdigest())')"
+export CUSTODY_QA_COOKIE_SHA256
+
+unset ERL_AFLAGS ERL_ZFLAGS ELIXIR_ERL_OPTIONS
+export ERL_FLAGS="+S4:4 -setcookie ${CAPABILITIES_QA_COOKIE} -kernel inet_dist_use_interface {127,0,0,1}"
+
+EPMD_PID=""
+cleanup() {
+  if [ -n "$EPMD_PID" ]; then
+    kill "$EPMD_PID" 2>/dev/null || true
+    wait "$EPMD_PID" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT
+
+"$ERLANG_ROOT/bin/epmd" -port "$ERL_EPMD_PORT" -address 127.0.0.1 >/tmp/arbor-capabilities-epmd.log 2>&1 &
+EPMD_PID=$!
+
+ready=0
+for _attempt in $(seq 1 100); do
+  if ! kill -0 "$EPMD_PID" 2>/dev/null; then
+    echo "Owned private EPMD exited before readiness" >&2
+    exit 1
+  fi
+  names="$("$ERLANG_ROOT/bin/epmd" -port "$ERL_EPMD_PORT" -names 2>/dev/null || true)"
+  if [ "$names" = "epmd: up and running on port $ERL_EPMD_PORT with data:" ]; then
+    ready=1
+    break
+  fi
+  sleep 0.05
+done
+if [ "$ready" != 1 ]; then
+  echo "Owned private EPMD did not become ready" >&2
+  exit 1
+fi
+
+cd "$PKG"
+export MIX_ENV=test
+export MIX_DEPS_PATH="${MIX_DEPS_PATH:-$ROOT/deps}"
+export MIX_BUILD_PATH="${MIX_BUILD_PATH:-$ROOT/_build}"
+exec "$ROOT/bin/mix" test "$@"

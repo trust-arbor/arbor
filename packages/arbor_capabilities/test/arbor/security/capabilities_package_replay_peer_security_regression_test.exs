@@ -147,7 +147,10 @@ defmodule Arbor.Security.CapabilitiesPackageReplayPeerSecurityRegressionTest do
         _ -> false
       end
 
-    assert cookie_argument_present?, "Exactly one pinned synthetic cookie is required"
+    assert cookie_argument_present?,
+           "Exactly one pinned synthetic cookie is required. " <>
+             "Run packages/arbor_capabilities/bin/test (CI distribution boot)."
+
     port = System.fetch_env!("ERL_EPMD_PORT")
     assert port != "4369"
     assert System.get_env("ERL_EPMD_ADDRESS") == "127.0.0.1"
