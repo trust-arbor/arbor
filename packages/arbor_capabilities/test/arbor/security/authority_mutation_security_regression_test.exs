@@ -641,6 +641,27 @@ defmodule Arbor.Security.AuthorityMutationSecurityRegressionTest do
       assert {:error, :not_found} = Security.get_capability_fixture(child.id)
     end
 
+    test "security regression: revoking a session or task scope revokes delegated copies outside it",
+         ctx do
+      {parent, child} =
+        ctx.delegate.("arbor://fs/read/delegation-revoke-scope", session_id: "session-delegation")
+
+      # The copy carries the same session; give the other scope a parent whose
+      # copy sits outside the scope being revoked.
+      {task_parent, task_child} = ctx.delegate.("arbor://fs/read/delegation-revoke-task", [])
+
+      assert {:ok, revoked} =
+               Security.revoke_by_session("session-delegation",
+                 actor_authority: ctx.operator_authority
+               )
+
+      assert revoked >= 2
+      assert {:error, :not_found} = Security.get_capability_fixture(parent.id)
+      assert {:error, :not_found} = Security.get_capability_fixture(child.id)
+      assert {:ok, ^task_parent} = Security.get_capability_fixture(task_parent.id)
+      assert {:ok, ^task_child} = Security.get_capability_fixture(task_child.id)
+    end
+
     test "an unrelated capability of the same holder keeps its delegated copy", ctx do
       {parent, _child} = ctx.delegate.("arbor://fs/read/delegation-keep-a", [])
       {other_parent, other_child} = ctx.delegate.("arbor://fs/read/delegation-keep-b", [])

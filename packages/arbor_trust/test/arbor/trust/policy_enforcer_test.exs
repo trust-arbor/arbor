@@ -420,6 +420,30 @@ defmodule Arbor.Trust.PolicyEnforcerTest do
       refute capability_present?(agent_id, minted.id)
     end
 
+    test "security regression: a grant stamped with a mode nobody writes is stale", %{
+      actor_authority: actor_authority
+    } do
+      agent_id = unique_agent()
+      profile!(agent_id)
+
+      {:ok, minted} =
+        Arbor.Security.grant(
+          principal: agent_id,
+          resource: "arbor://fs/read/policy-sync-odd-mode",
+          metadata: %{"source" => "trust_policy_enforcer", "mode" => "unexpected"},
+          actor_authority: actor_authority
+        )
+
+      # The policy would mint this unattended; an unreadable stamp must not be
+      # read as "unattended" and kept.
+      Application.put_env(:arbor_trust, :policy_module, AutoPolicy)
+
+      assert {:ok, 1} =
+               PolicyEnforcer.sync_capabilities(agent_id, actor_authority: actor_authority)
+
+      refute capability_present?(agent_id, minted.id)
+    end
+
     test "security regression: an unknown policy mode fails closed", %{
       actor_authority: actor_authority
     } do

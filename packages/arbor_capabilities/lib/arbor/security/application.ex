@@ -538,6 +538,7 @@ defmodule Arbor.Security.Application do
       {Arbor.Security.Identity.ReplayPeers, Arbor.Security.Config.replay_peers_start_opts()},
       {Arbor.Security.SystemAuthority,
        system_authority_registration_token: system_authority_registration_token,
+       trust_grant_owner_spec: Map.get(signing_key_owner_roles, :trust_grant_owner),
        defer_initialization: true},
       # The StateOwner/Broker pair is ordered for rest_for_one recovery. The
       # owner precedes the broker so owner loss restarts both and no broker can

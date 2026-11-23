@@ -217,11 +217,14 @@ defmodule Arbor.Trust.PolicyEnforcer do
   defp approval_class(:ask), do: :attended
   defp approval_class(mode) when mode in [:allow, :auto], do: :unattended
 
-  # Legacy grants carry no mode; the approval constraint is what they have.
+  # Legacy grants carry no mode; the approval constraint is what they have. A
+  # mode that is present but not one this module writes is neither class, so
+  # the grant is always stale.
   defp minted_class(cap) do
-    case normalize_minted_mode(minted_mode(cap)) do
-      nil -> if approval_required?(cap), do: :attended, else: :unattended
-      mode -> approval_class(mode)
+    case {minted_mode(cap), normalize_minted_mode(minted_mode(cap))} do
+      {nil, nil} -> if approval_required?(cap), do: :attended, else: :unattended
+      {_unrecognised, nil} -> :unrecognised
+      {_raw, mode} -> approval_class(mode)
     end
   end
 

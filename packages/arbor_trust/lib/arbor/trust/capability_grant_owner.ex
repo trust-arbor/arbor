@@ -46,6 +46,7 @@ defmodule Arbor.Trust.CapabilityGrantOwner do
   # time out; without a retry that one collision would leave the grant alive
   # until the next profile change.
   @sync_retry_delays_ms [2_000, 10_000]
+  @max_pending_sync_retries 256
   @purpose :trust_capability_grant
   @max_seen_nonces 8_192
   @custody_table Arbor.Trust.CapabilityGrantOwner.Custody
@@ -251,24 +252,42 @@ defmodule Arbor.Trust.CapabilityGrantOwner do
 
   defp sync_with_retry(agent_id, reason, attempt, state) do
     case run_sync(agent_id, reason, state) do
-      {{:error, _error}, %{mode: :ready} = state} ->
-        schedule_sync_retry(agent_id, reason, attempt, state)
+      {{:error, error}, %{mode: :ready} = state} ->
+        if retriable_sync_error?(error),
+          do: schedule_sync_retry(agent_id, reason, attempt, state),
+          else: state
 
       {_result, state} ->
         state
     end
   end
 
-  defp schedule_sync_retry(agent_id, reason, attempt, state) do
-    case Enum.at(@sync_retry_delays_ms, attempt) do
-      nil ->
-        state
+  # A refusal is a decision, not a collision: a grant this owner did not make
+  # will be refused again. Only failures that can clear on their own are
+  # retried.
+  defp retriable_sync_error?({:capability_revocation_failed, _id, reason})
+       when reason in [:capability_revocation_unauthorized, :capability_mutation_unauthorized],
+       do: false
 
-      delay ->
+  defp retriable_sync_error?(_error), do: true
+
+  # One pending retry per agent and reason, and a bound on the whole table, so
+  # a burst of profile writes cannot grow it without limit.
+  defp schedule_sync_retry(agent_id, reason, attempt, state) do
+    retries = Map.get(state, :sync_retries, %{})
+
+    pending? =
+      Enum.any?(retries, fn {_ref, {id, why, _n}} -> id == agent_id and why == reason end)
+
+    case Enum.at(@sync_retry_delays_ms, attempt) do
+      delay
+      when is_integer(delay) and not pending? and map_size(retries) < @max_pending_sync_retries ->
         ref = make_ref()
         Process.send_after(self(), {:retry_sync, ref}, delay)
-        retries = Map.get(state, :sync_retries, %{})
         Map.put(state, :sync_retries, Map.put(retries, ref, {agent_id, reason, attempt + 1}))
+
+      _ ->
+        state
     end
   end
 

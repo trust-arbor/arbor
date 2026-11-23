@@ -74,26 +74,18 @@ defmodule Arbor.Trust.AuthorityTest do
   # fails OPEN (a security hole). `canonical_trust_prefix/1` strips the trailing
   # glob at match time so the rule covers the subtree its author intended.
   describe "effective_mode/3 — frozen profiles" do
-    # Until 2026-11-22 the frozen flag was a label: mode resolution ignored it,
-    # so an agent the circuit breaker had frozen kept every mode it had earned.
-    test "security regression: a frozen profile resolves every URI to :block" do
+    # A freeze pauses graduation only. On 2026-11-22 it was briefly made to
+    # resolve every URI to :block and reverted the same day: the Trust manager
+    # freezes a profile automatically after five failures in a minute and
+    # nothing unfreezes it, so that change would have stopped agents for good.
+    # Changing this needs a decision about automatic freezes first.
+    test "a frozen profile resolves modes exactly as it did before the freeze" do
       profile = Authority.apply_preset(Authority.new_profile("agent_frozen"), :full_trust)
-      assert Authority.effective_mode(profile, "arbor://fs/read/notes") in [:auto, :allow]
-
       frozen = Authority.freeze(profile, :rapid_failures)
 
-      for uri <- [
-            "arbor://fs/read/notes",
-            "arbor://shell/exec",
-            "arbor://unknown/thing",
-            # Infrastructure URIs default to :auto with no rule; a freeze wins.
-            "arbor://agent/discover_tools"
-          ] do
-        assert Authority.effective_mode(frozen, uri) == :block
+      for uri <- ["arbor://fs/read/notes", "arbor://shell/exec", "arbor://agent/discover_tools"] do
+        assert Authority.effective_mode(frozen, uri) == Authority.effective_mode(profile, uri)
       end
-
-      assert Authority.effective_mode(Authority.unfreeze(frozen), "arbor://fs/read/notes") ==
-               Authority.effective_mode(profile, "arbor://fs/read/notes")
     end
   end
 
