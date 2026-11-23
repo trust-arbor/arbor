@@ -426,6 +426,71 @@ defmodule Arbor.Trust.AuthorizationPolicyIntegrationTest do
     assert {:error, :not_found} = CapabilityStore.find_authorizing(agent_id, uri)
   end
 
+  # Agent creation hands a parent's capabilities to a new agent with
+  # Arbor.Security.delegate_to_agent/3. A trust-minted grant is not handed
+  # over that way: it is non-delegable, because a delegated copy would outlive
+  # the parent's profile change. The new agent gets its own grant from its own
+  # trust profile instead. This pins both halves.
+  test "a trust-minted grant is not delegated to a new agent; the agent mints from its own profile",
+       %{agent_id: agent_id, agent_identity: agent_identity, actor_authority: actor_authority} do
+    uri = "arbor://fs/read/profile-handoff/note.txt"
+    set_profile_rules(agent_id, %{"arbor://fs/read" => :auto})
+    opts = [verify_identity: false, actor_authority: actor_authority]
+    grant_opts = authorize_opts_with_grant!(opts, agent_identity, uri)
+
+    assert {:ok, :authorized} = Trust.authorize(agent_id, uri, :read, grant_opts)
+    assert {:ok, minted} = CapabilityStore.find_authorizing(agent_id, uri)
+    assert minted.metadata[:source] == :trust_policy_enforcer
+
+    {:ok, child} = Identity.generate(name: "trust-policy-handoff-child")
+    :ok = Arbor.Security.register_identity_fixture(child)
+
+    on_exit(fn ->
+      _ = Arbor.Security.revoke_all_fixture(child.agent_id)
+      _ = Arbor.Security.deregister_identity_fixture(child.agent_id)
+    end)
+
+    {:ok, proof} =
+      Arbor.Security.build_signing_authority_acquisition_proof(
+        agent_id,
+        agent_identity.private_key,
+        purpose: :trust_test_handoff,
+        owner: self()
+      )
+
+    {:ok, parent_authority} =
+      Arbor.Security.open_ephemeral_signing_authority(proof, agent_identity.private_key)
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:ok, []} =
+                 Arbor.Security.delegate_to_agent(agent_id, child.agent_id,
+                   actor_authority: parent_authority,
+                   resources: [uri]
+                 )
+      end)
+
+    assert log =~ "delegation_depth_exhausted"
+    {:ok, child_caps} = Arbor.Security.list_capabilities(child.agent_id)
+    assert child_caps == []
+
+    # The child is governed by its own profile, not the parent's.
+    {:ok, _profile} = Trust.create_trust_profile(child.agent_id)
+    set_profile_rules(child.agent_id, %{"arbor://fs/read" => :auto})
+
+    assert {:ok, :authorized} =
+             Trust.authorize(
+               child.agent_id,
+               uri,
+               :read,
+               authorize_opts_with_grant!(opts, child, uri)
+             )
+
+    assert {:ok, own} = CapabilityStore.find_authorizing(child.agent_id, uri)
+    assert own.parent_capability_id == nil
+    assert own.metadata[:source] == :trust_policy_enforcer
+  end
+
   test "security regression: a clamped high-risk grant is not revoked by an unrelated profile edit",
        %{agent_id: agent_id, agent_identity: agent_identity, actor_authority: actor_authority} do
     uri = "arbor://agent/create"
