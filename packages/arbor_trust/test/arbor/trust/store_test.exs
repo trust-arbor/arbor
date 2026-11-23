@@ -63,11 +63,7 @@ defmodule Arbor.Trust.StoreTest do
 
     {:ok, pid} = Store.start_link([])
 
-    on_exit(fn ->
-      if Process.alive?(pid) do
-        GenServer.stop(pid, :normal)
-      end
-    end)
+    on_exit(fn -> stop_store(pid) end)
 
     {:ok, profile} = Profile.new("agent_test_#{System.unique_integer([:positive])}")
     {:ok, pid: pid, profile: profile}
@@ -135,7 +131,7 @@ defmodule Arbor.Trust.StoreTest do
       assert Process.whereis(:arbor_trust_profiles) == nil
 
       {:ok, durable_pid} = Store.start_link(persistence: :durable)
-      on_exit(fn -> if Process.alive?(durable_pid), do: GenServer.stop(durable_pid, :normal) end)
+      on_exit(fn -> stop_store(durable_pid) end)
 
       assert {:error, :trust_profile_persistence_unavailable} =
                Store.store_profile(profile)
@@ -154,7 +150,7 @@ defmodule Arbor.Trust.StoreTest do
       {:ok, durable_pid} =
         Store.start_link(persistence: :durable, durable_backend: DurableBackend)
 
-      on_exit(fn -> if Process.alive?(durable_pid), do: GenServer.stop(durable_pid, :normal) end)
+      on_exit(fn -> stop_store(durable_pid) end)
 
       assert {:error, {:trust_profile_persist_failed, :simulated_backend_failure}} =
                Store.store_profile(profile)
@@ -172,7 +168,7 @@ defmodule Arbor.Trust.StoreTest do
       {:ok, durable_pid} =
         Store.start_link(persistence: :durable, durable_backend: DurableBackend)
 
-      on_exit(fn -> if Process.alive?(durable_pid), do: GenServer.stop(durable_pid, :normal) end)
+      on_exit(fn -> stop_store(durable_pid) end)
 
       assert :ok = Store.store_profile(profile)
 
@@ -236,7 +232,7 @@ defmodule Arbor.Trust.StoreTest do
         Store.start_link(persistence: :durable, durable_backend: DurableBackend)
 
       on_exit(fn ->
-        if Process.alive?(restarted_pid), do: GenServer.stop(restarted_pid, :normal)
+        stop_store(restarted_pid)
       end)
 
       assert {:ok, denied_after_restart} = Store.get_profile(profile.agent_id)
@@ -264,7 +260,7 @@ defmodule Arbor.Trust.StoreTest do
         Store.start_link(persistence: :durable, durable_backend: DurableBackend)
 
       on_exit(fn ->
-        if Process.alive?(restarted_pid), do: GenServer.stop(restarted_pid, :normal)
+        stop_store(restarted_pid)
       end)
 
       assert {:error, :not_found} = Store.get_profile(profile.agent_id)
@@ -509,7 +505,7 @@ defmodule Arbor.Trust.StoreTest do
         Store.start_link(persistence: :durable, durable_backend: DurableBackend)
 
       on_exit(fn ->
-        if Process.alive?(durable_pid), do: GenServer.stop(durable_pid, :normal)
+        stop_store(durable_pid)
       end)
 
       :ok = Store.store_profile(profile)
@@ -529,7 +525,7 @@ defmodule Arbor.Trust.StoreTest do
         Store.start_link(persistence: :durable, durable_backend: DurableBackend)
 
       on_exit(fn ->
-        if Process.alive?(durable_pid), do: GenServer.stop(durable_pid, :normal)
+        stop_store(durable_pid)
       end)
 
       DurableBackend.fail_writes?(true)
@@ -537,5 +533,14 @@ defmodule Arbor.Trust.StoreTest do
       refute_receive {:"$gen_cast", {:sync, _agent_id, _reason}}, 200
       DurableBackend.fail_writes?(false)
     end
+  end
+
+  # The store can exit between the liveness check and the stop (another test's
+  # application restart takes it down); that is not a failure of this test.
+  defp stop_store(pid) do
+    if Process.alive?(pid), do: GenServer.stop(pid, :normal)
+    :ok
+  catch
+    :exit, _reason -> :ok
   end
 end
