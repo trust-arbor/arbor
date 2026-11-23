@@ -4,6 +4,7 @@ defmodule Mix.Tasks.Arbor.DoctorLocalProviderTest do
   import ExUnit.CaptureIO
 
   alias Arbor.Contracts.AI.{Capabilities, RuntimeContract}
+  alias Arbor.LLM.Config
   alias Mix.Tasks.Arbor.Doctor
 
   @catalog_table :arbor_provider_catalog
@@ -14,24 +15,32 @@ defmodule Mix.Tasks.Arbor.DoctorLocalProviderTest do
 
     table_preexisted? = :ets.whereis(@catalog_table) != :undefined
 
-    previous_catalog =
-      if table_preexisted?, do: :ets.lookup(@catalog_table, :catalog), else: []
-
     unless table_preexisted? do
       :ets.new(@catalog_table, [:named_table, :set, :public, read_concurrency: true])
     end
 
+    # ProviderCatalog keys the cache by {:catalog, external_adapter_registry}.
+    # The old `:catalog` key was ignored, so Doctor probed localhost and
+    # reported LM Studio / Ollama ready whenever those ports answered.
+    key = {:catalog, Config.external_provider_adapters([])}
+    previous_catalog = :ets.lookup(@catalog_table, key)
+
     :ets.insert(
       @catalog_table,
-      {:catalog, local_failure_catalog(), System.monotonic_time(:millisecond)}
+      {key, local_failure_catalog(), System.monotonic_time(:millisecond)}
     )
 
     on_exit(fn ->
       Mix.shell(previous_shell)
 
-      if table_preexisted? and :ets.whereis(@catalog_table) != :undefined do
-        :ets.delete(@catalog_table, :catalog)
-        Enum.each(previous_catalog, &:ets.insert(@catalog_table, &1))
+      if :ets.whereis(@catalog_table) != :undefined do
+        :ets.delete(@catalog_table, key)
+
+        if table_preexisted? do
+          Enum.each(previous_catalog, &:ets.insert(@catalog_table, &1))
+        else
+          :ets.delete(@catalog_table)
+        end
       end
     end)
 

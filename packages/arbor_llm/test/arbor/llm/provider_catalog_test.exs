@@ -27,13 +27,78 @@ defmodule Arbor.LLM.ProviderCatalogTest do
     end
 
     test "only includes providers whose requirements are met" do
-      results = ProviderCatalog.available()
+      capabilities = Capabilities.new()
 
-      # All returned providers should have their requirements satisfied
-      for {provider, _caps} <- results do
+      {:ok, keyless} =
+        RuntimeContract.new(
+          provider: "fixture_keyless",
+          display_name: "Fixture Keyless",
+          type: :api,
+          env_vars: [],
+          capabilities: capabilities
+        )
+
+      {:ok, local} =
+        RuntimeContract.new(
+          provider: "ollama",
+          display_name: "Ollama",
+          type: :local,
+          probes: [%{type: :http, url: "http://127.0.0.1:9/models", timeout_ms: 1}],
+          capabilities: capabilities
+        )
+
+      # Local availability is Preflight.loaded_models/3 (/api/tags for Ollama).
+      # RuntimeContract.available?/1 probes a different URL (base <> "/models").
+      # A live server can pass one and fail the other. This fixture never
+      # contacts localhost: an answering Ollama must stay excluded.
+      registry = Arbor.LLM.Config.external_provider_adapters([])
+      key = {:catalog, registry}
+
+      if :ets.whereis(:arbor_provider_catalog) == :undefined do
+        :ets.new(:arbor_provider_catalog, [:named_table, :set, :public, read_concurrency: true])
+      end
+
+      :ets.insert(:arbor_provider_catalog, {
+        key,
+        %{
+          "fixture_keyless" => %{
+            provider: "fixture_keyless",
+            display_name: "Fixture Keyless",
+            type: :api,
+            available?: true,
+            capabilities: capabilities,
+            contract: keyless,
+            check_result: {:ok, %{env_vars: :ok, cli_tools: :skipped, probes: :skipped}},
+            adapter_module: Arbor.LLM.Adapter.ReqLLM
+          },
+          "ollama" => %{
+            provider: "ollama",
+            display_name: "Ollama",
+            type: :local,
+            available?: false,
+            capabilities: capabilities,
+            contract: local,
+            check_result: {:error, :fixture_down},
+            adapter_module: Arbor.LLM.Adapter.ReqLLM
+          }
+        },
+        System.monotonic_time(:millisecond)
+      })
+
+      on_exit(fn ->
+        if :ets.whereis(:arbor_provider_catalog) != :undefined do
+          :ets.delete(:arbor_provider_catalog, key)
+        end
+      end)
+
+      results = ProviderCatalog.available()
+      assert Enum.map(results, &elem(&1, 0)) == ["fixture_keyless"]
+
+      for {provider, caps} <- results do
+        assert %Capabilities{} = caps
         {:ok, contract} = ProviderCatalog.get_contract(provider)
 
-        if contract do
+        if contract.type != :local do
           assert RuntimeContract.available?(contract),
                  "#{provider} returned as available but contract check fails"
         end
