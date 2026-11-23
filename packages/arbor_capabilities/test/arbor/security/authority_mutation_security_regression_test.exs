@@ -424,9 +424,13 @@ defmodule Arbor.Security.AuthorityMutationSecurityRegressionTest do
              Security.revoke(existing.id, actor_authority: authority)
   end
 
-  describe "a granter revoking its own grant" do
-    # Rule added 2026-11-22 so the Trust grant owner can take back what it
-    # minted without holding `arbor://security/revoke/**`.
+  describe "revoking what you granted" do
+    # 2026-11-22. The Trust grant owner may revoke a capability it granted
+    # (covered end to end, with the real supervised owner, in
+    # packages/arbor_trust authorization_policy_integration_test.exs). A first
+    # version let any granter do so; that left a demoted operator able to
+    # revoke everything it had ever granted. These tests pin the narrowing: an
+    # ordinary granter gets nothing from the rule.
     setup do
       {:ok, granter} = Identity.generate(name: "granter-revocation-granter")
       {:ok, target} = Identity.generate(name: "granter-revocation-target")
@@ -466,24 +470,39 @@ defmodule Arbor.Security.AuthorityMutationSecurityRegressionTest do
       }
     end
 
-    test "the granter revokes the exact capability it granted", ctx do
-      assert ctx.granted.metadata["granter_id"] == ctx.granter.agent_id
-      assert :ok = Security.revoke(ctx.granted.id, actor_authority: ctx.granter_authority)
-      assert {:error, :not_found} = Security.get_capability_fixture(ctx.granted.id)
-    end
-
-    test "security regression: the granter cannot revoke a capability someone else granted",
+    test "security regression: an ordinary granter cannot revoke its own grant without a revoke right",
          ctx do
-      {:ok, other} =
-        Security.grant_fixture(
-          principal: ctx.target.agent_id,
-          resource: "arbor://fs/read/granter-revocation-other"
-        )
+      assert ctx.granted.metadata["granter_id"] == ctx.granter.agent_id
 
       assert {:error, :capability_revocation_unauthorized} =
-               Security.revoke(other.id, actor_authority: ctx.granter_authority)
+               Security.revoke(ctx.granted.id, actor_authority: ctx.granter_authority)
 
-      assert {:ok, _still_there} = Security.get_capability_fixture(other.id)
+      assert {:ok, _still_there} = Security.get_capability_fixture(ctx.granted.id)
+    end
+
+    test "security regression: registering under the owner's name does not make a process the owner",
+         ctx do
+      {:ok, roles} = Arbor.Security.Config.signing_key_owner_roles()
+
+      case Map.get(roles, :trust_grant_owner) do
+        %{registered_name: name} ->
+          if Process.whereis(name) == nil do
+            # Holds the configured name but sits outside the supervised path
+            # the role names, so the kernel must not accept it.
+            Process.register(self(), name)
+            on_exit(fn -> :ok end)
+
+            assert {:error, :capability_revocation_unauthorized} =
+                     Security.revoke(ctx.granted.id, actor_authority: ctx.granter_authority)
+
+            Process.unregister(name)
+          end
+
+        nil ->
+          :ok
+      end
+
+      assert {:ok, _still_there} = Security.get_capability_fixture(ctx.granted.id)
     end
 
     test "security regression: nobody else gains the right, the holder included", ctx do
@@ -498,7 +517,7 @@ defmodule Arbor.Security.AuthorityMutationSecurityRegressionTest do
       assert {:ok, _still_there} = Security.get_capability_fixture(ctx.granted.id)
     end
 
-    test "security regression: the rule does not reach bulk, cascade or scope revocation", ctx do
+    test "security regression: bulk, cascade and scope revocation stay refused", ctx do
       authority = ctx.granter_authority
 
       assert {:error, :capability_revocation_unauthorized} =
@@ -516,6 +535,119 @@ defmodule Arbor.Security.AuthorityMutationSecurityRegressionTest do
                Security.cascade_revoke(ctx.granted.id, actor_authority: authority)
 
       assert {:ok, _still_there} = Security.get_capability_fixture(ctx.granted.id)
+    end
+  end
+
+  describe "self-delegation" do
+    # A holder could delegate a capability to itself. The copy replaced the
+    # original in the store and named the holder as its granter, which put it
+    # out of the original granter's reach.
+    test "security regression: a capability cannot be delegated to its own principal" do
+      {:ok, holder} = Identity.generate(name: "self-delegation-holder")
+      {:ok, other} = Identity.generate(name: "self-delegation-other")
+      :ok = Registry.register_fixture(holder)
+      :ok = Registry.register_fixture(other)
+
+      {:ok, held} =
+        Security.grant_fixture(
+          principal: holder.agent_id,
+          resource: "arbor://fs/read/self-delegation",
+          delegation_depth: 3
+        )
+
+      on_exit(fn ->
+        Security.revoke_all_fixture(holder.agent_id)
+        Security.revoke_all_fixture(other.agent_id)
+      end)
+
+      {:ok, authority} = open_authority(holder)
+
+      assert {:error, :capability_mutation_unauthorized} =
+               Security.delegate(held.id, holder.agent_id, actor_authority: authority)
+
+      assert {:ok, ^held} = Security.get_capability_fixture(held.id)
+
+      # Delegating to someone else is unaffected.
+      assert {:ok, delegated} =
+               Security.delegate(held.id, other.agent_id, actor_authority: authority)
+
+      assert delegated.principal_id == other.agent_id
+      assert delegated.parent_capability_id == held.id
+    end
+  end
+
+  describe "a delegated capability and its revoked parent" do
+    # Until 2026-11-22 only cascade_revoke/2 removed delegated copies. A plain
+    # revoke, revoke_all or scope revocation of the parent left the copy in the
+    # store, still valid for whoever held it.
+    setup do
+      {:ok, holder} = Identity.generate(name: "delegation-parent-holder")
+      {:ok, worker} = Identity.generate(name: "delegation-parent-worker")
+      {:ok, operator} = Identity.generate(name: "delegation-parent-operator")
+      :ok = Registry.register_fixture(holder)
+      :ok = Registry.register_fixture(worker)
+      :ok = Registry.register_fixture(operator)
+
+      {:ok, _} =
+        Security.grant_fixture(
+          principal: operator.agent_id,
+          resource: "arbor://security/revoke/**"
+        )
+
+      on_exit(fn ->
+        Security.revoke_all_fixture(holder.agent_id)
+        Security.revoke_all_fixture(worker.agent_id)
+        Security.revoke_all_fixture(operator.agent_id)
+      end)
+
+      {:ok, holder_authority} = open_authority(holder)
+      {:ok, operator_authority} = open_authority(operator)
+
+      delegate = fn resource, scope ->
+        {:ok, parent} =
+          Security.grant_fixture(
+            [principal: holder.agent_id, resource: resource, delegation_depth: 3] ++ scope
+          )
+
+        {:ok, child} =
+          Security.delegate(
+            parent.id,
+            worker.agent_id,
+            [actor_authority: holder_authority] ++ scope
+          )
+
+        {parent, child}
+      end
+
+      %{holder: holder, operator_authority: operator_authority, delegate: delegate}
+    end
+
+    test "security regression: revoking the parent revokes the delegated copy", ctx do
+      {parent, child} = ctx.delegate.("arbor://fs/read/delegation-revoke", [])
+
+      assert :ok = Security.revoke(parent.id, actor_authority: ctx.operator_authority)
+      assert {:error, :not_found} = Security.get_capability_fixture(parent.id)
+      assert {:error, :not_found} = Security.get_capability_fixture(child.id)
+    end
+
+    test "security regression: revoking everything a principal holds revokes what it delegated",
+         ctx do
+      {parent, child} = ctx.delegate.("arbor://fs/read/delegation-revoke-all", [])
+
+      assert {:ok, 2} =
+               Security.revoke_all(ctx.holder.agent_id, actor_authority: ctx.operator_authority)
+
+      assert {:error, :not_found} = Security.get_capability_fixture(parent.id)
+      assert {:error, :not_found} = Security.get_capability_fixture(child.id)
+    end
+
+    test "an unrelated capability of the same holder keeps its delegated copy", ctx do
+      {parent, _child} = ctx.delegate.("arbor://fs/read/delegation-keep-a", [])
+      {other_parent, other_child} = ctx.delegate.("arbor://fs/read/delegation-keep-b", [])
+
+      assert :ok = Security.revoke(parent.id, actor_authority: ctx.operator_authority)
+      assert {:ok, ^other_parent} = Security.get_capability_fixture(other_parent.id)
+      assert {:ok, ^other_child} = Security.get_capability_fixture(other_child.id)
     end
   end
 

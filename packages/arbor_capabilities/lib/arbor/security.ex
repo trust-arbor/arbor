@@ -3038,7 +3038,9 @@ defmodule Arbor.Security do
   @doc """
   Delegate a capability to another agent.
 
-  Creates a new signed capability derived from an existing one.
+  Creates a new signed capability derived from an existing one. The new
+  principal must differ from the holder; a capability cannot be delegated to
+  its own principal.
 
   ## Options
 
@@ -5073,6 +5075,10 @@ defmodule Arbor.Security do
     with {:ok, parent_cap} <- CapabilityStore.get(capability_id),
          {:ok, actor_authority, actor_id} <- mutation_actor(opts),
          true <- actor_id == parent_cap.principal_id,
+         # Delegating to yourself hands nobody anything. It only swaps the
+         # capability for a copy that names you as its granter, out of the
+         # original granter's reach.
+         true <- new_principal_id != parent_cap.principal_id,
          # Create the delegated capability once (without delegation record)
          {:ok, new_cap} <-
            Capability.delegate(parent_cap, new_principal_id,

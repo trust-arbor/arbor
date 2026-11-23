@@ -7,8 +7,12 @@ defmodule Arbor.Contracts.Trust.Profile do
 
   ## Frozen State
 
-  When `frozen` is true, the agent's modifiable capabilities are revoked.
-  This is used by circuit breakers when anomalous behavior is detected.
+  While `frozen` is true every URI resolves to `:block`: calls through
+  `Arbor.Trust.authorize/4` are denied and nothing is minted. The freeze also
+  revokes the capabilities trust policy minted for the agent; capabilities an
+  operator granted stay in the store but are denied by the same policy check.
+  Unfreezing restores the rules, and trust mints again on demand. Circuit
+  breakers freeze a profile when they detect anomalous behavior.
 
   ## Authorization
 

@@ -73,6 +73,30 @@ defmodule Arbor.Trust.AuthorityTest do
   # that fails CLOSED (annoying); under an `allow` baseline a "/** block" rule
   # fails OPEN (a security hole). `canonical_trust_prefix/1` strips the trailing
   # glob at match time so the rule covers the subtree its author intended.
+  describe "effective_mode/3 — frozen profiles" do
+    # Until 2026-11-22 the frozen flag was a label: mode resolution ignored it,
+    # so an agent the circuit breaker had frozen kept every mode it had earned.
+    test "security regression: a frozen profile resolves every URI to :block" do
+      profile = Authority.apply_preset(Authority.new_profile("agent_frozen"), :full_trust)
+      assert Authority.effective_mode(profile, "arbor://fs/read/notes") in [:auto, :allow]
+
+      frozen = Authority.freeze(profile, :rapid_failures)
+
+      for uri <- [
+            "arbor://fs/read/notes",
+            "arbor://shell/exec",
+            "arbor://unknown/thing",
+            # Infrastructure URIs default to :auto with no rule; a freeze wins.
+            "arbor://agent/discover_tools"
+          ] do
+        assert Authority.effective_mode(frozen, uri) == :block
+      end
+
+      assert Authority.effective_mode(Authority.unfreeze(frozen), "arbor://fs/read/notes") ==
+               Authority.effective_mode(profile, "arbor://fs/read/notes")
+    end
+  end
+
   describe "effective_mode/3 — trailing-glob canonicalization in trust rules" do
     test "regression: a '/**' allow rule under a :block baseline actually fires (was fail-closed)" do
       profile =

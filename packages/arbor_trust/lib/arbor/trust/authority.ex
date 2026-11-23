@@ -115,13 +115,21 @@ defmodule Arbor.Trust.Authority do
   @doc """
   Resolve effective mode for a resource URI.
 
-  3-layer resolution (most restrictive wins):
+  A frozen profile resolves every URI to `:block`, whatever its rules say. A
+  freeze is what the circuit breaker and an operator use to stop an agent; it
+  has to stop calls and minting, not only label the profile.
+
+  Otherwise 3-layer resolution (most restrictive wins):
   1. User preference (longest-prefix match in profile rules)
   2. Security ceiling (system-enforced maximums)
   3. Model constraint (optional per-model-class ceiling)
   """
   @spec effective_mode(Profile.t(), String.t(), keyword()) :: :block | :ask | :allow | :auto
-  def effective_mode(%Profile{} = profile, resource_uri, opts \\ []) do
+  def effective_mode(profile, resource_uri, opts \\ [])
+
+  def effective_mode(%Profile{frozen: true}, _resource_uri, _opts), do: :block
+
+  def effective_mode(%Profile{} = profile, resource_uri, opts) do
     # Layer 1: User preference. Infrastructure URIs (an agent discovering its OWN
     # tools) default to :auto when the profile has no matching rule — listing tools
     # grants no access (execution still needs caps), and requiring approval both

@@ -399,7 +399,10 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
                )
     end
 
-    test "revoking parent does not automatically revoke delegated cap (use cascade_revoke for that)",
+    # Changed 2026-11-22 (Hysun's decision): this test used to pin the
+    # opposite, that a delegated capability outlived a plain revoke of its
+    # parent and only cascade_revoke/2 removed it.
+    test "security regression: revoking the parent revokes the delegated capability",
          %{
            agent_id: agent_id,
            actor_identity: actor_identity,
@@ -421,16 +424,13 @@ defmodule Arbor.Trust.CapabilityLifecycleE2ETest do
           delegator_private_key: actor_identity.private_key
         )
 
-      # Revoke parent with simple revoke (not cascade)
+      assert {:ok, :authorized} =
+               Security.authorize(delegatee_id, "arbor://test/cascade", :execute)
+
       :ok = Security.revoke(parent_cap.id, actor_authority: actor_authority)
 
-      # Delegatee should still be authorized (simple revoke doesn't cascade)
-      assert {:ok, :authorized} =
-               Security.authorize(
-                 delegatee_id,
-                 "arbor://test/cascade",
-                 :execute
-               )
+      assert {:error, _unauthorized} =
+               Security.authorize(delegatee_id, "arbor://test/cascade", :execute)
     end
 
     test "cascade_revoke removes parent and delegated capabilities", %{
