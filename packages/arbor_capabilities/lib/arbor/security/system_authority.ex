@@ -1880,6 +1880,7 @@ defmodule Arbor.Security.SystemAuthority do
            :ok <-
              authorize_capability_revocation(
                actor_id,
+               owner,
                operation,
                target,
                authorization_resource,
@@ -2445,33 +2446,41 @@ defmodule Arbor.Security.SystemAuthority do
 
   # The general revoke right first. Without it, two narrow rules apply, each to
   # one exact capability: an agent may revoke its own disclosure capability
-  # under the right that let it mint one, and a granter may revoke a
-  # capability it granted. The attestation still names the canonical revoke
+  # under the right that let it mint one, and the Trust grant owner may revoke
+  # a capability it granted. The attestation still names the canonical revoke
   # resource for the target.
-  defp authorize_capability_revocation(actor_id, operation, target, resource, state) do
+  defp authorize_capability_revocation(actor_id, owner, operation, target, resource, state) do
     with {:error, _} = error <- authorize_capability_revocation_actor(actor_id, resource, state),
          {:error, _} <- authorize_self_disclosure_revocation(actor_id, operation, target, state),
-         {:error, _} <- authorize_granter_revocation(actor_id, operation, target, state) do
+         {:error, _} <- authorize_granter_revocation(actor_id, owner, operation, target, state) do
       error
     end
   end
 
-  # Taking back what you gave only ever narrows authority, and only authority
-  # the actor was itself allowed to hand out. The granter is the one the
-  # kernel recorded and signed at grant time (`metadata["granter_id"]`, set
-  # from the authenticated actor and covered by the issuer signature), read
-  # from the store, never from the caller. Only the single-capability
-  # operation qualifies: revoke-all, cascade and scope revocation reach
-  # capabilities the actor may not have granted.
+  # The Trust grant owner takes back what it minted when a trust profile is
+  # tightened, deleted or disabled. It holds no revoke right; this rule is all
+  # it has, and it is deliberately not a general "granters may revoke" rule: a
+  # general rule would leave a demoted operator able to revoke everything it
+  # once granted, other operators' security capabilities included.
+  #
+  # Three things must hold. The calling process is the supervised process the
+  # host configured for the `:trust_grant_owner` role (the same proof the key
+  # store requires before it releases that owner's key). The capability names
+  # the actor as granter, as the kernel recorded and signed it at grant time;
+  # that is read from the store, never from the caller. And the signature is
+  # this authority's own. Only the single-capability operation qualifies:
+  # revoke-all, cascade and scope revocation reach other grants.
   defp authorize_granter_revocation(
          actor_id,
+         owner,
          :revoke,
          %{capability_id: capability_id, principal_id: principal_id, capability_digest: digest},
          state
        )
-       when is_binary(actor_id) and is_binary(capability_id) and is_binary(principal_id) and
-              is_binary(digest) do
-    with {:ok, %Capability{id: ^capability_id, principal_id: ^principal_id} = cap} <-
+       when is_binary(actor_id) and is_pid(owner) and is_binary(capability_id) and
+              is_binary(principal_id) and is_binary(digest) do
+    with true <- trust_grant_owner_process?(owner),
+         {:ok, %Capability{id: ^capability_id, principal_id: ^principal_id} = cap} <-
            capability_store_get(state, capability_id),
          true <- capability_revocation_fence_digest(cap) == digest,
          true <- capability_granter_id(cap) == actor_id,
@@ -2489,8 +2498,23 @@ defmodule Arbor.Security.SystemAuthority do
     _, _ -> {:error, :capability_revocation_unauthorized}
   end
 
-  defp authorize_granter_revocation(_actor_id, _operation, _target, _state),
+  defp authorize_granter_revocation(_actor_id, _owner, _operation, _target, _state),
     do: {:error, :capability_revocation_unauthorized}
+
+  defp trust_grant_owner_process?(owner) do
+    with {:ok, roles} <- Arbor.Security.Config.signing_key_owner_roles(),
+         %{application: application, path: path, registered_name: registered_name} <-
+           Map.get(roles, :trust_grant_owner),
+         {:registered_name, ^registered_name} <- Process.info(owner, :registered_name) do
+      SupervisedOwner.authorized?(owner, application, path)
+    else
+      _ -> false
+    end
+  rescue
+    _ -> false
+  catch
+    _, _ -> false
+  end
 
   defp authorize_self_disclosure_revocation(
          actor_id,
@@ -2876,6 +2900,9 @@ defmodule Arbor.Security.SystemAuthority do
          {:ok, parent} <- capability_store_get(state, cap.parent_capability_id),
          true <- parent.id == cap.parent_capability_id,
          true <- parent.principal_id == actor_id,
+         # Enforced here as well as in the facade: a self-delegated copy names
+         # the holder as granter and replaces the original in the store.
+         true <- cap.principal_id != actor_id,
          true <- Capability.valid?(parent),
          true <- Capability.envelope_subset?(cap, parent),
          true <- delegation_scope_attenuated?(cap, parent),

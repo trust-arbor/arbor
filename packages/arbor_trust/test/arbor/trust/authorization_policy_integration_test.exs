@@ -388,6 +388,59 @@ defmodule Arbor.Trust.AuthorizationPolicyIntegrationTest do
     assert {:error, _denied} = Arbor.Security.authorize(agent_id, uri, :read, direct_opts)
   end
 
+  test "security regression: freezing a profile revokes what trust minted and denies until unfrozen",
+       %{agent_id: agent_id, agent_identity: agent_identity, actor_authority: actor_authority} do
+    uri = "arbor://fs/read/profile-freeze/note.txt"
+    set_profile_rules(agent_id, %{"arbor://fs/read" => :auto})
+    opts = [verify_identity: false, actor_authority: actor_authority]
+
+    assert {:ok, :authorized} =
+             Trust.authorize(
+               agent_id,
+               uri,
+               :read,
+               authorize_opts_with_grant!(opts, agent_identity, uri)
+             )
+
+    assert {:ok, minted} = CapabilityStore.find_authorizing(agent_id, uri)
+
+    {:ok, operator_cap} =
+      Arbor.Security.grant(
+        principal: agent_id,
+        resource: "arbor://memory/index",
+        actor_authority: actor_authority
+      )
+
+    ExUnit.CaptureLog.capture_log(fn -> :ok = Trust.freeze_trust(agent_id, :rapid_failures) end)
+    assert {:ok, 0} = Arbor.Trust.CapabilityGrantOwner.sync(agent_id, :profile_updated)
+
+    # What trust minted is gone, what an operator granted is not, and nothing
+    # is authorized or minted while the freeze lasts.
+    assert {:error, :not_found} = Arbor.Security.get_capability_fixture(minted.id)
+    assert {:ok, ^operator_cap} = Arbor.Security.get_capability_fixture(operator_cap.id)
+
+    assert {:error, _denied} =
+             Trust.authorize(
+               agent_id,
+               uri,
+               :read,
+               authorize_opts_with_grant!(opts, agent_identity, uri)
+             )
+
+    assert {:error, :not_found} = CapabilityStore.find_authorizing(agent_id, uri)
+    assert {:error, _denied} = Trust.authorize(agent_id, "arbor://memory/index", :read, opts)
+
+    :ok = Trust.unfreeze_trust(agent_id)
+
+    assert {:ok, :authorized} =
+             Trust.authorize(
+               agent_id,
+               uri,
+               :read,
+               authorize_opts_with_grant!(opts, agent_identity, uri)
+             )
+  end
+
   test "security regression: a trust-minted grant cannot be delegated out of the owner's reach",
        %{agent_id: agent_id, agent_identity: agent_identity, actor_authority: actor_authority} do
     uri = "arbor://fs/read/profile-delegate/note.txt"
