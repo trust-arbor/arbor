@@ -30,16 +30,7 @@ defmodule Arbor.Orchestrator.Engine.NativeParameterizedResourceSecurityRegressio
   setup do
     snapshot = ActionRegistry.snapshot()
     on_exit(fn -> if Process.whereis(ActionRegistry), do: ActionRegistry.restore(snapshot) end)
-
-    for {name, module} <- [
-          {@action, Arbor.Actions.Test.NativeResourceProbe},
-          {"native_resource_facade_probe", Arbor.Actions.Test.NativeResourceFacadeProbe}
-        ] do
-      case ActionRegistry.resolve(name) do
-        {:ok, ^module} -> :ok
-        {:error, :not_found} -> :ok = ActionRegistry.register(name, module)
-      end
-    end
+    assert :ok = install_probe_actions!()
 
     Process.register(self(), :native_resource_probe_observer)
 
@@ -475,6 +466,51 @@ defmodule Arbor.Orchestrator.Engine.NativeParameterizedResourceSecurityRegressio
 
     assert {:ok, pinned} = Arbor.Orchestrator.pin_native_execution(graph, opts)
     assert is_map(Keyword.fetch!(pinned, :execution_manifest))
+  end
+
+  test "security regression: bare probe action names register after the core namespace is locked" do
+    assert :ok = ActionRegistry.lock_core()
+    assert ActionRegistry.core_locked?()
+
+    bare = "native_resource_probe_locked_#{System.unique_integer([:positive])}"
+
+    assert {:error, {:plugin_namespace_required, ^bare}} =
+             ActionRegistry.register(bare, Arbor.Actions.Test.NativeResourceProbe)
+
+    assert :ok = install_probe_actions!()
+    refute ActionRegistry.core_locked?()
+    assert :ok = ActionRegistry.register(bare, Arbor.Actions.Test.NativeResourceProbe)
+    assert {:ok, Arbor.Actions.Test.NativeResourceProbe} = ActionRegistry.resolve(bare)
+    assert :ok = ActionRegistry.deregister(bare)
+  end
+
+  # Registrar.lock_core/0 runs during orchestrator boot. A later file that
+  # registers a bare probe name then gets {:plugin_namespace_required, name}.
+  # Unlocking through the test restore API does not change the production
+  # lock rule; on_exit puts the caller's snapshot back, lock included.
+  defp install_probe_actions! do
+    if ActionRegistry.core_locked?() do
+      {entries, true} = ActionRegistry.snapshot()
+      :ok = ActionRegistry.restore({entries, false})
+    end
+
+    for {name, module} <- [
+          {@action, Arbor.Actions.Test.NativeResourceProbe},
+          {"native_resource_facade_probe", Arbor.Actions.Test.NativeResourceFacadeProbe}
+        ] do
+      case ActionRegistry.resolve(name) do
+        {:ok, ^module} ->
+          :ok
+
+        {:error, :not_found} ->
+          :ok = ActionRegistry.register(name, module)
+
+        other ->
+          flunk("probe action #{name} resolved unexpectedly: #{inspect(other)}")
+      end
+    end
+
+    :ok
   end
 
   defp pinned_facade_opts!(opts) do
