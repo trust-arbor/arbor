@@ -1756,8 +1756,10 @@ defmodule Arbor.Security.CapabilityStore do
         merge_subtree_status(status, delete_children(state, root, acc))
       end)
 
-    deleted = deleted -- roots
-
+    # `deleted` can contain a root: a delegated copy inherits its parent's
+    # session and task, so a scope revocation routinely names both. It was
+    # deleted durably as a descendant and must leave memory with the rest;
+    # callers skip roots that are already gone.
     next =
       state
       |> revoke_capability_ids(deleted)
