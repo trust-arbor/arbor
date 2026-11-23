@@ -2787,7 +2787,8 @@ defmodule Arbor.Security.SystemAuthority do
   defp pin_trust_grant_owner_spec(opts) do
     case Keyword.get(opts, :trust_grant_owner_spec) do
       %{application: application, path: [_ | _] = path, registered_name: registered_name} = spec
-      when is_atom(application) and is_atom(registered_name) ->
+      when is_atom(application) and not is_nil(application) and is_atom(registered_name) and
+             not is_nil(registered_name) ->
         if Enum.all?(path, &is_atom/1),
           do: :ets.insert(@owner_table, {:trust_grant_owner_spec, spec})
 

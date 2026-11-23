@@ -364,10 +364,12 @@ defmodule Arbor.Trust.Manager do
     #
     # NOTE: the rapid-rollbacks branch that demoted tier was removed in the
     # tier-minting kill sweep (P0 gate #1) — tier demotion minted/stripped
-    # capabilities through a second authority path. The freeze branches remain:
-    # freeze is rules-compatible enforcement (it revokes modifiable capabilities
-    # via the :trust_frozen handler) and does not move tiers. A rollback-based
-    # abuse response will return with the capability-risk-profiles work.
+    # capabilities through a second authority path. The freeze branches remain.
+    # A freeze pauses graduation only: it does not change the modes a profile
+    # resolves to and revokes nothing (the :trust_frozen handler that once
+    # revoked is an observer now), and nothing here unfreezes it. A
+    # rollback-based abuse response will return with the capability-risk-
+    # profiles work.
     cond do
       recent_failures >= 5 ->
         {_reply, state} = do_freeze_trust(agent_id, :rapid_failures, state)
