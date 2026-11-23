@@ -26,7 +26,7 @@ defmodule Arbor.Agent.OrchestrationLiveApprovalTest do
 
   setup do
     original_config = snapshot_config()
-    start_supervised!(Arbor.Trust.ConfirmationTracker)
+    ensure_confirmation_tracker!()
     Application.put_env(:arbor_trust, :approval_evidence_provider, Arbor.Agent.ApprovalEvidence)
 
     # This test uses synthetic local identities and no signed request; pin the
@@ -269,6 +269,18 @@ defmodule Arbor.Agent.OrchestrationLiveApprovalTest do
   # Canonical bootstrap: it freezes the authority root and starts the whole
   # topology in the required order, instead of a hand-copied subset that can
   # drift from it. Idempotent, so it also restores children a test stopped.
+  # A full umbrella run leaves this child under Arbor.Trust.Supervisor
+  # (orchestrator/scheduler test helpers call restore_runtime_fixture/0).
+  # start_supervised!/1 then fails with :already_started. Reuse the live
+  # suite child; start one only when this file is alone.
+  defp ensure_confirmation_tracker! do
+    if Process.whereis(Arbor.Trust.ConfirmationTracker) == nil do
+      start_supervised!(Arbor.Trust.ConfirmationTracker)
+    end
+
+    :ok
+  end
+
   defp bootstrap_security! do
     :ok = Arbor.Security.TestBootstrap.start!()
   end

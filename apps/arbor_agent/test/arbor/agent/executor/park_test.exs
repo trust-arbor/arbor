@@ -164,7 +164,7 @@ defmodule Arbor.Agent.Executor.ParkTest do
       if Process.whereis(name) == nil, do: start_supervised!(child)
     end
 
-    start_supervised!(Arbor.Trust.ConfirmationTracker)
+    ensure_confirmation_tracker!()
     resource = "arbor://agent/action/park_probe_unknown_action"
     previous_provider = Application.fetch_env(:arbor_trust, :approval_evidence_provider)
     previous_thresholds = Application.fetch_env(:arbor_trust, :graduation_thresholds)
@@ -239,6 +239,14 @@ defmodule Arbor.Agent.Executor.ParkTest do
     # Same-sender ordering includes action discovery before timing the parked wait.
     assert {:ok, status} = Executor.status(agent_id)
     assert status.stats.intents_parked == 1
+  end
+
+  defp ensure_confirmation_tracker! do
+    if Process.whereis(Arbor.Trust.ConfirmationTracker) == nil do
+      start_supervised!(Arbor.Trust.ConfirmationTracker)
+    end
+
+    :ok
   end
 
   defp act_intent(id) do
