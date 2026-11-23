@@ -74,6 +74,8 @@ defmodule Arbor.Security.SystemAuthority do
   @max_capability_revocation_attestations 1_024
   @capability_revocation_attestation_ttl_seconds 30
   @capability_revocation_attestation_version "arbor-capability-revocation-attestation-v1"
+  @max_capability_view_requests 64
+  @capability_view_timeout_ms 4_000
 
   # First-run local genesis (decision 2026-10-08 D1). The operator signs this
   # fixed, principal-bound request; the root issues exactly one `arbor://**`
@@ -345,7 +347,7 @@ defmodule Arbor.Security.SystemAuthority do
 
   @spec endorse_agent(Identity.t(), term()) :: {:ok, map()} | {:error, term()}
   def endorse_agent(%Identity{} = identity, actor_authority) do
-    Arbor.Custody.authenticated_call(owner_pid(), {:endorse_agent, identity, actor_authority})
+    call_with_capability_view({:endorse_agent, identity, actor_authority})
   catch
     :exit, _ -> {:error, :identity_endorsement_unauthorized}
   end
@@ -376,7 +378,7 @@ defmodule Arbor.Security.SystemAuthority do
   @spec rotate(term()) ::
           {:ok, %{old_agent_id: String.t(), new_agent_id: String.t()}} | {:error, term()}
   def rotate(actor_authority) do
-    Arbor.Custody.authenticated_call(owner_pid(), {:rotate, actor_authority})
+    call_with_capability_view({:rotate, actor_authority})
   catch
     :exit, _ -> {:error, :authority_rotation_unavailable}
   end
@@ -390,8 +392,7 @@ defmodule Arbor.Security.SystemAuthority do
   @spec issue_issuer_mutation_attestation(term(), atom(), String.t()) ::
           {:ok, map()} | {:error, term()}
   def issue_issuer_mutation_attestation(authority, operation, payload_digest) do
-    Arbor.Custody.authenticated_call(
-      owner_pid(),
+    call_with_capability_view(
       {:issue_issuer_mutation_attestation, authority, operation, payload_digest}
     )
   catch
@@ -421,8 +422,7 @@ defmodule Arbor.Security.SystemAuthority do
         operation,
         payload_digest
       ) do
-    Arbor.Custody.authenticated_call(
-      owner_pid(),
+    call_with_capability_view(
       {:issue_issuer_mutation_attestation_proof, actor_proof, operation, payload_digest}
     )
   catch
@@ -448,8 +448,7 @@ defmodule Arbor.Security.SystemAuthority do
   @spec issue_identity_registration_attestation(term(), String.t()) ::
           {:ok, map()} | {:error, term()}
   def issue_identity_registration_attestation(authority, target_digest) do
-    Arbor.Custody.authenticated_call(
-      owner_pid(),
+    call_with_capability_view(
       {:issue_identity_registration_attestation, authority, target_digest}
     )
   catch
@@ -481,8 +480,7 @@ defmodule Arbor.Security.SystemAuthority do
         agent_id,
         payload_digest
       ) do
-    Arbor.Custody.authenticated_call(
-      owner_pid(),
+    call_with_capability_view(
       {:issue_identity_status_mutation_attestation, authority, operation, agent_id,
        payload_digest}
     )
@@ -506,10 +504,7 @@ defmodule Arbor.Security.SystemAuthority do
   @spec authorize_capability_mutation(term(), atom(), Capability.t()) ::
           {:ok, Capability.t(), map()} | {:error, term()}
   def authorize_capability_mutation(authority, operation, %Capability{} = cap) do
-    Arbor.Custody.authenticated_call(
-      owner_pid(),
-      {:authorize_capability_mutation, authority, operation, cap}
-    )
+    call_with_capability_view({:authorize_capability_mutation, authority, operation, cap})
   catch
     :exit, _ -> {:error, :capability_mutation_unauthorized}
   end
@@ -539,10 +534,7 @@ defmodule Arbor.Security.SystemAuthority do
         operation,
         %Capability{} = cap
       ) do
-    Arbor.Custody.authenticated_call(
-      owner_pid(),
-      {:authorize_capability_mutation_proof, actor_proof, operation, cap}
-    )
+    call_with_capability_view({:authorize_capability_mutation_proof, actor_proof, operation, cap})
   catch
     :exit, _ -> {:error, :capability_mutation_unauthorized}
   end
@@ -613,12 +605,17 @@ defmodule Arbor.Security.SystemAuthority do
   @spec issue_capability_revocation_attestation(term(), atom(), term()) ::
           {:ok, map()} | {:error, term()}
   def issue_capability_revocation_attestation(authority, operation, target) do
-    Arbor.Custody.authenticated_call(
-      owner_pid(),
+    call_with_capability_view(
       {:issue_capability_revocation_attestation, authority, operation, target}
     )
   catch
     :exit, _ -> {:error, :capability_revocation_unauthorized}
+  end
+
+  defp call_with_capability_view(request) do
+    owner = owner_pid()
+    deadline = System.monotonic_time(:millisecond) + @capability_view_timeout_ms
+    Arbor.Custody.authenticated_call(owner, {:with_capability_view, request, deadline})
   end
 
   @doc false
@@ -2019,6 +2016,174 @@ defmodule Arbor.Security.SystemAuthority do
     ArgumentError -> {:error, :invalid_receipt}
   end
 
+  # These request fields only select which public capability records to read.
+  # The original handler still authenticates the actor and operation against
+  # live authority, identity and issuer state before issuing anything.
+  defp capability_view_args({:endorse_agent, _identity, authority}),
+    do: {lease_principal(authority), nil, :identity_endorsement_unauthorized}
+
+  defp capability_view_args({:rotate, authority}),
+    do: {lease_principal(authority), nil, :authority_rotation_unauthorized}
+
+  defp capability_view_args({:issue_issuer_mutation_attestation, authority, _, _}),
+    do: {lease_principal(authority), nil, :security_mutation_unauthorized}
+
+  defp capability_view_args({:issue_issuer_mutation_attestation_proof, proof, _, _}),
+    do: {proof_principal(proof), nil, :issuer_mutation_unauthorized}
+
+  defp capability_view_args({:issue_identity_registration_attestation, authority, _}),
+    do: {lease_principal(authority), nil, :security_mutation_unauthorized}
+
+  defp capability_view_args({:issue_identity_status_mutation_attestation, authority, _, _, _}),
+    do: {lease_principal(authority), nil, :identity_status_mutation_unauthorized}
+
+  defp capability_view_args({:authorize_capability_mutation, authority, operation, cap}) do
+    parent_id = if operation == :delegate and is_map(cap), do: Map.get(cap, :parent_capability_id)
+
+    {lease_principal(authority), parent_id, :capability_mutation_unauthorized}
+  end
+
+  defp capability_view_args({:authorize_capability_mutation_proof, proof, _, _}),
+    do: {proof_principal(proof), nil, :capability_mutation_unauthorized}
+
+  defp capability_view_args(
+         {:issue_capability_revocation_attestation, authority, operation, target}
+       ) do
+    id = if operation == :revoke and is_map(target), do: Map.get(target, :capability_id)
+    {lease_principal(authority), id, :capability_revocation_unauthorized}
+  end
+
+  defp capability_view_args(_request), do: nil
+
+  defp lease_principal(authority) do
+    case SigningAuthority.canonicalize(authority) do
+      {:ok, %{principal_id: principal}} -> principal
+      _ -> nil
+    end
+  end
+
+  defp proof_principal(%SignedRequest{agent_id: principal}) do
+    if valid_principal_id?(principal), do: principal
+  end
+
+  defp proof_principal(_proof), do: nil
+
+  defp dispatch_authenticated({:with_capability_view, request, deadline}, from, state)
+       when is_integer(deadline) do
+    case capability_view_args(request) do
+      {actor, id, error} ->
+        start_capability_view(request, from, state, deadline, actor, id, error)
+
+      nil ->
+        {:reply, {:error, :system_authority_unauthorized}, state}
+    end
+  end
+
+  defp dispatch_authenticated(request, from, state),
+    do: handle_authenticated_request(request, from, state)
+
+  # Each request is sent from the authority itself through an OTP reply alias.
+  # A timeout drops the private job immediately but reserves the request's
+  # slot until the store replies or dies. A stalled store can therefore never
+  # accumulate successive waves of abandoned requests in its mailbox.
+  defp start_capability_view(request, {caller, _} = from, state, deadline, actor, id, error) do
+    requests = Map.get_lazy(state, :capability_view_requests, &:gen_server.reqids_new/0)
+    now = System.monotonic_time(:millisecond)
+    deadline = min(deadline, now + @capability_view_timeout_ms)
+
+    cond do
+      deadline <= now or not Process.alive?(caller) ->
+        {:reply, {:error, error}, state}
+
+      not is_binary(actor) ->
+        handle_authenticated_request(request, from, state)
+
+      :gen_server.reqids_size(requests) >= @max_capability_view_requests ->
+        {:reply, {:error, error}, state}
+
+      true ->
+        case supervised_registered_child_pid(state, CapabilityStore, CapabilityStore) do
+          store when is_pid(store) ->
+            ref = make_ref()
+
+            requests =
+              :gen_server.send_request(store, {:authorization_view, actor, id}, ref, requests)
+
+            job = %{
+              from: from,
+              request: request,
+              actor: actor,
+              id: id,
+              store: store,
+              root: state.identity.agent_id,
+              error: error,
+              deadline: deadline,
+              timer:
+                Process.send_after(self(), {:capability_view_deadline, ref}, deadline, abs: true)
+            }
+
+            jobs = Map.put(Map.get(state, :capability_view_jobs, %{}), ref, job)
+
+            {:noreply,
+             Map.merge(state, %{capability_view_jobs: jobs, capability_view_requests: requests})}
+
+          nil ->
+            handle_authenticated_request(request, from, state)
+        end
+    end
+  end
+
+  defp dispatch_private_info(message, %{capability_view_requests: requests} = state) do
+    case :gen_server.check_response(message, requests, true) do
+      {result, ref, remaining} ->
+        settle_capability_view(state, ref, result, remaining)
+
+      _ ->
+        handle_private_info(message, state)
+    end
+  end
+
+  defp dispatch_private_info(message, state), do: handle_private_info(message, state)
+
+  defp settle_capability_view(state, ref, result, requests) do
+    {job, jobs} = Map.pop(state.capability_view_jobs, ref)
+    state = %{state | capability_view_jobs: jobs, capability_view_requests: requests}
+
+    case job do
+      nil ->
+        {:noreply, state}
+
+      %{from: {_caller, reply_to}} ->
+        Process.cancel_timer(job.timer)
+        reply_authenticated(finish_capability_view(result, job, state), reply_to)
+    end
+  end
+
+  defp finish_capability_view({:reply, {:ok, revision, caps, cap}}, job, state) do
+    view = Map.merge(job, %{revision: revision, capabilities: caps, capability: cap})
+    state_with_view = Map.put(state, :capability_authorization_view, view)
+
+    if capability_view_current?(state_with_view) do
+      case handle_authenticated_request(job.request, job.from, state_with_view) do
+        {:reply, reply, next_state} ->
+          {:reply, reply, Map.delete(next_state, :capability_authorization_view)}
+
+        {:stop, reason, reply, next_state} ->
+          {:stop, reason, reply, Map.delete(next_state, :capability_authorization_view)}
+      end
+    else
+      {:reply, {:error, job.error}, state}
+    end
+  end
+
+  defp finish_capability_view(_result, job, state), do: {:reply, {:error, job.error}, state}
+
+  defp handle_private_info(
+         {:capability_view_deadline, ref},
+         %{capability_view_requests: requests} = state
+       ),
+       do: settle_capability_view(state, ref, :timeout, requests)
+
   defp handle_private_info({:private_memory_authorized, reference, worker, result}, state) do
     case Map.get(Map.get(state, :memory_attestations, %{}), reference) do
       %{worker: ^worker} = job ->
@@ -2066,28 +2231,29 @@ defmodule Arbor.Security.SystemAuthority do
   defp handle_private_info(message, state) do
     case Arbor.Custody.handle_authenticated_call(message, state.authenticated_calls) do
       {:authenticated, caller, request, reply_to} ->
-        case handle_authenticated_request(request, {caller, reply_to}, state) do
-          {:reply, reply, next_state} ->
-            :ok = Arbor.Custody.reply_authenticated_call(reply_to, reply)
-            {:noreply, next_state}
-
-          {:noreply, next_state} ->
-            {:noreply, next_state}
-
-          {:stop, reason, reply, next_state} ->
-            :ok = Arbor.Custody.reply_authenticated_call(reply_to, reply)
-            {:stop, reason, next_state}
-        end
+        reply_authenticated(dispatch_authenticated(request, {caller, reply_to}, state), reply_to)
 
       result when result in [:pending, :expired, :rejected, :unrecognized] ->
         {:noreply, state}
     end
   end
 
+  defp reply_authenticated({:reply, reply, state}, reply_to) do
+    :ok = Arbor.Custody.reply_authenticated_call(reply_to, reply)
+    {:noreply, state}
+  end
+
+  defp reply_authenticated({:noreply, _state} = result, _reply_to), do: result
+
+  defp reply_authenticated({:stop, reason, reply, state}, reply_to) do
+    :ok = Arbor.Custody.reply_authenticated_call(reply_to, reply)
+    {:stop, reason, state}
+  end
+
   @impl true
   def handle_info(message, private_state) do
     with {:ok, state} <- private_state(private_state) do
-      case handle_private_info(message, state) do
+      case dispatch_private_info(message, state) do
         {:noreply, next_state} ->
           case put_private_state(private_state, next_state) do
             :ok -> {:noreply, private_state}
@@ -2178,6 +2344,8 @@ defmodule Arbor.Security.SystemAuthority do
     allowed_keys =
       MapSet.new([
         :authenticated_calls,
+        :capability_view_jobs,
+        :capability_view_requests,
         :capability_mutation_attestations,
         :capability_revocation_attestations,
         :identity,
@@ -2197,6 +2365,8 @@ defmodule Arbor.Security.SystemAuthority do
       is_reference(authenticated_calls) and
       Enum.all?(
         [
+          :capability_view_jobs,
+          :capability_view_requests,
           :capability_mutation_attestations,
           :capability_revocation_attestations,
           :identity_registration_attestations,
@@ -2422,7 +2592,8 @@ defmodule Arbor.Security.SystemAuthority do
              Capability.valid?(cap) and Capability.grants_access?(cap, resource) and
                verify_capability_signature_safe(cap, state) == :ok and
                Signer.verify_delegation_chain(cap, &registry_lookup(state, &1)) == :ok
-           end) do
+           end),
+         true <- capability_view_current?(state) do
       :ok
     else
       _ -> {:error, :security_mutation_unauthorized}
@@ -2478,7 +2649,8 @@ defmodule Arbor.Security.SystemAuthority do
          # Only this authority's own signature counts. It is the kernel that
          # checked the granter against the authenticated actor before signing;
          # an enrolled issuer's signature carries no such check.
-         :ok <- verify_authority_capability_signature_safe(cap, state.identity) do
+         :ok <- verify_authority_capability_signature_safe(cap, state.identity),
+         true <- capability_view_current?(state) do
       :ok
     else
       _ -> {:error, :capability_revocation_unauthorized}
@@ -2571,22 +2743,33 @@ defmodule Arbor.Security.SystemAuthority do
   end
 
   defp capability_store_get(state, capability_id) do
-    case supervised_registered_child_pid(state, CapabilityStore, CapabilityStore) do
-      pid when is_pid(pid) -> GenServer.call(pid, {:get, capability_id})
-      _ -> {:error, :not_found}
+    case Map.get(state, :capability_authorization_view) do
+      %{id: ^capability_id, capability: {:ok, %Capability{id: ^capability_id} = cap}} ->
+        if cap.expires_at && DateTime.compare(DateTime.utc_now(), cap.expires_at) == :gt,
+          do: {:error, :capability_expired},
+          else: {:ok, cap}
+
+      _ ->
+        {:error, :not_found}
     end
-  catch
-    :exit, _ -> {:error, :not_found}
   end
 
   defp capability_store_list_for_principal(state, principal_id) do
-    case supervised_registered_child_pid(state, CapabilityStore, CapabilityStore) do
-      pid when is_pid(pid) -> GenServer.call(pid, {:list_for_principal, principal_id, []})
+    case Map.get(state, :capability_authorization_view) do
+      %{actor: ^principal_id, capabilities: caps} when is_list(caps) -> {:ok, caps}
       _ -> {:error, :capability_store_unavailable}
     end
-  catch
-    :exit, _ -> {:error, :capability_store_unavailable}
   end
+
+  defp capability_view_current?(%{capability_authorization_view: view, identity: root}) do
+    %{from: {caller, _reply_to}, deadline: deadline, store: store, revision: revision} = view
+
+    view.root == root.agent_id and Process.alive?(caller) and
+      deadline > System.monotonic_time(:millisecond) and
+      CapabilityStore.authorization_view_current?(store, revision)
+  end
+
+  defp capability_view_current?(_state), do: false
 
   defp issuer_registry_lookup(state, issuer_id) do
     case supervised_registered_child_pid(state, IssuerRegistry, IssuerRegistry) do
@@ -2881,7 +3064,8 @@ defmodule Arbor.Security.SystemAuthority do
          true <- delegation_scope_attenuated?(cap, parent),
          :ok <- verify_capability_signature_safe(parent, state),
          :ok <- Signer.verify_delegation_chain(parent, &registry_lookup(state, &1)),
-         :ok <- Signer.verify_delegation_chain(cap, &registry_lookup(state, &1)) do
+         :ok <- Signer.verify_delegation_chain(cap, &registry_lookup(state, &1)),
+         true <- capability_view_current?(state) do
       :ok
     else
       _ -> {:error, :capability_mutation_unauthorized}

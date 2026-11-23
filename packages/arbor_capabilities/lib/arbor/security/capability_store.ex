@@ -262,6 +262,22 @@ defmodule Arbor.Security.CapabilityStore do
     server_call({:list_for_principal, principal_id, opts})
   end
 
+  @doc false
+  def authorization_view_current?(owner, revision)
+      when is_pid(owner) and is_reference(revision) do
+    with ^owner <- Process.whereis(__MODULE__),
+         table when is_reference(table) <- :ets.whereis(@owner_directory),
+         ^owner <- :ets.info(table, :owner),
+         [{:authorization_view_revision, ^revision}] <-
+           :ets.lookup(table, :authorization_view_revision) do
+      true
+    else
+      _ -> false
+    end
+  rescue
+    ArgumentError -> false
+  end
+
   @doc """
   Find a capability that authorizes access to the given resource.
 
@@ -961,27 +977,19 @@ defmodule Arbor.Security.CapabilityStore do
   end
 
   defp dispatch_call({:get, capability_id}, _from, state) do
-    result =
-      case Map.get(state.by_id, capability_id) do
-        nil -> {:error, :not_found}
-        cap -> check_expiration(cap)
-      end
-
-    {:reply, result, state}
+    {:reply, lookup_capability(state, capability_id), state}
   end
 
   defp dispatch_call({:list_for_principal, principal_id, opts}, _from, state) do
-    include_expired = Keyword.get(opts, :include_expired, false)
-
-    cap_ids = Map.get(state.by_principal, principal_id, [])
-
-    caps =
-      cap_ids
-      |> Enum.map(&Map.get(state.by_id, &1))
-      |> Enum.reject(&is_nil/1)
-      |> maybe_filter_expired(include_expired)
+    caps = principal_capabilities(state, principal_id, Keyword.get(opts, :include_expired, false))
 
     {:reply, {:ok, caps}, state}
+  end
+
+  defp dispatch_call({:authorization_view, actor_id, capability_id}, _from, state) do
+    caps = principal_capabilities(state, actor_id, false)
+    cap = lookup_capability(state, capability_id)
+    {:reply, {:ok, authorization_view_revision(), caps, cap}, state}
   end
 
   defp dispatch_call({:find_authorizing, principal_id, resource_uri}, _from, state) do
@@ -1261,6 +1269,7 @@ defmodule Arbor.Security.CapabilityStore do
   defp raw_read_request?(request) when request in [:mutation_audit_status, :stats], do: true
   defp raw_read_request?({:get, _capability_id}), do: true
   defp raw_read_request?({:list_for_principal, _principal_id, _opts}), do: true
+  defp raw_read_request?({:authorization_view, _actor_id, _capability_id}), do: true
   defp raw_read_request?({:find_authorizing, _principal_id, _resource_uri}), do: true
   defp raw_read_request?({:list_valid_for_principal, _principal_id, _opts}), do: true
 
@@ -1328,6 +1337,7 @@ defmodule Arbor.Security.CapabilityStore do
       {:authenticated, caller, request, reply_to} ->
         case dispatch_call(request, {caller, reply_to}, state) do
           {:reply, reply, next_state} ->
+            publish_authorization_view_change(state, next_state)
             :ok = Arbor.Custody.reply_authenticated_call(reply_to, reply)
             {:noreply, next_state}
 
@@ -1367,6 +1377,8 @@ defmodule Arbor.Security.CapabilityStore do
   # value fails closed with the fixed bounded reason.
   @impl true
   def code_change(_old_vsn, state, _extra) do
+    invalidate_authorization_views()
+
     case fetch_state_version(state) do
       :absent ->
         migrate_legacy(state)
@@ -1376,6 +1388,44 @@ defmodule Arbor.Security.CapabilityStore do
 
       {:present, _nil_or_unsupported} ->
         {:error, :unsupported_state_version}
+    end
+  end
+
+  defp principal_capabilities(state, principal_id, include_expired) do
+    state.by_principal
+    |> Map.get(principal_id, [])
+    |> Enum.map(&Map.get(state.by_id, &1))
+    |> Enum.reject(&is_nil/1)
+    |> maybe_filter_expired(include_expired)
+  end
+
+  defp lookup_capability(state, capability_id) do
+    case Map.get(state.by_id, capability_id) do
+      nil -> {:error, :not_found}
+      cap -> check_expiration(cap)
+    end
+  end
+
+  defp authorization_view_revision do
+    case :ets.lookup(@owner_directory, :authorization_view_revision) do
+      [{:authorization_view_revision, revision}] -> revision
+      [] -> invalidate_authorization_views()
+    end
+  end
+
+  # The revision marks publication of the live authorization projection.
+  # A reader can linearize against it without calling back into the store.
+  defp publish_authorization_view_change(previous, next) do
+    if previous.by_id !== next.by_id or previous.by_principal !== next.by_principal do
+      invalidate_authorization_views()
+    end
+  end
+
+  defp invalidate_authorization_views do
+    if :ets.info(@owner_directory, :owner) == self() do
+      revision = make_ref()
+      true = :ets.insert(@owner_directory, {:authorization_view_revision, revision})
+      revision
     end
   end
 
@@ -1872,14 +1922,16 @@ defmodule Arbor.Security.CapabilityStore do
   end
 
   defp exec_cleanup(state) do
-    state = cleanup_expired(state)
+    cleaned = cleanup_expired(state)
+    publish_authorization_view_change(state, cleaned)
     schedule_cleanup()
-    {:noreply, state}
+    {:noreply, cleaned}
   end
 
   defp exec_signal_received(signal, state) do
-    state = handle_distributed_signal(signal, state)
-    {:noreply, state}
+    updated = handle_distributed_signal(signal, state)
+    publish_authorization_view_change(state, updated)
+    {:noreply, updated}
   end
 
   # Private functions
