@@ -431,6 +431,7 @@ defmodule Arbor.Security.TestBootstrap do
           {Arbor.Security.Identity.ReplayPeers, []},
           {Arbor.Security.SystemAuthority,
            system_authority_registration_token: system_authority_registration_token,
+           trust_grant_owner_spec: Map.get(role_specs, :trust_grant_owner),
            defer_initialization: true},
           {Arbor.Security.SigningAuthorityStateOwner, broker_token: token},
           {Arbor.Security.SigningAuthorityBroker,

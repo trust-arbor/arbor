@@ -2347,9 +2347,15 @@ defmodule Arbor.Security do
 
   The actor must hold `arbor://security/revoke/<principal_id>`, with two
   narrow exceptions that `SystemAuthority` decides for this exact capability:
-  an agent may revoke its own disclosure capability, and the granter the kernel
-  recorded and signed at grant time may revoke what it granted. Neither
-  exception extends to `revoke_all/2`, `cascade_revoke/2` or scope revocation.
+  an agent may revoke its own disclosure capability, and the supervised Trust
+  grant owner may revoke a capability it granted. No other granter gains
+  anything from having granted it, and neither exception extends to
+  `revoke_all/2`, `cascade_revoke/2` or scope revocation.
+
+  Revoking a capability also revokes every capability delegated from it,
+  whoever holds the copies. If a delegated copy cannot be removed the
+  capability itself is left in place and an error is returned, so the call can
+  be repeated.
 
   The authority is checked again by `SystemAuthority`, and the resulting
   one-use receipt is bound to the exact current capability payload before the

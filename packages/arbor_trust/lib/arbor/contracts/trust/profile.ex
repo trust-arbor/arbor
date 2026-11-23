@@ -7,12 +7,13 @@ defmodule Arbor.Contracts.Trust.Profile do
 
   ## Frozen State
 
-  While `frozen` is true every URI resolves to `:block`: calls through
-  `Arbor.Trust.authorize/4` are denied and nothing is minted. The freeze also
-  revokes the capabilities trust policy minted for the agent; capabilities an
-  operator granted stay in the store but are denied by the same policy check.
-  Unfreezing restores the rules, and trust mints again on demand. Circuit
-  breakers freeze a profile when they detect anomalous behavior.
+  `frozen` pauses trust graduation: a frozen profile earns no new autonomy.
+  It does not change the modes its `baseline` and `rules` resolve to, and it
+  does not revoke capabilities. (An earlier version of this text said freezing
+  revokes modifiable capabilities; nothing has done that since the handler was
+  reduced to an observer.) Circuit breakers freeze a profile when they detect
+  anomalous behavior. To stop an agent, set its rules or baseline to `:block`
+  or delete the profile.
 
   ## Authorization
 

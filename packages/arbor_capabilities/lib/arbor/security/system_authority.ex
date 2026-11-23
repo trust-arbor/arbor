@@ -644,7 +644,8 @@ defmodule Arbor.Security.SystemAuthority do
          {:ok, registration_token_source} <- system_authority_registration_token(opts),
          :ok <- validate_registration_token_source(registration_token_source),
          {:ok, defer_initialization?} <- defer_initialization(opts),
-         :ok <- claim_owner_directory() do
+         :ok <- claim_owner_directory(),
+         :ok <- pin_trust_grant_owner_spec(opts) do
       # Every persistent-mode store call and the identity registration below
       # proves its target through Security.Supervisor. Running those calls in
       # init/1 deadlocks a dynamic Supervisor.start_child/2 because the parent
@@ -2464,8 +2465,8 @@ defmodule Arbor.Security.SystemAuthority do
   # once granted, other operators' security capabilities included.
   #
   # Three things must hold. The calling process is the supervised process the
-  # host configured for the `:trust_grant_owner` role (the same proof the key
-  # store requires before it releases that owner's key). The capability names
+  # host configured for the `:trust_grant_owner` role at boot (the same proof
+  # the key store requires before it releases that owner's key). The capability names
   # the actor as granter, as the kernel recorded and signed it at grant time;
   # that is read from the store, never from the caller. And the signature is
   # this authority's own. Only the single-capability operation qualifies:
@@ -2501,10 +2502,13 @@ defmodule Arbor.Security.SystemAuthority do
   defp authorize_granter_revocation(_actor_id, _owner, _operation, _target, _state),
     do: {:error, :capability_revocation_unauthorized}
 
+  # The role spec is the one the application handed over at start, kept in
+  # this process's own protected table. Like the key store and the identity
+  # registry, the authority does not re-read application env: a later
+  # `Application.put_env/3` must not be able to name a different owner.
   defp trust_grant_owner_process?(owner) do
-    with {:ok, roles} <- Arbor.Security.Config.signing_key_owner_roles(),
-         %{application: application, path: path, registered_name: registered_name} <-
-           Map.get(roles, :trust_grant_owner),
+    with [{:trust_grant_owner_spec, spec}] <- :ets.lookup(@owner_table, :trust_grant_owner_spec),
+         %{application: application, path: path, registered_name: registered_name} <- spec,
          {:registered_name, ^registered_name} <- Process.info(owner, :registered_name) do
       SupervisedOwner.authorized?(owner, application, path)
     else
@@ -2514,6 +2518,23 @@ defmodule Arbor.Security.SystemAuthority do
     _ -> false
   catch
     _, _ -> false
+  end
+
+  # Absent or malformed: nothing is pinned and the granter rule never applies.
+  defp pin_trust_grant_owner_spec(opts) do
+    case Keyword.get(opts, :trust_grant_owner_spec) do
+      %{application: application, path: [_ | _] = path, registered_name: registered_name} = spec
+      when is_atom(application) and is_atom(registered_name) ->
+        if Enum.all?(path, &is_atom/1),
+          do: :ets.insert(@owner_table, {:trust_grant_owner_spec, spec})
+
+        :ok
+
+      _ ->
+        :ok
+    end
+  rescue
+    _ -> {:error, :system_authority_directory_unavailable}
   end
 
   defp authorize_self_disclosure_revocation(
