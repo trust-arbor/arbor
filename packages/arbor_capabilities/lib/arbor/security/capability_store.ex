@@ -1519,9 +1519,14 @@ defmodule Arbor.Security.CapabilityStore do
 
       {revoked, failed, next} =
         Enum.reduce(ids, {0, 0, state}, fn id, {revoked, failed, acc} ->
-          case exec_revoke(id, acc) do
-            {:reply, :ok, next} -> {revoked + 1, failed, next}
-            {:reply, _error, next} -> {revoked, failed + 1, next}
+          # A blocker delegated from an earlier blocker went with its parent.
+          if Map.has_key?(acc.by_id, id) do
+            case exec_revoke(id, acc) do
+              {:reply, :ok, next} -> {revoked + 1, failed, next}
+              {:reply, _error, next} -> {revoked, failed + 1, next}
+            end
+          else
+            {revoked + 1, failed, acc}
           end
         end)
 
@@ -1652,13 +1657,21 @@ defmodule Arbor.Security.CapabilityStore do
       cap ->
         case delete_persisted_capability(capability_id) do
           :ok ->
+            {descendants, failed} = delete_descendants(state, [capability_id])
+
             next =
               state
-              |> revoke_capability_ids([capability_id])
-              |> update_in([:stats, :total_revoked], &(&1 + 1))
+              |> revoke_capability_ids([capability_id | descendants])
+              |> update_in([:stats, :total_revoked], &(&1 + 1 + length(descendants)))
+              |> update_in([:stats, :total_cascade_revoked], &(&1 + length(descendants)))
 
             emit_revocation_signal(state, :capability_revoked, [capability_id], cap.principal_id)
-            {:reply, :ok, next}
+            emit_descendant_revocation_signal(state, descendants)
+
+            case failed do
+              [] -> {:reply, :ok, next}
+              _ -> {:reply, reduction_result(1 + length(descendants), failed), next}
+            end
 
           {:error, _} = error ->
             {:reply, error, state}
@@ -1666,10 +1679,33 @@ defmodule Arbor.Security.CapabilityStore do
     end
   end
 
+  # A delegated capability draws its authority from its parent, so it does not
+  # outlive an explicit revocation of that parent. Every explicit revocation
+  # (single, by principal, by scope) therefore takes the descendants with it,
+  # whoever holds them. Replacing or consuming a capability is not a
+  # revocation and leaves delegations alone.
+  #
+  # Returns the descendant ids whose durable delete succeeded and those whose
+  # delete failed; `roots` themselves are in neither list.
+  defp delete_descendants(state, roots) do
+    state
+    |> collect_cascade_ids(roots, [])
+    |> Enum.uniq()
+    |> Kernel.--(roots)
+    |> delete_capability_ids()
+  end
+
+  defp emit_descendant_revocation_signal(_state, []), do: :ok
+
+  defp emit_descendant_revocation_signal(state, descendants),
+    do: emit_revocation_signal(state, :capabilities_cascade_revoked, descendants, nil)
+
   defp exec_revoke_all(principal_id, state) do
     requested_ids = Map.get(state.by_principal, principal_id, [])
     {cap_ids, failed} = delete_capability_ids(requested_ids)
-    count = length(cap_ids)
+    {descendants, failed_descendants} = delete_descendants(state, cap_ids)
+    failed = failed ++ failed_descendants
+    count = length(cap_ids) + length(descendants)
 
     # The shared helper clears every index (by_issuer, by_parent and by_usage
     # included), as single and cascade revocation do. Stale parent entries made
@@ -1679,11 +1715,15 @@ defmodule Arbor.Security.CapabilityStore do
       state
       |> revoke_capability_ids(cap_ids)
       |> put_in([:by_principal, principal_id], requested_ids -- cap_ids)
+      |> revoke_capability_ids(descendants)
       |> update_in([:stats, :total_revoked], &(&1 + count))
+      |> update_in([:stats, :total_cascade_revoked], &(&1 + length(descendants)))
 
-    if count > 0 do
+    if cap_ids != [] do
       emit_revocation_signal(state, :capabilities_revoked_all, cap_ids, principal_id)
     end
+
+    emit_descendant_revocation_signal(state, descendants)
 
     {:reply, reduction_result(count, failed), state}
   end
@@ -1695,16 +1735,21 @@ defmodule Arbor.Security.CapabilityStore do
       |> Enum.map(fn {id, _cap} -> id end)
 
     {matching_ids, failed} = delete_capability_ids(matching_ids)
-    count = length(matching_ids)
+    {descendants, failed_descendants} = delete_descendants(state, matching_ids)
+    failed = failed ++ failed_descendants
+    count = length(matching_ids) + length(descendants)
 
     state =
       state
-      |> revoke_capability_ids(matching_ids)
+      |> revoke_capability_ids(matching_ids ++ descendants)
       |> update_in([:stats, :total_revoked], &(&1 + count))
+      |> update_in([:stats, :total_cascade_revoked], &(&1 + length(descendants)))
 
-    if count > 0 do
+    if matching_ids != [] do
       emit_revocation_signal(state, :capabilities_scope_revoked, matching_ids, nil)
     end
+
+    emit_descendant_revocation_signal(state, descendants)
 
     {:reply, reduction_result(count, failed), state}
   end

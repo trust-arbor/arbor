@@ -576,6 +576,81 @@ defmodule Arbor.Security.AuthorityMutationSecurityRegressionTest do
     end
   end
 
+  describe "a delegated capability and its revoked parent" do
+    # Until 2026-11-22 only cascade_revoke/2 removed delegated copies. A plain
+    # revoke, revoke_all or scope revocation of the parent left the copy in the
+    # store, still valid for whoever held it.
+    setup do
+      {:ok, holder} = Identity.generate(name: "delegation-parent-holder")
+      {:ok, worker} = Identity.generate(name: "delegation-parent-worker")
+      {:ok, operator} = Identity.generate(name: "delegation-parent-operator")
+      :ok = Registry.register_fixture(holder)
+      :ok = Registry.register_fixture(worker)
+      :ok = Registry.register_fixture(operator)
+
+      {:ok, _} =
+        Security.grant_fixture(
+          principal: operator.agent_id,
+          resource: "arbor://security/revoke/**"
+        )
+
+      on_exit(fn ->
+        Security.revoke_all_fixture(holder.agent_id)
+        Security.revoke_all_fixture(worker.agent_id)
+        Security.revoke_all_fixture(operator.agent_id)
+      end)
+
+      {:ok, holder_authority} = open_authority(holder)
+      {:ok, operator_authority} = open_authority(operator)
+
+      delegate = fn resource, scope ->
+        {:ok, parent} =
+          Security.grant_fixture(
+            [principal: holder.agent_id, resource: resource, delegation_depth: 3] ++ scope
+          )
+
+        {:ok, child} =
+          Security.delegate(
+            parent.id,
+            worker.agent_id,
+            [actor_authority: holder_authority] ++ scope
+          )
+
+        {parent, child}
+      end
+
+      %{holder: holder, operator_authority: operator_authority, delegate: delegate}
+    end
+
+    test "security regression: revoking the parent revokes the delegated copy", ctx do
+      {parent, child} = ctx.delegate.("arbor://fs/read/delegation-revoke", [])
+
+      assert :ok = Security.revoke(parent.id, actor_authority: ctx.operator_authority)
+      assert {:error, :not_found} = Security.get_capability_fixture(parent.id)
+      assert {:error, :not_found} = Security.get_capability_fixture(child.id)
+    end
+
+    test "security regression: revoking everything a principal holds revokes what it delegated",
+         ctx do
+      {parent, child} = ctx.delegate.("arbor://fs/read/delegation-revoke-all", [])
+
+      assert {:ok, 2} =
+               Security.revoke_all(ctx.holder.agent_id, actor_authority: ctx.operator_authority)
+
+      assert {:error, :not_found} = Security.get_capability_fixture(parent.id)
+      assert {:error, :not_found} = Security.get_capability_fixture(child.id)
+    end
+
+    test "an unrelated capability of the same holder keeps its delegated copy", ctx do
+      {parent, _child} = ctx.delegate.("arbor://fs/read/delegation-keep-a", [])
+      {other_parent, other_child} = ctx.delegate.("arbor://fs/read/delegation-keep-b", [])
+
+      assert :ok = Security.revoke(parent.id, actor_authority: ctx.operator_authority)
+      assert {:ok, ^other_parent} = Security.get_capability_fixture(other_parent.id)
+      assert {:ok, ^other_child} = Security.get_capability_fixture(other_child.id)
+    end
+  end
+
   test "security regression: an exact signed mutation request is bound and one-use" do
     {:ok, actor} = Identity.generate(name: "signed-mutation-security-actor")
     {:ok, target} = Identity.generate(name: "signed-mutation-security-target")
