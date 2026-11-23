@@ -262,13 +262,12 @@ defmodule Arbor.Trust.CapabilityGrantOwner do
     end
   end
 
-  # A refusal is a decision, not a collision: a grant this owner did not make
-  # will be refused again. Only failures that can clear on their own are
-  # retried.
-  defp retriable_sync_error?({:capability_revocation_failed, _id, reason})
-       when reason in [:capability_revocation_unauthorized, :capability_mutation_unauthorized],
-       do: false
-
+  # The kernel reports a refusal and a transient failure (deadline, queue
+  # full, store restart, stale view) with the same error, and the enforcer
+  # returns only the first failure of a pass, so there is nothing reliable to
+  # tell them apart by. Every failure is retried. The cost of retrying a real
+  # refusal is small: the delays are fixed, one retry is pending per agent and
+  # reason, and the table is bounded.
   defp retriable_sync_error?(_error), do: true
 
   # One pending retry per agent and reason, and a bound on the whole table, so

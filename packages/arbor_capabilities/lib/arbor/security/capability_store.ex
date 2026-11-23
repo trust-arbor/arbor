@@ -1721,6 +1721,8 @@ defmodule Arbor.Security.CapabilityStore do
                   cap.principal_id
                 )
 
+                emit_explicit_revocation_signal(next, capability_id)
+
                 {:reply, :ok, next}
 
               {:error, _} = error ->
@@ -1739,17 +1741,22 @@ defmodule Arbor.Security.CapabilityStore do
   # descendants with it, whoever holds them. Replacing or consuming a
   # capability is not a revocation and leaves delegations alone.
   #
-  # Descendants go first. If any of their durable deletes fails, the roots are
-  # left in place and the caller gets an error, so a retry of the same
-  # revocation finds the root and finishes the job. Deleting the root first
-  # would strand a surviving descendant behind a parent that no longer exists.
+  # Descendants go first, leaves before the capabilities they were delegated
+  # from, and a capability is deleted only once everything below it is gone.
+  # If a durable delete fails, every ancestor of that capability stays,
+  # including the roots, and the caller gets an error. The delegation index
+  # then still leads from the root to the survivor, so a retry of the same
+  # revocation finds it and finishes the job. Deleting a parent while a child
+  # of it survives would strand that child where no later revocation looks.
   #
   # Returns the state with the deleted descendants removed and signalled.
   defp revoke_descendants(state, roots) do
-    {deleted, failed} =
-      state
-      |> descendant_ids(roots)
-      |> delete_capability_ids()
+    {status, {deleted, failed}} =
+      Enum.reduce(roots, {:ok, {[], []}}, fn root, {status, acc} ->
+        merge_subtree_status(status, delete_children(state, root, acc))
+      end)
+
+    deleted = deleted -- roots
 
     next =
       state
@@ -1761,11 +1768,50 @@ defmodule Arbor.Security.CapabilityStore do
       emit_revocation_signal(next, :capabilities_cascade_revoked, deleted, nil)
     end
 
-    case failed do
-      [] -> {:ok, next, deleted}
-      _ -> {:error, next, length(deleted), failed}
+    case status do
+      :ok -> {:ok, next, deleted}
+      :blocked -> {:error, next, length(deleted), failed}
     end
   end
+
+  defp delete_children(state, id, acc) do
+    Enum.reduce(Map.get(state.by_parent, id, []), {:ok, acc}, fn child, {status, acc} ->
+      merge_subtree_status(status, delete_subtree(state, child, acc))
+    end)
+  end
+
+  # `failed` holds both the capabilities whose delete failed and the ancestors
+  # that were therefore not attempted.
+  defp delete_subtree(state, id, {deleted, failed} = acc) do
+    cond do
+      id in deleted ->
+        {:ok, acc}
+
+      id in failed ->
+        {:blocked, acc}
+
+      true ->
+        case delete_children(state, id, acc) do
+          {:ok, {deleted, failed}} ->
+            if delete_persisted_capability(id) == :ok,
+              do: {:ok, {[id | deleted], failed}},
+              else: {:blocked, {deleted, [id | failed]}}
+
+          {:blocked, {deleted, failed}} ->
+            {:blocked, {deleted, [id | failed]}}
+        end
+    end
+  end
+
+  defp merge_subtree_status(:ok, {:ok, acc}), do: {:ok, acc}
+  defp merge_subtree_status(_status, {_result, acc}), do: {:blocked, acc}
+
+  # `:capability_revoked` is also what replacement and usage exhaustion emit,
+  # and those leave delegations alone, so a peer must not cascade on it. An
+  # explicit revocation says so with a second signal of a type that only
+  # explicit revocations use; peers follow their own delegation index on that.
+  defp emit_explicit_revocation_signal(state, capability_id),
+    do: emit_revocation_signal(state, :capabilities_cascade_revoked, [capability_id], nil)
 
   defp descendant_ids(state, roots) do
     state
@@ -1839,9 +1885,9 @@ defmodule Arbor.Security.CapabilityStore do
         {:reply, {:error, :not_found}, state}
 
       _cap ->
-        # Collect all capability IDs to revoke (this one + all children recursively)
-        all_ids = collect_cascade_ids(state, [capability_id], [])
-        {all_ids, failed} = delete_capability_ids(all_ids)
+        # This one and everything delegated from it, leaves first; see
+        # revoke_descendants/2 for why a failure keeps the ancestors.
+        {_status, {all_ids, failed}} = delete_subtree(state, capability_id, {[], []})
         count = length(all_ids)
 
         state =
@@ -1850,7 +1896,10 @@ defmodule Arbor.Security.CapabilityStore do
           |> update_in([:stats, :total_revoked], &(&1 + count))
           |> update_in([:stats, :total_cascade_revoked], &(&1 + count))
 
-        emit_revocation_signal(state, :capabilities_cascade_revoked, all_ids, nil)
+        if all_ids != [] do
+          emit_revocation_signal(state, :capabilities_cascade_revoked, all_ids, nil)
+        end
+
         {:reply, reduction_result(count, failed), state}
     end
   end
@@ -2911,6 +2960,7 @@ defmodule Arbor.Security.CapabilityStore do
             state = revoke_capability_ids(state, [capability_id])
             state = update_in(state, [:stats, :total_revoked], &(&1 + 1))
             emit_revocation_signal(state, :capability_revoked, [capability_id], principal_id)
+            emit_explicit_revocation_signal(state, capability_id)
             {:reply, {:ok, :applied, capability_id}, state}
 
           {:error, :conflict} ->
@@ -3794,10 +3844,15 @@ defmodule Arbor.Security.CapabilityStore do
     cap_ids = data[:capability_ids] || data["capability_ids"] || []
 
     if cap_ids != [] do
-      # This node may hold a delegated copy the revoking node never saw, or
-      # may miss the separate signal that names the descendants. Follow the
-      # local delegation index as well as the ids received.
-      cap_ids = Enum.uniq(cap_ids ++ descendant_ids(state, Enum.filter(cap_ids, &is_binary/1)))
+      # For an explicit revocation this node may hold a delegated copy the
+      # revoking node never saw, so follow the local delegation index as well
+      # as the ids received. Not for `:capability_revoked`: replacement and
+      # usage exhaustion emit it too and must leave delegations alone.
+      cap_ids =
+        if type == :capability_revoked,
+          do: cap_ids,
+          else: Enum.uniq(cap_ids ++ descendant_ids(state, Enum.filter(cap_ids, &is_binary/1)))
+
       Logger.debug("[CapabilityStore] Evicting #{length(cap_ids)} remotely revoked capabilities")
       Enum.each(cap_ids, &authoritative_delete_persisted_capability/1)
       revoke_capability_ids(state, cap_ids)

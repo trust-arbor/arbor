@@ -619,7 +619,12 @@ defmodule Arbor.Security.AuthorityMutationSecurityRegressionTest do
         {parent, child}
       end
 
-      %{holder: holder, operator_authority: operator_authority, delegate: delegate}
+      %{
+        holder: holder,
+        worker: worker,
+        operator_authority: operator_authority,
+        delegate: delegate
+      }
     end
 
     test "security regression: revoking the parent revokes the delegated copy", ctx do
@@ -660,6 +665,50 @@ defmodule Arbor.Security.AuthorityMutationSecurityRegressionTest do
       assert {:error, :not_found} = Security.get_capability_fixture(child.id)
       assert {:ok, ^task_parent} = Security.get_capability_fixture(task_parent.id)
       assert {:ok, ^task_child} = Security.get_capability_fixture(task_child.id)
+    end
+
+    test "security regression: a two-hop delegation chain goes with its root, for revoke and cascade",
+         ctx do
+      {:ok, third} = Identity.generate(name: "delegation-parent-third")
+      :ok = Registry.register_fixture(third)
+      on_exit(fn -> Security.revoke_all_fixture(third.agent_id) end)
+
+      for {resource, revoke} <- [
+            {"arbor://fs/read/delegation-two-hop-revoke", &Security.revoke/2},
+            {"arbor://fs/read/delegation-two-hop-cascade", &Security.cascade_revoke/2}
+          ] do
+        {parent, child} = ctx.delegate.(resource, [])
+        {:ok, worker_authority} = open_authority(ctx.worker)
+
+        {:ok, grandchild} =
+          Security.delegate(child.id, third.agent_id, actor_authority: worker_authority)
+
+        assert grandchild.parent_capability_id == child.id
+
+        assert revoke.(parent.id, actor_authority: ctx.operator_authority) in [:ok, {:ok, 3}]
+
+        for cap <- [parent, child, grandchild] do
+          assert {:error, :not_found} = Security.get_capability_fixture(cap.id)
+        end
+      end
+    end
+
+    test "replacing a capability is not a revocation: its delegated copy stays", ctx do
+      resource = "arbor://fs/read/delegation-replace"
+      {parent, child} = ctx.delegate.(resource, [])
+
+      # A second grant of the same resource to the same principal replaces the
+      # first in the store.
+      {:ok, replacement} =
+        Security.grant_fixture(
+          principal: ctx.holder.agent_id,
+          resource: resource,
+          delegation_depth: 3
+        )
+
+      assert replacement.id != parent.id
+      assert {:error, :not_found} = Security.get_capability_fixture(parent.id)
+      assert {:ok, ^child} = Security.get_capability_fixture(child.id)
     end
 
     test "an unrelated capability of the same holder keeps its delegated copy", ctx do
