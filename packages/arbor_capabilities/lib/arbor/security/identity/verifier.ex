@@ -26,6 +26,11 @@ defmodule Arbor.Security.Identity.Verifier do
   @spec verify(term()) :: {:ok, String.t()} | {:error, atom()}
   def verify(request), do: do_verify(request, true)
 
+  @doc false
+  @spec verify_without_recording_nonce(term()) :: {:ok, String.t()} | {:error, atom()}
+  # Admission precheck. An effect still requires successful one-use verification.
+  def verify_without_recording_nonce(request), do: do_verify(request, true, false)
+
   @doc """
   Verify a proof that was minted by THIS node and never transmitted.
 
@@ -81,13 +86,13 @@ defmodule Arbor.Security.Identity.Verifier do
 
   def verify_with_public_key(_request, _public_key), do: {:error, :invalid_public_key}
 
-  defp do_verify(request, gate_cluster_replay?) do
+  defp do_verify(request, gate_cluster_replay?, record_nonce? \\ true) do
     with :ok <- maybe_admit_cluster_replay(gate_cluster_replay?),
          {:ok, request} <- canonicalize_request(request),
          :ok <- check_timestamp_freshness(request),
          {:ok, public_key} <- lookup_agent_key(request.agent_id),
          :ok <- verify_signature(request, public_key),
-         :ok <- check_nonce_uniqueness(request.nonce) do
+         :ok <- maybe_record_nonce(request.nonce, record_nonce?) do
       {:ok, request.agent_id}
     end
   rescue
@@ -100,6 +105,9 @@ defmodule Arbor.Security.Identity.Verifier do
     do: Config.admit_cluster_signed_request_replay_protection()
 
   defp maybe_admit_cluster_replay(false), do: :ok
+
+  defp maybe_record_nonce(nonce, true), do: check_nonce_uniqueness(nonce)
+  defp maybe_record_nonce(_nonce, false), do: :ok
 
   defp canonicalize_request(request) do
     case SignedRequest.canonicalize(request) do

@@ -3,8 +3,13 @@ defmodule Arbor.Security.AuthorityStoreCallCycleSecurityRegressionTest do
 
   @moduletag :fast
 
+  alias Arbor.Contracts.Security.Capability
   alias Arbor.Contracts.Security.Identity
+  alias Arbor.Contracts.Security.SignedRequest
+  alias Arbor.Contracts.Security.SigningAuthority
+  alias Arbor.Custody
   alias Arbor.Security
+  alias Arbor.Security.Capability.Signer
   alias Arbor.Security.CapabilityStore
   alias Arbor.Security.Identity.Registry
   alias Arbor.Security.SystemAuthority
@@ -112,6 +117,353 @@ defmodule Arbor.Security.AuthorityStoreCallCycleSecurityRegressionTest do
     assert {{:error, :capability_revocation_unauthorized}, elapsed_ms} = Task.await(revoker)
     assert elapsed_ms < 2_000
     assert {:ok, ^capability} = CapabilityStore.get(capability.id)
+  end
+
+  test "security regression: an unrelated write before delivery gets a fresh view", ctx do
+    unrelated = grant_unrelated(ctx)
+    authority = Process.whereis(SystemAuthority)
+    revoker = start_revoker(ctx.actor, ctx.target.agent_id)
+
+    with_suspended(ctx.store, fn ->
+      send(revoker.pid, :revoke)
+      await_queued_calls(ctx.store, 1)
+      :ok = :sys.suspend(authority)
+    end)
+
+    try do
+      assert :ok = Security.revoke_fixture(unrelated.id)
+    after
+      :ok = :sys.resume(authority)
+    end
+
+    assert {{:ok, 1}, _elapsed} = Task.await(revoker)
+  end
+
+  test "security regression: an unrelated write during the final lease check gets a fresh view",
+       ctx do
+    unrelated = grant_unrelated(ctx)
+    registry = Process.whereis(Registry)
+    revoker = start_revoker(ctx.actor, ctx.target.agent_id)
+
+    with_suspended(ctx.store, fn ->
+      send(revoker.pid, :revoke)
+      await_queued_calls(ctx.store, 1)
+      :ok = :sys.suspend(registry)
+    end)
+
+    try do
+      await_queued_calls(registry, 1)
+      assert :ok = Security.revoke_fixture(unrelated.id)
+    after
+      :ok = :sys.resume(registry)
+    end
+
+    assert {{:ok, 1}, _elapsed} = Task.await(revoker)
+  end
+
+  test "security regression: a stale check retries a signed request and spends its nonce once",
+       ctx do
+    unrelated = grant_unrelated(ctx)
+    {cap, payload} = signed_grant_request(ctx)
+    proof = sign_request(ctx.actor, payload)
+    registry = Process.whereis(Registry)
+
+    task =
+      with_suspended(ctx.store, fn ->
+        task =
+          Task.async(fn ->
+            SystemAuthority.authorize_capability_mutation_proof(proof, :grant, cap)
+          end)
+
+        await_queued_calls(ctx.store, 1)
+        :ok = :sys.suspend(registry)
+        task
+      end)
+
+    try do
+      await_queued_calls(registry, 1)
+      assert :ok = Security.revoke_fixture(unrelated.id)
+    after
+      :ok = :sys.resume(registry)
+    end
+
+    assert {:ok, ^cap, receipt} = Task.await(task)
+    assert {:ok, _signed_cap} = CapabilityStore.put_authorized(cap, :grant, receipt)
+
+    assert {:error, :capability_mutation_unauthorized} =
+             SystemAuthority.authorize_capability_mutation_proof(proof, :grant, cap)
+  end
+
+  test "security regression: a proof can authorize delegation from its exact parent", ctx do
+    assert {:ok, parent} =
+             Security.grant_fixture(
+               principal: ctx.actor.agent_id,
+               resource: "arbor://fs/read/delegation-proof"
+             )
+
+    assert {:ok, child} = Capability.delegate(parent, ctx.target.agent_id)
+    child = %{child | metadata: %{"granter_id" => ctx.actor.agent_id}}
+    link = Signer.sign_delegation(parent, child, ctx.actor.private_key)
+    child = %{child | delegation_chain: parent.delegation_chain ++ [link]}
+
+    assert {:ok, payload} = SystemAuthority.capability_mutation_request_payload(:delegate, child)
+    proof = sign_request(ctx.actor, payload)
+
+    assert {:ok, ^child, receipt} =
+             SystemAuthority.authorize_capability_mutation_proof(proof, :delegate, child)
+
+    assert {:ok, delegated} = CapabilityStore.put_authorized(child, :delegate, receipt)
+    assert delegated.parent_capability_id == parent.id
+  end
+
+  test "security regression: canonical map and keyword proofs get a view", ctx do
+    {cap, payload} = signed_grant_request(ctx)
+
+    for encode <- [&Map.from_struct/1, &(Map.from_struct(&1) |> Map.to_list())] do
+      proof = ctx.actor |> sign_request(payload) |> encode.()
+
+      assert {:ok, ^cap, _receipt} =
+               SystemAuthority.authorize_capability_mutation_proof(proof, :grant, cap)
+
+      assert {:error, :capability_mutation_unauthorized} =
+               SystemAuthority.authorize_capability_mutation_proof(proof, :grant, cap)
+    end
+  end
+
+  test "security regression: an unrecorded lease cannot queue a view", ctx do
+    authority = open_authority(ctx.actor)
+    forged = %{authority | token: :crypto.strong_rand_bytes(32)}
+    assert %SigningAuthority{} = forged
+
+    with_suspended(ctx.store, fn ->
+      assert {:error, :capability_revocation_unauthorized} =
+               view_call(
+                 {:issue_capability_revocation_attestation, forged, :revoke_all,
+                  ctx.target.agent_id},
+                 250
+               )
+
+      assert {:message_queue_len, 0} = Process.info(ctx.store, :message_queue_len)
+    end)
+  end
+
+  test "security regression: a malformed or oversized parent cannot queue a view", ctx do
+    authority = open_authority(ctx.actor)
+    {cap, _payload} = signed_grant_request(ctx)
+
+    with_suspended(ctx.store, fn ->
+      for id <- [String.duplicate("p", 257), %{}] do
+        child = %{cap | parent_capability_id: id}
+
+        assert {:error, :capability_mutation_unauthorized} =
+                 view_call({:authorize_capability_mutation, authority, :delegate, child}, 250)
+
+        assert {:message_queue_len, 0} = Process.info(ctx.store, :message_queue_len)
+      end
+    end)
+  end
+
+  test "security regression: a proof with a bad signature cannot queue or consume a nonce", ctx do
+    {cap, payload} = signed_grant_request(ctx)
+    proof = sign_request(ctx.actor, payload)
+    invalid = %{proof | signature: <<0::512>>}
+
+    with_suspended(ctx.store, fn ->
+      assert {:error, :capability_mutation_unauthorized} =
+               view_call({:authorize_capability_mutation_proof, invalid, :grant, cap}, 250)
+
+      assert {:message_queue_len, 0} = Process.info(ctx.store, :message_queue_len)
+    end)
+
+    assert {:ok, ^cap, _receipt} =
+             SystemAuthority.authorize_capability_mutation_proof(proof, :grant, cap)
+  end
+
+  test "security regression: view expiry reports the operation-specific errors", ctx do
+    authority = open_authority(ctx.actor)
+    digest = String.duplicate("a", 64)
+
+    assert {:error, :issuer_mutation_unauthorized} =
+             view_call({:issue_issuer_mutation_attestation, authority, :register, digest}, -1)
+
+    assert {:error, :identity_registration_unauthorized} =
+             view_call({:issue_identity_registration_attestation, authority, digest}, -1)
+  end
+
+  test "security regression: the 65th admitted request is refused and completed slots reopen",
+       ctx do
+    {cap, payload} = signed_grant_request(ctx)
+
+    tasks =
+      with_suspended(ctx.store, fn ->
+        tasks =
+          for _ <- 1..64 do
+            proof = sign_request(ctx.actor, payload)
+
+            Task.async(fn ->
+              SystemAuthority.authorize_capability_mutation_proof(proof, :grant, cap)
+            end)
+          end
+
+        await_queued_calls(ctx.store, 64)
+        proof = sign_request(ctx.actor, payload)
+
+        assert {:error, :capability_mutation_unauthorized} =
+                 SystemAuthority.authorize_capability_mutation_proof(proof, :grant, cap)
+
+        assert {:message_queue_len, 64} = Process.info(ctx.store, :message_queue_len)
+        tasks
+      end)
+
+    for task <- tasks do
+      assert {:ok, ^cap, _receipt} = Task.await(task)
+    end
+
+    assert {:ok, ^cap, _receipt} =
+             SystemAuthority.authorize_capability_mutation_proof(
+               sign_request(ctx.actor, payload),
+               :grant,
+               cap
+             )
+  end
+
+  test "security regression: requester death leaves its late store reply without authority",
+       ctx do
+    {cap, payload} = signed_grant_request(ctx)
+    proof = sign_request(ctx.actor, payload)
+
+    with_suspended(ctx.store, fn ->
+      task =
+        Task.async(fn ->
+          SystemAuthority.authorize_capability_mutation_proof(proof, :grant, cap)
+        end)
+
+      await_queued_calls(ctx.store, 1)
+      assert nil == Task.shutdown(task, :brutal_kill)
+    end)
+
+    assert {:ok, ^cap, _receipt} =
+             SystemAuthority.authorize_capability_mutation_proof(proof, :grant, cap)
+  end
+
+  test "security regression: a view reply after the original deadline cannot spend the proof",
+       ctx do
+    {cap, payload} = signed_grant_request(ctx)
+    proof = sign_request(ctx.actor, payload)
+
+    with_suspended(ctx.store, fn ->
+      task =
+        Task.async(fn ->
+          view_call({:authorize_capability_mutation_proof, proof, :grant, cap}, 500)
+        end)
+
+      await_queued_calls(ctx.store, 1)
+      assert {:error, :capability_mutation_unauthorized} = Task.await(task)
+    end)
+
+    assert {:ok, ^cap, _receipt} =
+             SystemAuthority.authorize_capability_mutation_proof(proof, :grant, cap)
+  end
+
+  test "security regression: a restarted store cannot complete the former owner's request", ctx do
+    {cap, payload} = signed_grant_request(ctx)
+    proof = sign_request(ctx.actor, payload)
+    monitor = Process.monitor(ctx.store)
+    :ok = :sys.suspend(ctx.store)
+
+    try do
+      task =
+        Task.async(fn ->
+          SystemAuthority.authorize_capability_mutation_proof(proof, :grant, cap)
+        end)
+
+      await_queued_calls(ctx.store, 1)
+      Process.exit(ctx.store, :kill)
+      assert_receive {:DOWN, ^monitor, :process, _, :killed}, 2_000
+      assert {:error, :capability_mutation_unauthorized} = Task.await(task)
+    after
+      if Process.alive?(ctx.store), do: :sys.resume(ctx.store)
+    end
+
+    assert wait_for_replacement(ctx.store, System.monotonic_time(:millisecond) + 2_000)
+    assert is_map(CapabilityStore.stats())
+  end
+
+  defp wait_for_replacement(previous, deadline) do
+    case Process.whereis(CapabilityStore) do
+      pid when is_pid(pid) and pid != previous ->
+        true
+
+      _ ->
+        if System.monotonic_time(:millisecond) < deadline do
+          Process.sleep(1)
+          wait_for_replacement(previous, deadline)
+        else
+          false
+        end
+    end
+  end
+
+  defp grant_unrelated(ctx) do
+    assert {:ok, cap} =
+             Security.grant_fixture(
+               principal: ctx.actor.agent_id,
+               resource: "arbor://fs/read/unrelated"
+             )
+
+    cap
+  end
+
+  defp signed_grant_request(ctx) do
+    assert {:ok, _right} =
+             Security.grant_fixture(
+               principal: ctx.actor.agent_id,
+               resource: "arbor://security/grant/#{ctx.target.agent_id}"
+             )
+
+    assert {:ok, cap} =
+             Capability.new(
+               principal_id: ctx.target.agent_id,
+               resource_uri: "arbor://fs/read/signed-grant",
+               metadata: %{"granter_id" => ctx.actor.agent_id}
+             )
+
+    assert {:ok, payload} = SystemAuthority.capability_mutation_request_payload(:grant, cap)
+    {cap, payload}
+  end
+
+  defp sign_request(actor, payload) do
+    assert {:ok, proof} = SignedRequest.sign(payload, actor.agent_id, actor.private_key)
+    proof
+  end
+
+  defp view_call(request, timeout) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+
+    Custody.authenticated_call(
+      Process.whereis(SystemAuthority),
+      {:with_capability_view, request, deadline}
+    )
+  end
+
+  defp with_suspended(pid, fun) do
+    :ok = :sys.suspend(pid)
+
+    try do
+      fun.()
+    after
+      :ok = :sys.resume(pid)
+    end
+  end
+
+  defp open_authority(actor) do
+    {:ok, proof} =
+      Security.build_signing_authority_acquisition_proof(actor.agent_id, actor.private_key,
+        purpose: :authority_store_call_cycle
+      )
+
+    {:ok, authority} = Security.open_ephemeral_signing_authority(proof, actor.private_key)
+    authority
   end
 
   defp start_revoker(actor, target_id) do
