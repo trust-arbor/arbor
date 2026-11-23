@@ -486,6 +486,27 @@ defmodule Arbor.Agent.MessageToolTaintSecurityRegressionTest do
     end
   end
 
+  test "security regression: private transcript repo does not pass a filesystem path to Postgrex" do
+    postgres =
+      transcript_repo_opts(
+        "Elixir.Ecto.Adapters.Postgres",
+        "/tmp/message_tool_taint_repo_1",
+        "message_tool_taint_1"
+      )
+
+    assert postgres[:database] == "message_tool_taint_1"
+    refute String.contains?(postgres[:database], "/")
+
+    sqlite =
+      transcript_repo_opts(
+        "Elixir.Ecto.Adapters.SQLite3",
+        "/tmp/message_tool_taint_repo_1",
+        "message_tool_taint_1"
+      )
+
+    assert sqlite[:database] == "/tmp/message_tool_taint_repo_1/transcript.sqlite3"
+  end
+
   defp start_private_transcript_repo!(repo) do
     root =
       Path.join(
@@ -494,21 +515,77 @@ defmodule Arbor.Agent.MessageToolTaintSecurityRegressionTest do
       )
 
     File.mkdir_p!(root)
+    adapter = Atom.to_string(repo.__adapter__())
+    database = "message_tool_taint_#{System.unique_integer([:positive])}"
 
-    start_supervised!(
-      {repo,
-       [
-         database: Path.join(root, "transcript.sqlite3"),
-         pool: DBConnection.ConnectionPool,
-         pool_size: 4,
-         busy_timeout: 5_000,
-         journal_mode: :wal
-       ]}
-    )
+    if adapter == "Elixir.Ecto.Adapters.Postgres" do
+      create_postgres_database!(repo, database)
+      # Registered before start_supervised!'s own on_exit, so it runs after
+      # the pool has stopped and DROP DATABASE can proceed.
+      on_exit(fn -> drop_postgres_database!(repo, database) end)
+    end
+
+    start_supervised!({repo, transcript_repo_opts(adapter, root, database)})
 
     Ecto.Migrator.run(repo, @migrations, :up, all: true, log: false)
     on_exit(fn -> File.rm_rf(root) end)
     :ok
+  end
+
+  # ARBOR_DB=postgres compiles this Repo as Postgrex. A sqlite file path is
+  # then an invalid catalog name (3D000). The private pool keeps a real
+  # database name in that lane and a file path only for SQLite.
+  defp transcript_repo_opts("Elixir.Ecto.Adapters.Postgres", _root, database) do
+    [
+      database: database,
+      pool: DBConnection.ConnectionPool,
+      pool_size: 4
+    ]
+  end
+
+  defp transcript_repo_opts(_adapter, root, _database) do
+    [
+      database: Path.join(root, "transcript.sqlite3"),
+      pool: DBConnection.ConnectionPool,
+      pool_size: 4,
+      busy_timeout: 5_000,
+      journal_mode: :wal
+    ]
+  end
+
+  defp create_postgres_database!(repo, database) do
+    with_postgres_maintenance!(repo, database, fn pid ->
+      Postgrex.query!(pid, "CREATE DATABASE #{database}", [])
+    end)
+  end
+
+  defp drop_postgres_database!(repo, database) do
+    with_postgres_maintenance!(repo, database, fn pid ->
+      Postgrex.query!(pid, "DROP DATABASE IF EXISTS #{database}", [])
+    end)
+  end
+
+  defp with_postgres_maintenance!(repo, database, fun) do
+    unless database =~ ~r/\A[a-z][a-z0-9_]*\z/ do
+      raise ArgumentError, "refusing unsafe transcript database name"
+    end
+
+    config = repo.config()
+
+    {:ok, pid} =
+      Postgrex.start_link(
+        hostname: config[:hostname] || "localhost",
+        port: config[:port] || 5432,
+        username: config[:username],
+        password: config[:password],
+        database: "postgres"
+      )
+
+    try do
+      fun.(pid)
+    after
+      GenServer.stop(pid)
+    end
   end
 
   # Chat admission resolves the caller through IdentityAliasResolver, which
