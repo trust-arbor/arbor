@@ -892,7 +892,18 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionRestartTest do
 
       assert Map.has_key?(ControllableRetentionStore.entries(store_name), key)
       :ok = ControllableRetentionStore.release_put(store_name)
-      assert_receive {:initial_active_acquire_reply, {:ok, lease}}, 3_000
+
+      lease =
+        receive do
+          {:initial_active_acquire_reply, {:ok, received_lease}} ->
+            received_lease
+
+          {:initial_active_acquire_reply, other} ->
+            flunk("initial active acquire failed: #{inspect(other, limit: 20)}")
+        after
+          3_000 ->
+            flunk(initial_active_acquire_diagnostics(owner, server, store_name))
+        end
 
       assert {:ok, ^key} = Core.record_key(lease.workspace_id)
       assert {:ok, marker} = Persistence.get(store_name, backend, key)
@@ -4066,6 +4077,46 @@ defmodule Arbor.Actions.Coding.WorkspaceRetentionRestartTest do
 
   defp active_count(server),
     do: map_size(:sys.get_state(server_pid(server), @archive_callback_timeout).leases)
+
+  # The 3s budget after release_put includes git worktree add. On a timeout,
+  # show the owner mailbox and registry instead of only "assert_receive failed".
+  # A macOS host still has to confirm whether worktree creation exceeds 3s.
+  defp initial_active_acquire_diagnostics(owner, server, store_name) do
+    owner_view =
+      if is_pid(owner) and Process.alive?(owner) do
+        %{
+          messages: Process.info(owner, :messages),
+          stacktrace: Process.info(owner, :current_stacktrace)
+        }
+      else
+        :owner_dead
+      end
+
+    registry_view =
+      try do
+        state = :sys.get_state(server_pid(server), 200)
+        %{leases: map_size(state.leases), retained: map_size(state.retained_by_id)}
+      catch
+        :exit, reason -> {:registry_unavailable, reason}
+      end
+
+    store_keys =
+      try do
+        Map.keys(ControllableRetentionStore.entries(store_name))
+      catch
+        :exit, reason -> {:store_unavailable, reason}
+      end
+
+    """
+    initial active acquire did not reply within 3000ms after the held put was released.
+    That window is where the owned git worktree is created. Confirm on macOS before
+    treating a longer budget as a fix.
+    owner=#{inspect(owner_view, limit: 30, pretty: true)}
+    parent_messages=#{inspect(elem(Process.info(self(), :messages), 1), limit: 20)}
+    registry=#{inspect(registry_view)}
+    store_keys=#{inspect(store_keys)}
+    """
+  end
 
   defp retained_target_and_generation(server) do
     [{target, retained}] =

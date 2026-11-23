@@ -1611,6 +1611,10 @@ defmodule Arbor.Actions.Coding.CrossApp.ShellTest do
        %{
          worktree: worktree
        } do
+    # Real monotonic time makes min(operation, remaining) 1ms under the
+    # requested operation timeout once any earlier stage has run. Freeze the
+    # clock the way the sibling budget tests do.
+    Application.put_env(:arbor_actions, :cross_app_monotonic_ms, fn -> 0 end)
     parent = self()
     mkdir_app_tests!(worktree, ["arbor_actions", "arbor_security"])
 
