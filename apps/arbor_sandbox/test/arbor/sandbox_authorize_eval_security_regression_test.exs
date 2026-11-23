@@ -24,17 +24,12 @@ defmodule Arbor.SandboxAuthorizeEvalSecurityRegressionTest do
   setup do
     {:ok, _} = Application.ensure_all_started(:arbor_capabilities)
 
-    unless Process.whereis(Arbor.Security.Identity.Registry) do
-      start_supervised!({Arbor.Security.Identity.Registry, []})
-    end
-
-    unless Process.whereis(Arbor.Security.SystemAuthority) do
-      start_supervised!({Arbor.Security.SystemAuthority, []})
-    end
-
-    unless Process.whereis(Arbor.Security.CapabilityStore) do
-      start_supervised!({Arbor.Security.CapabilityStore, []})
-    end
+    # Test config boots Capabilities with start_children: false. A bare
+    # start_supervised! SystemAuthority occupies the name without the
+    # supervised owner directory, so grant_fixture/1 returns
+    # :system_authority_unavailable. The canonical bootstrap is idempotent
+    # and is what a full umbrella run already left behind.
+    assert :ok = Arbor.Security.TestBootstrap.start!()
 
     unique = System.unique_integer([:positive])
     caller_id = "agent_p1d_eval_caller_#{unique}"
