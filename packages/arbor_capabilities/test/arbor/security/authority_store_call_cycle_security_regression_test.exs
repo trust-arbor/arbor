@@ -11,7 +11,10 @@ defmodule Arbor.Security.AuthorityStoreCallCycleSecurityRegressionTest do
   alias Arbor.Security
   alias Arbor.Security.Capability.Signer
   alias Arbor.Security.CapabilityStore
+  alias Arbor.Security.Identity.NonceCache
   alias Arbor.Security.Identity.Registry
+  alias Arbor.Security.Identity.Verifier
+  alias Arbor.Security.IssuerRegistry
   alias Arbor.Security.SystemAuthority
   alias Arbor.Security.TestAuditConsumer
 
@@ -389,19 +392,213 @@ defmodule Arbor.Security.AuthorityStoreCallCycleSecurityRegressionTest do
     assert is_map(CapabilityStore.stats())
   end
 
+  test "security regression: concurrent copies of one proof use one slot and issue one receipt",
+       ctx do
+    {cap, payload} = signed_grant_request(ctx)
+    proof = sign_request(ctx.actor, payload)
+    submit = fn -> SystemAuthority.authorize_capability_mutation_proof(proof, :grant, cap) end
+
+    winner =
+      with_suspended(ctx.store, fn ->
+        first = Task.async(submit)
+        await_queued_calls(ctx.store, 1)
+        duplicates = for _ <- 1..64, do: Task.async(submit)
+
+        for {_task, result} <- Task.yield_many(duplicates, 1_500) do
+          assert {:ok, {:error, :capability_mutation_unauthorized}} = result
+        end
+
+        assert {:message_queue_len, 1} = Process.info(ctx.store, :message_queue_len)
+        first
+      end)
+
+    assert {:ok, ^cap, receipt} = Task.await(winner)
+    assert {:ok, _signed_cap} = CapabilityStore.put_authorized(cap, :grant, receipt)
+    assert {:error, :capability_mutation_unauthorized} = submit.()
+  end
+
+  test "security regression: a spent issuer proof queues no store request", ctx do
+    {proof, digest} = signed_issuer_request(ctx)
+
+    assert {:ok, _receipt} =
+             SystemAuthority.issue_issuer_mutation_attestation_proof(proof, :register, digest)
+
+    with_suspended(ctx.store, fn ->
+      assert {:error, :issuer_mutation_unauthorized} =
+               view_call(
+                 {:issue_issuer_mutation_attestation_proof, proof, :register, digest},
+                 250
+               )
+
+      assert {:message_queue_len, 0} = Process.info(ctx.store, :message_queue_len)
+    end)
+  end
+
+  test "security regression: a nonce recorded after admission prevents issuance", ctx do
+    {proof, digest} = signed_issuer_request(ctx)
+    actor_id = ctx.actor.agent_id
+
+    task =
+      with_suspended(ctx.store, fn ->
+        task =
+          Task.async(fn ->
+            SystemAuthority.issue_issuer_mutation_attestation_proof(proof, :register, digest)
+          end)
+
+        await_queued_calls(ctx.store, 1)
+        assert {:ok, ^actor_id} = Verifier.verify(proof)
+        task
+      end)
+
+    assert {:error, :issuer_mutation_unauthorized} = Task.await(task)
+  end
+
+  test "security regression: exhausting stale-view retries leaves the proof usable", ctx do
+    {cap, payload} = signed_grant_request(ctx)
+    proof = sign_request(ctx.actor, payload)
+    submit = fn -> SystemAuthority.authorize_capability_mutation_proof(proof, :grant, cap) end
+    registry = Process.whereis(Registry)
+
+    with_suspended(ctx.store, fn ->
+      task = Task.async(submit)
+
+      for _ <- 1..3 do
+        await_queued_calls(ctx.store, 1)
+
+        with_suspended(registry, fn ->
+          :ok = :sys.resume(ctx.store)
+          await_queued_calls(registry, 1)
+          :ok = :sys.suspend(ctx.store)
+          :ok = :sys.change_code(ctx.store, CapabilityStore, :test_revision, [])
+        end)
+      end
+
+      assert {:error, :capability_mutation_unauthorized} = Task.await(task)
+    end)
+
+    assert {:ok, ^cap, _receipt} = submit.()
+  end
+
+  test "security regression: requester death before late nonce recording leaves an issuer proof usable",
+       ctx do
+    {proof, digest} = signed_issuer_request(ctx)
+
+    submit = fn ->
+      SystemAuthority.issue_issuer_mutation_attestation_proof(proof, :register, digest)
+    end
+
+    nonce_cache = Process.whereis(NonceCache)
+
+    with_suspended(ctx.store, fn ->
+      task = Task.async(submit)
+      await_queued_calls(ctx.store, 1)
+
+      with_suspended(nonce_cache, fn ->
+        :ok = :sys.resume(ctx.store)
+        await_queued_calls(nonce_cache, 1)
+        assert nil == Task.shutdown(task, :brutal_kill)
+        :ok = :sys.suspend(ctx.store)
+      end)
+    end)
+
+    assert {:ok, _receipt} = submit.()
+  end
+
+  test "security regression: stale retries preserve the issuer handler's unavailable error",
+       ctx do
+    authority_process = Process.whereis(IssuerRegistry)
+    supervisor = Process.whereis(Arbor.Security.Supervisor)
+    digest = String.duplicate("a", 64)
+    true = Process.unregister(IssuerRegistry)
+
+    try do
+      with_suspended(ctx.store, fn ->
+        task =
+          Task.async(fn ->
+            authority = open_authority(ctx.actor)
+            SystemAuthority.issue_issuer_mutation_attestation(authority, :register, digest)
+          end)
+
+        for _ <- 1..3 do
+          await_queued_calls(ctx.store, 1)
+
+          with_suspended(supervisor, fn ->
+            :ok = :sys.resume(ctx.store)
+            await_queued_calls(supervisor, 1)
+            :ok = :sys.suspend(ctx.store)
+            :ok = :sys.change_code(ctx.store, CapabilityStore, :test_revision, [])
+          end)
+        end
+
+        assert {:error, :issuer_mutation_authority_unavailable} = Task.await(task)
+      end)
+    after
+      true = Process.register(authority_process, IssuerRegistry)
+    end
+  end
+
+  test "security regression: a delegation proof binds the parent, principal, and operation",
+       ctx do
+    assert {:ok, parent} =
+             Security.grant_fixture(
+               principal: ctx.actor.agent_id,
+               resource: "arbor://fs/read/delegation-proof-binding"
+             )
+
+    assert {:ok, child} = Capability.delegate(parent, ctx.target.agent_id)
+    child = %{child | metadata: %{"granter_id" => ctx.actor.agent_id}}
+    link = Signer.sign_delegation(parent, child, ctx.actor.private_key)
+    child = %{child | delegation_chain: [link]}
+    assert {:ok, payload} = SystemAuthority.capability_mutation_request_payload(:delegate, child)
+    proof = sign_request(ctx.actor, payload)
+
+    for {operation, changed} <- [
+          {:delegate, %{child | parent_capability_id: ctx.capability.id}},
+          {:delegate, %{child | principal_id: ctx.actor.agent_id}},
+          {:grant, child}
+        ] do
+      assert {:error, :capability_mutation_unauthorized} =
+               SystemAuthority.authorize_capability_mutation_proof(proof, operation, changed)
+    end
+
+    assert {:ok, ^child, _receipt} =
+             SystemAuthority.authorize_capability_mutation_proof(proof, :delegate, child)
+  end
+
+  defp signed_issuer_request(ctx) do
+    assert {:ok, _right} =
+             Security.grant_fixture(
+               principal: ctx.actor.agent_id,
+               resource: "arbor://security/issuer/register"
+             )
+
+    digest = String.duplicate("a", 64)
+    assert {:ok, payload} = SystemAuthority.issuer_mutation_request_payload(:register, digest)
+    {sign_request(ctx.actor, payload), digest}
+  end
+
   defp wait_for_replacement(previous, deadline) do
-    case Process.whereis(CapabilityStore) do
-      pid when is_pid(pid) and pid != previous ->
+    cond do
+      ready_replacement?(previous) ->
         true
 
-      _ ->
-        if System.monotonic_time(:millisecond) < deadline do
-          Process.sleep(1)
-          wait_for_replacement(previous, deadline)
-        else
-          false
-        end
+      System.monotonic_time(:millisecond) < deadline ->
+        Process.sleep(1)
+        wait_for_replacement(previous, deadline)
+
+      true ->
+        false
     end
+  end
+
+  defp ready_replacement?(previous) do
+    with pid when is_pid(pid) and pid != previous <- Process.whereis(CapabilityStore) do
+      is_map(CapabilityStore.stats())
+    else
+      _ -> false
+    end
+  catch
+    :exit, _ -> false
   end
 
   defp grant_unrelated(ctx) do

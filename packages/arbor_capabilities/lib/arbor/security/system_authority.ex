@@ -48,6 +48,7 @@ defmodule Arbor.Security.SystemAuthority do
   alias Arbor.Security.PrivateMemory
   alias Arbor.Security.PrivateState
   alias Arbor.Security.Crypto
+  alias Arbor.Security.Identity.NonceCache
   alias Arbor.Security.Identity.Registry
   alias Arbor.Security.Identity.Verifier
   alias Arbor.Security.IssuerRegistry
@@ -1398,7 +1399,8 @@ defmodule Arbor.Security.SystemAuthority do
                actor_id,
                "arbor://security/issuer/#{operation}",
                state
-             ) do
+             ),
+           :ok <- claim_capability_view_proof(state, canonical_proof) do
         now = DateTime.utc_now() |> DateTime.truncate(:second)
         expires_at = DateTime.add(now, @issuer_mutation_attestation_ttl_seconds, :second)
         token = Base.url_encode64(:crypto.strong_rand_bytes(32), padding: false)
@@ -1437,6 +1439,7 @@ defmodule Arbor.Security.SystemAuthority do
 
     case result do
       {:ok, proof, next_state} -> {:reply, {:ok, proof}, next_state}
+      {:error, :nonce_commit_failed} = error -> {:reply, error, state}
       {:error, _reason} -> {:reply, {:error, :issuer_mutation_unauthorized}, state}
     end
   end
@@ -1725,7 +1728,8 @@ defmodule Arbor.Security.SystemAuthority do
                @max_capability_mutation_attestations,
            consumer when is_pid(consumer) <-
              supervised_registered_child_pid(state, CapabilityStore, CapabilityStore),
-           :ok <- authorize_capability_mutation_actor(actor_id, operation, cap, state) do
+           :ok <- authorize_capability_mutation_actor(actor_id, operation, cap, state),
+           :ok <- claim_capability_view_proof(state, canonical_proof) do
         now = DateTime.utc_now() |> DateTime.truncate(:second)
         expires_at = DateTime.add(now, @capability_mutation_attestation_ttl_seconds, :second)
         token = Base.url_encode64(:crypto.strong_rand_bytes(32), padding: false)
@@ -1766,6 +1770,9 @@ defmodule Arbor.Security.SystemAuthority do
     case result do
       {:ok, authorized_cap, proof, next_state} ->
         {:reply, {:ok, authorized_cap, proof}, next_state}
+
+      {:error, :nonce_commit_failed} = error ->
+        {:reply, error, state}
 
       {:error, _reason} ->
         {:reply, {:error, :capability_mutation_unauthorized}, state}
@@ -2060,16 +2067,16 @@ defmodule Arbor.Security.SystemAuthority do
     end
   end
 
-  defp admit_capability_view_actor({:issuer_proof, proof, operation, digest}, _caller, _state) do
+  defp admit_capability_view_actor({:issuer_proof, proof, operation, digest}, _caller, state) do
     with {:ok, payload} <- issuer_mutation_request_payload(operation, digest) do
-      admit_capability_view_proof(proof, payload)
+      admit_capability_view_proof(proof, payload, state)
     end
   end
 
-  defp admit_capability_view_actor({:capability_proof, proof, operation, cap}, _caller, _state) do
+  defp admit_capability_view_actor({:capability_proof, proof, operation, cap}, _caller, state) do
     with :ok <- validate_capability_mutation_request(operation, cap),
          {:ok, payload} <- capability_mutation_request_payload(operation, cap),
-         {:ok, actor, _canonical} = admitted <- admit_capability_view_proof(proof, payload),
+         {:ok, actor, _canonical} = admitted <- admit_capability_view_proof(proof, payload, state),
          true <- capability_granter_id(cap) == actor do
       admitted
     end
@@ -2077,11 +2084,21 @@ defmodule Arbor.Security.SystemAuthority do
     _ -> {:error, :capability_mutation_unauthorized}
   end
 
-  defp admit_capability_view_proof(proof, payload) do
-    with {:ok, %SignedRequest{payload: ^payload} = canonical} <- SignedRequest.canonicalize(proof),
-         {:ok, actor} <- Verifier.verify_without_recording_nonce(canonical) do
+  defp admit_capability_view_proof(proof, payload, state) do
+    with {:ok, %SignedRequest{payload: ^payload, nonce: nonce} = canonical} <-
+           SignedRequest.canonicalize(proof),
+         false <- capability_view_nonce_pending?(state, nonce),
+         {:ok, actor} <- Verifier.verify_without_recording_nonce(canonical),
+         :ok <- NonceCache.check_available(nonce) do
       {:ok, actor, canonical}
     end
+  end
+
+  defp capability_view_nonce_pending?(state, nonce) do
+    Enum.any?(Map.get(state, :capability_view_jobs, %{}), fn
+      {_ref, %{proof: %SignedRequest{nonce: ^nonce}}} -> true
+      _ -> false
+    end)
   end
 
   defp dispatch_authenticated({:with_capability_view, request, deadline}, from, state)
@@ -2121,7 +2138,6 @@ defmodule Arbor.Security.SystemAuthority do
             error: error,
             deadline: deadline,
             proof: proof,
-            proof_consumed?: false,
             retries: @max_capability_view_retries
           }
 
@@ -2181,8 +2197,8 @@ defmodule Arbor.Security.SystemAuthority do
   defp finish_capability_view({:reply, {:ok, revision, caps, cap}}, job, state) do
     if capability_view_job_live?(job, state) do
       if CapabilityStore.authorization_view_current?(job.store, revision) do
-        case authenticate_capability_view_proof(job) do
-          {:ok, current_job} -> run_capability_view(current_job, revision, caps, cap, state)
+        case authenticate_capability_view_proof(job.proof) do
+          :ok -> run_capability_view(job, revision, caps, cap, state)
           {:error, _reason} -> {:reply, {:error, job.error}, state}
         end
       else
@@ -2196,14 +2212,18 @@ defmodule Arbor.Security.SystemAuthority do
   defp finish_capability_view(_result, job, state), do: {:reply, {:error, job.error}, state}
 
   defp retry_capability_view(job, state) do
+    retry_capability_view(job, state, Map.get(job, :retry_error, {:error, job.error}))
+  end
+
+  defp retry_capability_view(job, state, error) do
     if job.retries > 0 and capability_view_job_live?(job, state) do
       enqueue_capability_view(
-        %{job | retries: job.retries - 1},
+        Map.put(%{job | retries: job.retries - 1}, :retry_error, error),
         state.capability_view_requests,
         state
       )
     else
-      {:reply, {:error, job.error}, state}
+      {:reply, error, state}
     end
   end
 
@@ -2213,13 +2233,16 @@ defmodule Arbor.Security.SystemAuthority do
 
     if capability_view_current?(state_with_view) do
       case handle_authenticated_request(job.request, job.from, state_with_view) do
+        {:reply, {:error, :nonce_commit_failed}, next_state} ->
+          {:reply, {:error, job.error}, Map.delete(next_state, :capability_authorization_view)}
+
         {:reply, {:error, _reason} = error, next_state} ->
           next_state = Map.delete(next_state, :capability_authorization_view)
 
           if retryable_view_error?(job.request, error) and
                capability_view_job_live?(job, next_state) and
                not CapabilityStore.authorization_view_current?(job.store, revision) do
-            retry_capability_view(job, next_state)
+            retry_capability_view(job, next_state, error)
           else
             {:reply, error, next_state}
           end
@@ -2242,26 +2265,44 @@ defmodule Arbor.Security.SystemAuthority do
 
   defp retryable_view_error?(_request, _error), do: true
 
-  # Only a live job that verified an operation-bound proof can carry a spent
-  # nonce forward. A different request must still win the one-use nonce check.
-  defp authenticate_capability_view_proof(%{proof: nil} = job), do: {:ok, job}
+  defp authenticate_capability_view_proof(nil), do: :ok
 
-  defp authenticate_capability_view_proof(%{proof_consumed?: true} = job) do
-    with {:ok, _actor} <- Verifier.verify_without_recording_nonce(job.proof), do: {:ok, job}
-  end
-
-  defp authenticate_capability_view_proof(job) do
-    with {:ok, _actor} <- Verifier.verify(job.proof), do: {:ok, %{job | proof_consumed?: true}}
+  defp authenticate_capability_view_proof(proof) do
+    with {:ok, _actor} <- Verifier.verify_without_recording_nonce(proof), do: :ok
   end
 
   defp verified_capability_view_actor(
-         %{capability_authorization_view: %{actor: actor, proof: proof, proof_consumed?: true}},
+         %{capability_authorization_view: %{actor: actor, proof: proof}},
          proof
        ),
        do: {:ok, actor}
 
   defp verified_capability_view_actor(_state, _proof),
     do: {:error, :security_mutation_unauthorized}
+
+  # The nonce owner checks the revision at the claim, so a view that goes
+  # stale while the claim is queued still allows a fresh attempt.
+  defp claim_capability_view_proof(%{capability_authorization_view: view} = state, proof) do
+    if capability_view_current?(state) do
+      {requester, _reply} = view.from
+      fence = {requester, view.deadline, view.store, view.revision}
+
+      case NonceCache.check_and_record_for_view(proof.nonce, Config.nonce_ttl_seconds(), fence) do
+        :ok ->
+          if capability_view_job_live?(view, state),
+            do: :ok,
+            else: {:error, :nonce_commit_failed}
+
+        {:error, :stale_capability_view} = error ->
+          error
+
+        {:error, _reason} ->
+          {:error, :nonce_commit_failed}
+      end
+    else
+      {:error, :stale_capability_view}
+    end
+  end
 
   defp handle_private_info(
          {:capability_view_deadline, ref},

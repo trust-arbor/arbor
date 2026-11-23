@@ -25,6 +25,7 @@ defmodule Arbor.Security.Identity.NonceCache do
 
   require Logger
 
+  alias Arbor.Security.CapabilityStore
   alias Arbor.Security.Config
   alias Arbor.Security.SignalSync
   alias Arbor.Security.SupervisedOwner
@@ -53,6 +54,23 @@ defmodule Arbor.Security.Identity.NonceCache do
           :ok | {:error, :replayed_nonce | :verification_unavailable}
   def check_and_record(nonce, ttl_seconds) when is_binary(nonce) and is_integer(ttl_seconds) do
     owner_call({:check_and_record, nonce, ttl_seconds}, {:error, :verification_unavailable})
+  end
+
+  @doc false
+  @spec check_available(binary()) :: :ok | {:error, :replayed_nonce | :verification_unavailable}
+  def check_available(nonce) when is_binary(nonce) and byte_size(nonce) == @nonce_bytes do
+    owner_call({:check_available, nonce}, {:error, :verification_unavailable})
+  end
+
+  @doc false
+  @spec check_and_record_for_view(binary(), pos_integer(), {pid(), integer(), pid(), reference()}) ::
+          :ok | {:error, :replayed_nonce | :verification_unavailable | :stale_capability_view}
+  def check_and_record_for_view(nonce, ttl, fence)
+      when is_binary(nonce) and byte_size(nonce) == @nonce_bytes and is_integer(ttl) do
+    owner_call(
+      {:check_and_record_for_view, nonce, ttl, fence},
+      {:error, :verification_unavailable}
+    )
   end
 
   @doc """
@@ -90,23 +108,33 @@ defmodule Arbor.Security.Identity.NonceCache do
   end
 
   @impl true
-  def handle_call({:check_and_record, nonce, ttl_seconds}, _from, state) do
-    now = System.system_time(:second)
-    state = update_in(state, [:stats, :total_checked], &(&1 + 1))
+  def handle_call({:check_available, nonce}, _from, state)
+      when is_binary(nonce) and byte_size(nonce) == @nonce_bytes do
+    result = if Map.has_key?(state.nonces, nonce), do: {:error, :replayed_nonce}, else: :ok
+    {:reply, result, state}
+  end
 
-    if Map.has_key?(state.nonces, nonce) do
-      state = update_in(state, [:stats, :total_rejected], &(&1 + 1))
-      {:reply, {:error, :replayed_nonce}, state}
+  def handle_call(
+        {:check_and_record_for_view, nonce, ttl, {requester, deadline, store, revision}},
+        _from,
+        state
+      )
+      when is_binary(nonce) and byte_size(nonce) == @nonce_bytes and is_integer(ttl) and
+             is_pid(requester) and is_integer(deadline) and is_pid(store) and
+             is_reference(revision) do
+    # A queued call rechecks the fence in the same callback that claims the nonce.
+    if node(requester) == node() and node(store) == node() and
+         deadline > System.monotonic_time(:millisecond) and Process.alive?(requester) and
+         CapabilityStore.authorization_view_current?(store, revision) do
+      record_nonce(state, nonce, ttl)
     else
-      expiry = now + ttl_seconds
-      state = put_in(state, [:nonces, nonce], expiry)
-      # Propagate to peer nodes so the nonce can't be replayed elsewhere.
-      emit_nonce_seen(state, nonce, expiry)
-      {:reply, :ok, state}
+      {:reply, {:error, :stale_capability_view}, state}
     end
   end
 
-  @impl true
+  def handle_call({:check_and_record, nonce, ttl}, _from, state),
+    do: record_nonce(state, nonce, ttl)
+
   def handle_call(:stats, _from, state) do
     stats =
       Map.merge(state.stats, %{
@@ -116,7 +144,6 @@ defmodule Arbor.Security.Identity.NonceCache do
     {:reply, stats, state}
   end
 
-  @impl true
   def handle_call(_request, _from, state) do
     {:reply, {:error, :unsupported_request}, state}
   end
@@ -228,6 +255,22 @@ defmodule Arbor.Security.Identity.NonceCache do
   end
 
   defp bounded_remote_expiry(_expiry, _now), do: :discard
+
+  defp record_nonce(state, nonce, ttl_seconds) do
+    now = System.system_time(:second)
+    state = update_in(state, [:stats, :total_checked], &(&1 + 1))
+
+    if Map.has_key?(state.nonces, nonce) do
+      state = update_in(state, [:stats, :total_rejected], &(&1 + 1))
+      {:reply, {:error, :replayed_nonce}, state}
+    else
+      expiry = now + ttl_seconds
+      state = put_in(state, [:nonces, nonce], expiry)
+      # Propagate to peer nodes so the nonce can't be replayed elsewhere.
+      emit_nonce_seen(state, nonce, expiry)
+      {:reply, :ok, state}
+    end
+  end
 
   defp cleanup_expired(state) do
     now = System.system_time(:second)

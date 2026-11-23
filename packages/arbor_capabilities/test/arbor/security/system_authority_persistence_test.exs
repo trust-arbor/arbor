@@ -7,6 +7,7 @@ defmodule Arbor.Security.SystemAuthorityPersistenceTest do
   alias Arbor.Identifiers
   alias Arbor.Security
   alias Arbor.Security.AuthorityStore
+  alias Arbor.Security.CapabilityStore
   alias Arbor.Security.Crypto
   alias Arbor.Security.SigningKeyStore
   alias Arbor.Security.SystemAuthority
@@ -27,6 +28,17 @@ defmodule Arbor.Security.SystemAuthorityPersistenceTest do
         :known_failure -> {:error, :key_mismatch}
         :reject -> {:error, :backend_rejected}
         :commit_then_error -> store(opts, key, record) && {:error, :reply_lost}
+        {:pause_known_failure, test, ref} -> pause_failed_put(test, ref)
+      end
+    end
+
+    defp pause_failed_put(test, ref) do
+      send(test, {:rotation_put, ref, self()})
+
+      receive do
+        {:release_rotation_put, ^ref} -> {:error, :key_mismatch}
+      after
+        3_000 -> {:error, :backend_timeout}
       end
     end
 
@@ -434,6 +446,54 @@ defmodule Arbor.Security.SystemAuthorityPersistenceTest do
 
     assert committed_identity.agent_id != identity.agent_id
     assert SystemAuthority.agent_id() == committed_identity.agent_id
+  end
+
+  test "security regression: a stale view cannot repeat a failed rotation past registration",
+       %{identity: identity, table: table} do
+    assert :ok = SystemAuthority.persist_keypair_for_test(identity)
+    Application.put_env(:arbor_capabilities, :system_authority_mode, :persistent)
+    restart_system_authority!()
+
+    {:ok, actor} = Identity.generate()
+    assert :ok = Security.register_identity_fixture(Identity.public_only(actor))
+
+    assert {:ok, _right} =
+             Security.grant_fixture(
+               principal: actor.agent_id,
+               resource: "arbor://security/authority/rotate"
+             )
+
+    ref = make_ref()
+    set_mode(table, :put_mode, {:pause_known_failure, self(), ref})
+
+    rotation =
+      Task.async(fn ->
+        {:ok, proof} =
+          Security.build_signing_authority_acquisition_proof(actor.agent_id, actor.private_key,
+            purpose: :rotation_retry_regression
+          )
+
+        {:ok, authority} = Security.open_ephemeral_signing_authority(proof, actor.private_key)
+        SystemAuthority.rotate(authority)
+      end)
+
+    assert_receive {:rotation_put, ^ref, writer}, 2_000
+
+    try do
+      store = Process.whereis(CapabilityStore)
+      :ok = :sys.suspend(store)
+
+      try do
+        :ok = :sys.change_code(store, CapabilityStore, :test_revision, [])
+      after
+        :ok = :sys.resume(store)
+      end
+    after
+      send(writer, {:release_rotation_put, ref})
+    end
+
+    assert {:error, {:rotation_failed, :invalid_store_record}} = Task.await(rotation)
+    assert SystemAuthority.agent_id() == identity.agent_id
   end
 
   test "security regression: private memory root stamps survive restart and reject offline rewrites" do
