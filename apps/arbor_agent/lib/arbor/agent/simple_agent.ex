@@ -152,7 +152,8 @@ defmodule Arbor.Agent.SimpleAgent do
           ContextCompactor.new(
             model: model,
             effective_window: Keyword.get(opts, :effective_window),
-            enable_llm_compaction: context_mode == :full
+            enable_llm_compaction: context_mode == :full,
+            agent_id: agent_id
           ),
           &ContextCompactor.append(&2, &1)
         )

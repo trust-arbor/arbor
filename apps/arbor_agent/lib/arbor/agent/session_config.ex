@@ -85,7 +85,7 @@ defmodule Arbor.Agent.SessionConfig do
 
     # Add compactor config if context management is enabled
     base =
-      case build_compactor_config(opts) do
+      case build_compactor_config(agent_id, opts) do
         nil -> base
         config -> Keyword.put(base, :compactor, config)
       end
@@ -165,7 +165,7 @@ defmodule Arbor.Agent.SessionConfig do
 
   # ── Compactor config ─────────────────────────────────────────────
 
-  defp build_compactor_config(opts) do
+  defp build_compactor_config(agent_id, opts) do
     context_management = Keyword.get(opts, :context_management, :full)
 
     if context_management != :none do
@@ -180,7 +180,8 @@ defmodule Arbor.Agent.SessionConfig do
           # compactor derives per-model, and its own @default_effective_window covers the no-model case.
           effective_window: Keyword.get(opts, :effective_window),
           model: Keyword.get(opts, :model),
-          enable_llm_compaction: context_management == :full
+          enable_llm_compaction: context_management == :full,
+          agent_id: agent_id
         ]
 
         {compactor_module, compactor_opts}
