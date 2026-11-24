@@ -147,6 +147,27 @@ defmodule Arbor.Actions.Web do
   def fetch_page(_url, _request_opts, _context), do: {:error, :invalid_web_request}
 
   @doc false
+  @spec credentialed_req_options(keyword(), map()) :: keyword()
+  def credentialed_req_options(opts, context \\ %{})
+
+  def credentialed_req_options(opts, context) when is_list(opts) and is_map(context) do
+    opts
+    |> maybe_merge_test_req_options(context)
+    |> pin_no_redirect()
+  end
+
+  def credentialed_req_options(opts, _context) when is_list(opts), do: pin_no_redirect(opts)
+
+  # Req follows redirects by default and only strips `authorization`/`auth` on a
+  # cross-origin hop — not `x-api-key`. Credentialed provider calls must not
+  # replay the key to another host.
+  defp pin_no_redirect(opts) when is_list(opts) do
+    opts
+    |> Keyword.put(:redirect, false)
+    |> Keyword.put(:max_redirects, 0)
+  end
+
+  @doc false
   def page_content(body, :html) when is_binary(body), do: body
   def page_content(body, format) when is_binary(body) and format in [:markdown, :text], do: body
 
@@ -279,8 +300,16 @@ defmodule Arbor.Actions.Web do
 
     defp maybe_put_option(options, _key, nil), do: options
     defp maybe_put_option(options, key, value), do: Keyword.put(options, key, value)
+
+    defp maybe_merge_test_req_options(opts, context) do
+      case Map.get(context, :req_http_options) do
+        extra when is_list(extra) -> Keyword.merge(opts, extra)
+        _other -> opts
+      end
+    end
   else
     defp ssrf_options(_context), do: []
+    defp maybe_merge_test_req_options(opts, _context), do: opts
   end
 
   # ============================================================================
@@ -601,7 +630,7 @@ defmodule Arbor.Actions.Web do
 
           case System.get_env("EXA_API_KEY") do
             key when is_binary(key) and key != "" ->
-              do_search(key, query, params)
+              do_search(key, query, params, context)
 
             _ ->
               err = "EXA_API_KEY not set"
@@ -614,7 +643,7 @@ defmodule Arbor.Actions.Web do
       end
     end
 
-    defp do_search(api_key, query, params) do
+    defp do_search(api_key, query, params, context) do
       body =
         %{
           "query" => query,
@@ -627,10 +656,12 @@ defmodule Arbor.Actions.Web do
 
       headers = [{"x-api-key", api_key}, {"content-type", "application/json"}]
 
-      case Req.post("https://api.exa.ai/search",
-             json: body,
-             headers: headers,
-             receive_timeout: 60_000
+      case Req.post(
+             "https://api.exa.ai/search",
+             Arbor.Actions.Web.credentialed_req_options(
+               [json: body, headers: headers, receive_timeout: 60_000],
+               context
+             )
            ) do
         {:ok, %{status: 200, body: %{"results" => results} = response}} when is_list(results) ->
           formatted =
@@ -757,7 +788,7 @@ defmodule Arbor.Actions.Web do
 
           case System.get_env("TINYFISH_API_KEY") do
             key when is_binary(key) and key != "" ->
-              do_search(key, query, params)
+              do_search(key, query, params, context)
 
             _ ->
               err = "TINYFISH_API_KEY not set"
@@ -770,7 +801,7 @@ defmodule Arbor.Actions.Web do
       end
     end
 
-    defp do_search(api_key, query, params) do
+    defp do_search(api_key, query, params, context) do
       headers = [{"x-api-key", api_key}, {"accept", "application/json"}]
 
       query_params =
@@ -780,10 +811,12 @@ defmodule Arbor.Actions.Web do
           {"language", Map.get(params, :language, "en")}
         ]
 
-      case Req.get("https://api.search.tinyfish.ai/",
-             params: query_params,
-             headers: headers,
-             receive_timeout: 60_000
+      case Req.get(
+             "https://api.search.tinyfish.ai/",
+             Arbor.Actions.Web.credentialed_req_options(
+               [params: query_params, headers: headers, receive_timeout: 60_000],
+               context
+             )
            ) do
         {:ok, %{status: 200, body: %{"results" => results} = response}} when is_list(results) ->
           {:ok, build_result(query, results, response)}
