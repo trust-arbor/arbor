@@ -184,9 +184,8 @@ defmodule Arbor.Actions.MemoryCode do
       Actions.emit_started(__MODULE__, params)
 
       with {:ok, agent_id} <- MemoryHelpers.extract_agent_id(context, params),
-           :ok <- MemoryHelpers.ensure_memory(agent_id) do
-        :ok = Arbor.Memory.delete_code(agent_id, params.entry_id)
-
+           :ok <- MemoryHelpers.ensure_memory(agent_id),
+           :ok <- Arbor.Memory.delete_code(agent_id, params.entry_id) do
         Actions.emit_completed(__MODULE__, %{entry_id: params.entry_id})
         {:ok, %{entry_id: params.entry_id, deleted: true}}
       else
