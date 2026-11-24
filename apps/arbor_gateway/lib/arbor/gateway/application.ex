@@ -12,6 +12,17 @@ defmodule Arbor.Gateway.Application do
 
   @impl true
   def start(_type, _args) do
+    case Arbor.Gateway.CommittedDevKey.boot_check() do
+      :ok ->
+        start_supervised_children()
+
+      {:error, {:committed_dev_key_refused, message}} = error ->
+        Logger.error("Arbor Gateway refused to boot: #{message}")
+        error
+    end
+  end
+
+  defp start_supervised_children do
     # MCP client supervisor (always started — manages external MCP connections)
     mcp_children =
       if Application.get_env(:arbor_gateway, :mcp_client_enabled, true) do
