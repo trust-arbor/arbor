@@ -9,7 +9,7 @@ defmodule Arbor.Common.ProjectContextTest do
     File.mkdir_p!(Path.join(root, ".git"))
     on_exit(fn -> File.rm_rf(root) end)
     # globals: [] so tests don't pick up the real ~/.claude/CLAUDE.md
-    {:ok, root: root, opts: [globals: []]}
+    {:ok, root: root, opts: [globals: [], trusted_roots: [root]]}
   end
 
   test "loads AGENTS.md from the project root, labeled with its source path", %{
